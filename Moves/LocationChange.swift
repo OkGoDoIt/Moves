@@ -577,7 +577,9 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
     let isDemoMode = false
     #endif
     private let assembler: TimelineAssembler
+    private let routeTrackingLiveActivity = RouteTrackingLiveActivityCoordinator()
     private var pendingOneShotLocationSource: LocationSampleSource?
+    private var pendingTemporaryRouteTrackingDuration: TemporaryRouteTrackingDuration?
     private var shouldChainToAlwaysAfterWhenInUse = false
     private var isHighAccuracyMonitoring = false
     private var temporaryRouteTrackingExpiryTask: Task<Void, Never>?
@@ -680,6 +682,10 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         let status = manager.authorizationStatus
         handleAuthorization(status)
         scheduleTemporaryRouteTrackingStoppedNotificationIfNeeded()
+        await routeTrackingLiveActivity.synchronize(
+            startedAt: temporaryRouteTrackingStartedAt,
+            endsAt: temporaryRouteTrackingEndsAt
+        )
 
         if status == .notDetermined {
             requestTrackingAuthorization()
@@ -748,7 +754,15 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
 
     func enableTemporaryRouteTracking(duration: TemporaryRouteTrackingDuration) {
         guard !shouldSkipLiveTracking else { return }
-        guard isAuthorizedForTracking else { return }
+        guard isAuthorizedForTracking else {
+            if authorizationStatus == .notDetermined {
+                pendingTemporaryRouteTrackingDuration = duration
+                requestTrackingAuthorization()
+            }
+            return
+        }
+
+        pendingTemporaryRouteTrackingDuration = nil
 
         temporaryRouteTrackingDuration = duration
         temporaryRouteTrackingStartedAt = .now
@@ -764,6 +778,12 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         scheduleTemporaryRouteTrackingStoppedNotificationIfNeeded()
         applyTrackingConfiguration()
         requestOneShotLocation(source: .routeTracking)
+        Task {
+            await routeTrackingLiveActivity.synchronize(
+                startedAt: temporaryRouteTrackingStartedAt,
+                endsAt: temporaryRouteTrackingEndsAt
+            )
+        }
     }
 
     func enableTemporaryRouteTrackingStopNotifications() async -> TemporaryRouteTrackingStopNotificationPermissionResult {
@@ -824,6 +844,9 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         persistTemporaryRouteTrackingState()
         notifyTemporaryRouteTrackingStoppedImmediatelyIfNeeded()
         applyTrackingConfiguration()
+        Task {
+            await routeTrackingLiveActivity.end()
+        }
     }
 
     private var isAuthorizedForTracking: Bool {
@@ -842,6 +865,7 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
             shouldChainToAlwaysAfterWhenInUse = false
             applyTrackingConfiguration()
             requestOneShotLocation(source: .authorizationGrant)
+            startPendingTemporaryRouteTrackingIfNeeded()
         case .authorizedWhenInUse:
             if shouldChainToAlwaysAfterWhenInUse {
                 shouldChainToAlwaysAfterWhenInUse = false
@@ -850,13 +874,21 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
 
             applyTrackingConfiguration()
             requestOneShotLocation(source: .authorizationGrant)
+            startPendingTemporaryRouteTrackingIfNeeded()
         case .restricted, .denied:
             shouldChainToAlwaysAfterWhenInUse = false
+            pendingTemporaryRouteTrackingDuration = nil
             stop()
         @unknown default:
             shouldChainToAlwaysAfterWhenInUse = false
             stop()
         }
+    }
+
+    private func startPendingTemporaryRouteTrackingIfNeeded() {
+        guard let duration = pendingTemporaryRouteTrackingDuration else { return }
+        pendingTemporaryRouteTrackingDuration = nil
+        enableTemporaryRouteTracking(duration: duration)
     }
 
     private func startLowPowerMonitoringIfNeeded() {
@@ -931,7 +963,7 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         }
     }
 
-    private var isTemporaryRouteTrackingActive: Bool {
+    var isTemporaryRouteTrackingActive: Bool {
         guard let endsAt = temporaryRouteTrackingEndsAt else { return false }
         return endsAt > .now
     }
@@ -1061,6 +1093,9 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
             notifyTemporaryRouteTrackingStoppedImmediatelyIfNeeded()
         }
         applyTrackingConfiguration()
+        Task {
+            await routeTrackingLiveActivity.end()
+        }
     }
 
     private func expireTemporaryRouteTrackingIfStillCurrent(expectedEndDate: Date) {
@@ -1258,6 +1293,12 @@ extension MovesLocationCaptureManager: @preconcurrency CLLocationManagerDelegate
         pendingOneShotLocationSource = nil
 
         Task {
+            if source == .routeTracking {
+                await routeTrackingLiveActivity.record(
+                    locations,
+                    endsAt: temporaryRouteTrackingEndsAt
+                )
+            }
             await assembler.ingestLocations(locations, source: source)
         }
     }

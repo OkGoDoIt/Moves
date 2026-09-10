@@ -7,6 +7,7 @@
 
 import SwiftUI
 import SwiftData
+import AppIntents
 import UIKit
 import UserNotifications
 
@@ -52,9 +53,10 @@ struct MovesApp: App {
     init() {
         do {
             let container = try Self.makeModelContainer()
+            let captureManager = MovesLocationCaptureManager(modelContainer: container)
             self.sharedModelContainer = container
             _captureManager = StateObject(
-                wrappedValue: MovesLocationCaptureManager(modelContainer: container)
+                wrappedValue: captureManager
             )
             _watchRouteInbox = StateObject(
                 wrappedValue: WatchRouteInbox(modelContainer: container)
@@ -65,6 +67,11 @@ struct MovesApp: App {
             _cloudDataPresencePublisher = StateObject(
                 wrappedValue: MovesCloudDataPresencePublisher(modelContainer: container)
             )
+            MovesIntentRuntime.shared.configure(
+                modelContainer: container,
+                captureManager: captureManager
+            )
+            MovesAppShortcuts.updateAppShortcutParameters()
         } catch {
             fatalError("Could not create ModelContainer: \(error)")
         }

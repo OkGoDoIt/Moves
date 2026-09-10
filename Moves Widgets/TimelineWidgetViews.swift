@@ -4,6 +4,17 @@ import WidgetKit
 struct MovesWidgetEntry: TimelineEntry {
     let date: Date
     let snapshot: TimelineWidgetSnapshot
+    let showsTransportBreakdown: Bool
+
+    init(
+        date: Date,
+        snapshot: TimelineWidgetSnapshot,
+        showsTransportBreakdown: Bool = true
+    ) {
+        self.date = date
+        self.snapshot = snapshot
+        self.showsTransportBreakdown = showsTransportBreakdown
+    }
 }
 
 struct MovesWidgetProvider: TimelineProvider {
@@ -29,11 +40,20 @@ struct MovesWidgetRootView: View {
     var body: some View {
         switch family {
         case .systemSmall:
-            MovesSmallWidget(snapshot: entry.snapshot)
+            MovesSmallWidget(
+                snapshot: entry.snapshot,
+                showsTransportBreakdown: entry.showsTransportBreakdown
+            )
         case .systemMedium:
-            MovesMediumWidget(snapshot: entry.snapshot)
+            MovesMediumWidget(
+                snapshot: entry.snapshot,
+                showsTransportBreakdown: entry.showsTransportBreakdown
+            )
         case .systemLarge, .systemExtraLarge:
-            MovesLargeWidget(snapshot: entry.snapshot)
+            MovesLargeWidget(
+                snapshot: entry.snapshot,
+                showsTransportBreakdown: entry.showsTransportBreakdown
+            )
         case .accessoryCircular:
             MovesCircularAccessory(snapshot: entry.snapshot)
         case .accessoryRectangular:
@@ -52,6 +72,7 @@ struct MovesWidgetRootView: View {
 
 struct MovesSmallWidget: View {
     let snapshot: TimelineWidgetSnapshot
+    var showsTransportBreakdown = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -70,7 +91,11 @@ struct MovesSmallWidget: View {
                 .font(.system(size: 28, weight: .bold, design: .rounded))
                 .minimumScaleFactor(0.7)
 
-            Text(snapshot.primaryTransportMetric?.title ?? "Moved")
+            Text(
+                showsTransportBreakdown
+                    ? (snapshot.primaryTransportMetric?.title ?? "Moved")
+                    : "\(snapshot.visitedLocationCount) places visited"
+            )
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
@@ -81,6 +106,7 @@ struct MovesSmallWidget: View {
 
 struct MovesMediumWidget: View {
     let snapshot: TimelineWidgetSnapshot
+    var showsTransportBreakdown = true
 
     var body: some View {
         HStack(spacing: 16) {
@@ -100,19 +126,27 @@ struct MovesMediumWidget: View {
 
             Spacer()
 
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(snapshot.transportMetrics.prefix(3)) { metric in
-                    HStack(spacing: 8) {
-                        Image(systemName: metric.symbolName)
-                            .frame(width: 18)
-                            .foregroundStyle(Color(metric.colorAssetName))
-                       
-                        Spacer(minLength: 4)
-                        Text(distanceText(metric.distanceMeters))
-                            .foregroundStyle(.secondary)
+            if showsTransportBreakdown {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(snapshot.transportMetrics.prefix(3)) { metric in
+                        HStack(spacing: 8) {
+                            Image(systemName: metric.symbolName)
+                                .frame(width: 18)
+                                .foregroundStyle(Color(metric.colorAssetName))
+
+                            Spacer(minLength: 4)
+                            Text(distanceText(metric.distanceMeters))
+                                .foregroundStyle(.secondary)
+                        }
+                        .font(.caption.weight(.semibold))
                     }
-                    .font(.caption.weight(.semibold))
                 }
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    Label("\(snapshot.visitedLocationCount) places", systemImage: "mappin.and.ellipse")
+                    Label("\(snapshot.moveCount) moves", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
+                }
+                .font(.subheadline.weight(.semibold))
             }
         }
         .movesWidgetBackground()
@@ -121,6 +155,7 @@ struct MovesMediumWidget: View {
 
 struct MovesLargeWidget: View {
     let snapshot: TimelineWidgetSnapshot
+    var showsTransportBreakdown = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -134,13 +169,27 @@ struct MovesLargeWidget: View {
                     .font(.headline)
             }
 
-            VStack(spacing: 10) {
-                ForEach(snapshot.transportMetrics.prefix(6)) { metric in
-                    MovesMetricBar(
-                        metric: metric,
-                        totalDistance: max(snapshot.totalDistanceMeters, 1)
+            if showsTransportBreakdown {
+                VStack(spacing: 10) {
+                    ForEach(snapshot.transportMetrics.prefix(6)) { metric in
+                        MovesMetricBar(
+                            metric: metric,
+                            totalDistance: max(snapshot.totalDistanceMeters, 1)
+                        )
+                    }
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 12) {
+                    Label(
+                        "\(snapshot.visitedLocationCount) visited places",
+                        systemImage: "mappin.and.ellipse"
+                    )
+                    Label(
+                        "\(snapshot.moveCount) recorded moves",
+                        systemImage: "point.topleft.down.to.point.bottomright.curvepath"
                     )
                 }
+                .font(.title3.weight(.semibold))
             }
 
             Spacer(minLength: 0)

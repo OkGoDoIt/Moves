@@ -50,6 +50,11 @@
 		A70000012FF0000100000001 /* MovesShareViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A70000012FF0000100000000 /* MovesShareViews.swift */; };
 		A80000012FF0000100000001 /* MovesJumpToDateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A80000012FF0000100000000 /* MovesJumpToDateView.swift */; };
 		A90000012FF0000100000001 /* ShareMapAggregate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A90000012FF0000100000000 /* ShareMapAggregate.swift */; };
+		B10000013000000100000001 /* MovesAppIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000013000000100000000 /* MovesAppIntents.swift */; };
+		C10000013000000100000001 /* RouteTrackingLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000013000000100000000 /* RouteTrackingLiveActivity.swift */; };
+		C10000013000000100000003 /* MovesRouteTrackingLiveActivityWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000013000000100000002 /* MovesRouteTrackingLiveActivityWidget.swift */; };
+		C10000013000000100000005 /* MovesRouteTrackingAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000013000000100000004 /* MovesRouteTrackingAttributes.swift */; };
+		C10000013000000100000006 /* MovesRouteTrackingAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000013000000100000004 /* MovesRouteTrackingAttributes.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -161,6 +166,10 @@
 		A70000012FF0000100000000 /* MovesShareViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesShareViews.swift; sourceTree = "<group>"; };
 		A80000012FF0000100000000 /* MovesJumpToDateView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesJumpToDateView.swift; sourceTree = "<group>"; };
 		A90000012FF0000100000000 /* ShareMapAggregate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareMapAggregate.swift; sourceTree = "<group>"; };
+		B10000013000000100000000 /* MovesAppIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesAppIntents.swift; sourceTree = "<group>"; };
+		C10000013000000100000000 /* RouteTrackingLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteTrackingLiveActivity.swift; sourceTree = "<group>"; };
+		C10000013000000100000002 /* MovesRouteTrackingLiveActivityWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesRouteTrackingLiveActivityWidget.swift; sourceTree = "<group>"; };
+		C10000013000000100000004 /* MovesRouteTrackingAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesRouteTrackingAttributes.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -236,6 +245,8 @@
 				489A76472C4FD1A500F43B69 /* Moves.entitlements */,
 				489A76462C4FCF1300F43B69 /* Info.plist */,
 				489A76342C4FC6F300F43B69 /* MovesApp.swift */,
+				B10000013000000100000000 /* MovesAppIntents.swift */,
+				C10000013000000100000000 /* RouteTrackingLiveActivity.swift */,
 				A50000012FD0000100000000 /* CloudDataPresencePublisher.swift */,
 				A60000012FE0000100000000 /* DailyTimelineBackup.swift */,
 				489A76362C4FC6F300F43B69 /* ContentView.swift */,
@@ -302,6 +313,8 @@
 				A30000012FB0000100000012 /* MovesWatchComplications.swift */,
 				A30000012FB0000100000014 /* TimelineWidgetViews.swift */,
 				A30000012FB0000100000017 /* TimelineWidgetSnapshotShared.swift */,
+				C10000013000000100000002 /* MovesRouteTrackingLiveActivityWidget.swift */,
+				C10000013000000100000004 /* MovesRouteTrackingAttributes.swift */,
 			);
 			path = "Moves Widgets";
 			sourceTree = "<group>";
@@ -529,6 +542,9 @@
 				48A8FC0F2F8CCC7E000EAECA /* CreatedByView.swift in Sources */,
 				48A8FC112F8CCD27000EAECA /* VersionNumberView.swift in Sources */,
 				489A76352C4FC6F300F43B69 /* MovesApp.swift in Sources */,
+				B10000013000000100000001 /* MovesAppIntents.swift in Sources */,
+				C10000013000000100000001 /* RouteTrackingLiveActivity.swift in Sources */,
+				C10000013000000100000005 /* MovesRouteTrackingAttributes.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -557,6 +573,8 @@
 				A30000012FB0000100000011 /* MovesWidgets.swift in Sources */,
 				A30000012FB0000100000015 /* TimelineWidgetViews.swift in Sources */,
 				A30000012FB0000100000018 /* TimelineWidgetSnapshotShared.swift in Sources */,
+				C10000013000000100000003 /* MovesRouteTrackingLiveActivityWidget.swift in Sources */,
+				C10000013000000100000006 /* MovesRouteTrackingAttributes.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -32,6 +32,52 @@ final class MockVisit: CLVisit {
     }
 }
 
+final class MovesTimelinePeriodTests: XCTestCase {
+    func testTodayUsesCalendarDayBoundaries() throws {
+        let calendar = testCalendar
+        let now = try XCTUnwrap(calendar.date(from: DateComponents(
+            year: 2026,
+            month: 9,
+            day: 10,
+            hour: 14,
+            minute: 30
+        )))
+        let interval = try XCTUnwrap(
+            MovesTimelinePeriod.today.dateInterval(containing: now, calendar: calendar)
+        )
+
+        XCTAssertEqual(calendar.component(.day, from: interval.start), 10)
+        XCTAssertEqual(calendar.component(.hour, from: interval.start), 0)
+        XCTAssertEqual(calendar.component(.day, from: interval.end), 11)
+    }
+
+    func testLastSevenDaysIncludesTodayAndSixPreviousDays() throws {
+        let calendar = testCalendar
+        let now = try XCTUnwrap(calendar.date(from: DateComponents(
+            year: 2026,
+            month: 9,
+            day: 10,
+            hour: 14
+        )))
+        let interval = try XCTUnwrap(
+            MovesTimelinePeriod.lastSevenDays.dateInterval(containing: now, calendar: calendar)
+        )
+
+        XCTAssertEqual(calendar.dateComponents([.day], from: interval.start, to: interval.end).day, 7)
+        XCTAssertTrue(interval.contains(now))
+    }
+
+    func testAllTimeHasNoDateLimit() {
+        XCTAssertNil(MovesTimelinePeriod.allTime.dateInterval())
+    }
+
+    private var testCalendar: Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        return calendar
+    }
+}
+
 @MainActor
 final class TimelineAssemblerTests: XCTestCase {
     func testLocationSamplesAreDeduplicatedAcrossSourcesForTheSameFix() throws {
@@ -1333,6 +1379,40 @@ final class TimelineAssemblerTests: XCTestCase {
         )
     }
 
+    func testShareGPXFilenamesFollowTheSelectedPeriod() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Europe/Berlin")!
+        calendar.firstWeekday = 2
+
+        let selectedDate = calendar.date(from: DateComponents(
+            year: 2026,
+            month: 9,
+            day: 10,
+            hour: 12
+        ))!
+
+        XCTAssertEqual(
+            MovesSharePeriod.day.gpxFileStem(for: selectedDate, calendar: calendar),
+            "moves-2026-09-10"
+        )
+        XCTAssertEqual(
+            MovesSharePeriod.week.gpxFileStem(for: selectedDate, calendar: calendar),
+            "moves-week-2026-09-07"
+        )
+        XCTAssertEqual(
+            MovesSharePeriod.month.gpxFileStem(for: selectedDate, calendar: calendar),
+            "moves-2026-09"
+        )
+        XCTAssertEqual(
+            MovesSharePeriod.year.gpxFileStem(for: selectedDate, calendar: calendar),
+            "moves-2026"
+        )
+        XCTAssertEqual(
+            MovesSharePeriod.forever.gpxFileStem(for: selectedDate, calendar: calendar),
+            "moves-all-days"
+        )
+    }
+
     func testSharePeriodsChooseDirectOrAggregatedTrackRendering() {
         XCTAssertTrue(MovesSharePeriod.day.includesAllTracks)
         XCTAssertTrue(MovesSharePeriod.week.includesAllTracks)
@@ -1398,6 +1478,34 @@ final class TimelineAssemblerTests: XCTestCase {
         XCTAssertEqual(restoredTrack.transportMode, .cycling)
         XCTAssertEqual(restoredTrack.coordinates.count, 2)
         XCTAssertEqual(restoredTrack.coordinates.first?.latitude ?? 0, 53.55, accuracy: 0.000_001)
+    }
+
+    func testVisitedPlaceEntityIndexesUsefulMetadataWithoutPrivateCoordinatesOrComments() {
+        let arrival = Date(timeIntervalSince1970: 1_800_000_000)
+        let timeline = DayTimeline(dayStart: arrival)
+        let place = VisitPlace(
+            arrivalDate: arrival,
+            departureDate: arrival.addingTimeInterval(45 * 60),
+            latitude: 52.5200,
+            longitude: 13.4050,
+            horizontalAccuracy: 15,
+            userLabel: "Favorite Café",
+            autoLabel: "Coffee Shop",
+            comment: "Private meeting notes"
+        )
+        place.dayTimeline = timeline
+
+        let entity = VisitedPlaceEntity(place: place)
+        let attributes = entity.attributeSet
+
+        XCTAssertEqual(entity.id, place.id.uuidString)
+        XCTAssertEqual(entity.name, "Favorite Café")
+        XCTAssertEqual(entity.dayKey, timeline.dayKey)
+        XCTAssertEqual(attributes.displayName, "Favorite Café")
+        XCTAssertNil(attributes.latitude)
+        XCTAssertNil(attributes.longitude)
+        XCTAssertFalse(attributes.contentDescription?.contains("Private meeting notes") ?? true)
+        XCTAssertFalse(attributes.contentDescription?.contains("52.52") ?? true)
     }
 
     private func makeInMemoryContainer() throws -> ModelContainer {

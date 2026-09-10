@@ -1,5 +1,26 @@
 # Moves
 
+## Siri and Shortcuts
+
+Moves provides App Intents for starting and stopping temporary real-route GPS tracking,
+checking tracking status, controlling low-energy background tracking, getting timeline
+summaries, and exporting timeline data as GPX, GeoJSON, or CSV. The most common actions
+are suggested automatically in Siri and the Shortcuts app.
+
+Example phrases include “Start route tracking with Moves”, “Stop GPS tracking in Moves”,
+“What’s my Moves tracking status”, “Summarize my day with Moves”, and “Export my Moves
+data”. Export requires device authentication because timeline files contain location data.
+
+The “Toggle Route Tracking” App Shortcut is designed for the iPhone Action button: assign
+it in Settings > Action Button > Shortcut to use one press for starting and stopping the
+high-accuracy GPS session. Starting tracking also starts a Live Activity with elapsed time,
+remaining time, and distance on the Lock Screen and Dynamic Island.
+
+Visited places are donated as App Entities to an app-scoped named Spotlight index. Tapping a
+result opens the matching day in Moves. The index includes the place name and visit time,
+but deliberately excludes coordinates and comments. On iOS 27, `IndexedEntityQuery`
+allows Spotlight to request targeted or full reindexing.
+
 Moves is an iOS app that builds a private day-by-day timeline of where you were and how you moved between places.
 
 It uses on-device location + motion signals and stores timeline data locally with SwiftData, with private iCloud sync through CloudKit enabled for backup and device transfer.
@@ -10,6 +31,10 @@ It uses on-device location + motion signals and stores timeline data locally wit
 - Transport mode detection (`walking`, `running`, `cycling`, `automotive`, etc.)
 - Automatic place naming (reverse geocoding) plus manual place labels
 - Map previews for places and routes
+- Spotlight search for visited places with deep links back to their timeline day
+- AppIntent-configurable Home Screen, Lock Screen, and accessory widgets
+- A route-tracking Live Activity for the Lock Screen and Dynamic Island
+- Siri, Shortcuts, Spotlight suggestions, and iPhone Action button support through App Intents
 - Export from Settings:
   - GPX (`.gpx`)
   - GeoJSON (`.geojson`)

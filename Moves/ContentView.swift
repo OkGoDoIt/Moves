@@ -289,6 +289,20 @@ struct ContentView: View {
         return "\(placeCount)|\(moveCount)"
     }
 
+    private var spotlightPlaceSignature: [String] {
+        dayTimelines
+            .flatMap(\.places)
+            .map { place in
+                [
+                    place.id.uuidString,
+                    place.userLabel ?? "",
+                    place.autoLabel ?? "",
+                    String(place.arrivalDate.timeIntervalSinceReferenceDate),
+                ].joined(separator: "|")
+            }
+            .sorted()
+    }
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -412,6 +426,7 @@ struct ContentView: View {
             openCurrentDay()
             modelContext.undoManager = undoController.manager
             publishWidgetSnapshot()
+            refreshSpotlightIndex()
             cloudDataPresencePublisher.publishSoon()
         }
         .onChange(of: dayTimelines.map(\.dayKey)) { _, _ in
@@ -427,12 +442,17 @@ struct ContentView: View {
         .onChange(of: cloudDataPresenceCountSignature) { _, _ in
             cloudDataPresencePublisher.publishSoon()
         }
+        .onChange(of: spotlightPlaceSignature) { _, _ in
+            refreshSpotlightIndex()
+        }
         .onChange(of: scenePhase) { _, newPhase in
             guard newPhase == .active else { return }
             openCurrentDay()
             publishWidgetSnapshot()
+            refreshSpotlightIndex()
             cloudDataPresencePublisher.publishSoon()
         }
+        .onOpenURL(perform: handleDeepLink)
         .onChange(of: selectedPageIndex) { _, newIndex in
             guard dayTimelines.indices.contains(newIndex) else { return }
             selectedDayKey = dayTimelines[newIndex].dayKey
@@ -650,6 +670,36 @@ struct ContentView: View {
     private func publishWidgetSnapshot() {
         guard let dayTimeline = selectedDay ?? dayTimelines.last else { return }
         TimelineWidgetSnapshotStore.save(.make(from: dayTimeline))
+    }
+
+    private func refreshSpotlightIndex() {
+        let entities = dayTimelines.flatMap { day in
+            day.places.map(VisitedPlaceEntity.init)
+        }
+        Task(priority: .utility) {
+            try? await VisitedPlaceSpotlightIndexer.replaceIndex(with: entities)
+        }
+    }
+
+    private func handleDeepLink(_ url: URL) {
+        guard url.scheme?.lowercased() == "moves" else { return }
+
+        switch url.host?.lowercased() {
+        case "today":
+            openCurrentDay()
+        case "tracking":
+            isShowingRouteTrackingSettings = true
+        case "place":
+            guard let identifier = url.pathComponents.dropFirst().first,
+                  let placeID = UUID(uuidString: identifier),
+                  let dayIndex = dayTimelines.firstIndex(where: { day in
+                      day.places.contains(where: { $0.id == placeID })
+                  }) else { return }
+            selectedPageIndex = dayIndex
+            selectedDayKey = dayTimelines[dayIndex].dayKey
+        default:
+            break
+        }
     }
 
     private func syncSelectedDayIfNeeded() {

@@ -19,6 +19,8 @@
 	<string>$(TeamIdentifierPrefix)de.holgerkrupp.Moves</string>
 	<key>com.apple.developer.healthkit</key>
 	<true/>
+	<key>com.apple.developer.siri</key>
+	<true/>
 	<key>com.apple.security.application-groups</key>
 	<array>
 		<string>group.de.holgerkrupp.Moves</string>

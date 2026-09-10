@@ -7,6 +7,17 @@
 		<string>de.holgerkrupp.Moves.dailyTimelineBackup</string>
 		<string>de.holgerkrupp.Moves.shareMapAggregates</string>
 	</array>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>de.holgerkrupp.Moves</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>moves</string>
+			</array>
+		</dict>
+	</array>
 	<key>NSUbiquitousContainers</key>
 	<dict>
 		<key>iCloud.de.holgerkrupp.Moves</key>
@@ -19,6 +30,10 @@
 			<string>Any</string>
 		</dict>
 	</dict>
+	<key>NSSiriUsageDescription</key>
+	<string>Use Siri to start or stop route tracking, hear timeline summaries, and export your private Moves data.</string>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>UILaunchScreen</key>
 	<dict>
 		<key>UIColorName</key>

@@ -130,6 +130,28 @@ enum MovesSharePeriod: String, CaseIterable, Identifiable {
             return "Forever"
         }
     }
+
+    func gpxFileStem(for date: Date, calendar: Calendar = .autoupdatingCurrent) -> String {
+        guard self != .forever else { return "moves-all-days" }
+
+        let periodStart = start(for: date, calendar: calendar)
+        let components = calendar.dateComponents([.year, .month, .day], from: periodStart)
+        let year = components.year ?? 0
+        let month = components.month ?? 0
+        let day = components.day ?? 0
+        switch self {
+        case .day:
+            return String(format: "moves-%04d-%02d-%02d", year, month, day)
+        case .week:
+            return String(format: "moves-week-%04d-%02d-%02d", year, month, day)
+        case .month:
+            return String(format: "moves-%04d-%02d", year, month)
+        case .year:
+            return String(format: "moves-%04d", year)
+        case .forever:
+            return "moves-all-days"
+        }
+    }
 }
 
 private struct MovesSharePlace: Identifiable {
@@ -678,6 +700,8 @@ struct MovesShareGalleryView: View {
     @State private var selectedDesigns = Set<MovesShareDesign>()
     @State private var isRendering = false
     @State private var renderedCount = 0
+    @State private var gpxShareFile: GPXShareFile?
+    @State private var isPreparingGPX = false
     @State private var activityItems: [Any] = []
     @State private var showsShareSheet = false
     @State private var isShowingDatePicker = false
@@ -885,6 +909,44 @@ struct MovesShareGalleryView: View {
                     Text("Tap images to select several, or use the share button on a single design. Statistics are calculated entirely on this device.")
                 }
                 .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+
+                Section {
+                    if let gpxShareFile {
+                        ShareLink(
+                            item: gpxShareFile,
+                            subject: Text("Moves · \(selectedPeriod.label(for: selectedPeriodStart))"),
+                            message: Text("GPX timeline exported from Moves."),
+                            preview: SharePreview(gpxShareFile.filename)
+                        ) {
+                            Label {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("Share GPX")
+                                        .foregroundStyle(.primary)
+                                    Text(gpxShareFile.filename)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+                            } icon: {
+                                Image(systemName: "point.topleft.down.to.point.bottomright.curvepath")
+                                    .foregroundStyle(Color.accentColor)
+                            }
+                        }
+                    } else if isPreparingGPX {
+                        HStack(spacing: 12) {
+                            ProgressView()
+                            Text("Preparing GPX export…")
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        Label("No GPX data in this time span", systemImage: "map")
+                            .foregroundStyle(.secondary)
+                    }
+                } header: {
+                    Text("GPX Track")
+                } footer: {
+                    Text("Includes the visited locations and movement tracks from the selected time span.")
+                }
             }
         }
         .navigationTitle("Share Images")
@@ -906,6 +968,9 @@ struct MovesShareGalleryView: View {
         }
         .task(id: renderSignature) {
             await renderImages()
+        }
+        .task(id: currentDataSignature) {
+            await prepareGPXShareFile()
         }
         .sheet(isPresented: $showsShareSheet, onDismiss: { activityItems = [] }) {
             MovesActivityView(activityItems: activityItems)
@@ -938,6 +1003,40 @@ struct MovesShareGalleryView: View {
         guard !images.isEmpty else { return }
         activityItems = images
         showsShareSheet = true
+    }
+
+    @MainActor
+    private func prepareGPXShareFile() async {
+        gpxShareFile = nil
+        isPreparingGPX = true
+        defer { isPreparingGPX = false }
+
+        let period = selectedPeriod
+        let periodStart = selectedPeriodStart
+        let container = modelContext.container
+        let work = Task<TimelineExportPayload?, Never>.detached(priority: .userInitiated) {
+            let context = ModelContext(container)
+            let descriptor = FetchDescriptor<DayTimeline>(
+                sortBy: [SortDescriptor(\.dayStart, order: .forward)]
+            )
+            guard let timelines = try? context.fetch(descriptor) else { return nil }
+            let days = timelines.filter { day in
+                (period == .forever || period.contains(day.dayStart, periodStart: periodStart))
+                    && (!day.places.isEmpty || !day.moves.isEmpty)
+            }
+            guard !days.isEmpty else { return nil }
+            return TimelineExporter.makePayload(
+                days: days,
+                format: .gpx,
+                fileStem: period.gpxFileStem(for: periodStart)
+            )
+        }
+        let payload = await withTaskCancellationHandler(
+            operation: { await work.value },
+            onCancel: { work.cancel() }
+        )
+        guard !Task.isCancelled, let payload else { return }
+        gpxShareFile = GPXShareFile(data: payload.data, filename: payload.filename)
     }
 
     @MainActor
