@@ -61,6 +61,7 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "A20000012FA000010000001E"
             BuildableName = "Moves Watch App.app"
+            BlueprintName = "Moves Watch App"
             ReferencedContainer = "container:Moves.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
@@ -77,6 +78,7 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "A20000012FA000010000001E"
             BuildableName = "Moves Watch App.app"
+            BlueprintName = "Moves Watch App"
             ReferencedContainer = "container:Moves.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>

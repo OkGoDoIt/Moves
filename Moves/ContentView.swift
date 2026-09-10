@@ -330,6 +330,7 @@ struct ContentView: View {
     @State private var selectedDayKey = ""
     @State private var selectedPageIndex = 0
     @State private var isShowingSettings = false
+    @State private var isShowingShareImages = false
     @State private var isShowingRouteTrackingSettings = false
     @State private var isShowingDatePicker = false
     @State private var isShowingActivityFilterPicker = false
@@ -438,6 +439,17 @@ struct ContentView: View {
                 }
 
                 ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        isShowingShareImages = true
+                    } label: {
+                        Image(systemName: "photo.stack")
+                    }
+                    .disabled(dayTimelines.allSatisfy { !$0.hasRecordedActivity })
+                    .help("Share Images")
+                    .accessibilityLabel("Share Images")
+                }
+
+                ToolbarItem(placement: .topBarTrailing) {
                     
                       
                             RouteTrackingToolbarButton(
@@ -467,6 +479,11 @@ struct ContentView: View {
                 selectedDayKey: selectedDayKey,
                 captureManager: captureManager
             )
+        }
+        .sheet(isPresented: $isShowingShareImages) {
+            NavigationStack {
+                MovesShareGalleryView(dayTimelines: dayTimelines)
+            }
         }
         .sheet(isPresented: $isShowingRouteTrackingSettings) {
             RouteTrackingSettingsSheet(captureManager: captureManager)
@@ -1787,6 +1804,997 @@ private final class ShakeToUndoView: UIView {
         if !isFirstResponder {
             becomeFirstResponder()
         }
+    }
+}
+
+// MARK: - Share images
+
+private struct MovesSharePlace: Identifiable {
+    let id: String
+    let title: String
+    let visitCount: Int
+    let totalDuration: TimeInterval
+    let dayCount: Int
+}
+
+private struct MovesShareDay: Identifiable {
+    let id: String
+    let date: Date
+    let distanceMeters: CLLocationDistance
+    let moveDuration: TimeInterval
+    let placeCount: Int
+    let moveCount: Int
+    let activityScore: Double
+}
+
+private struct MovesShareTransport: Identifiable {
+    let mode: TransportMode
+    let distanceMeters: CLLocationDistance
+    let duration: TimeInterval
+    let segmentCount: Int
+
+    var id: String { mode.rawValue }
+}
+
+private struct MovesShareSnapshot {
+    let periodLabel: String
+    let recordedDayCount: Int
+    let uniquePlaceCount: Int
+    let visitCount: Int
+    let moveCount: Int
+    let totalDistanceMeters: CLLocationDistance
+    let totalMoveDuration: TimeInterval
+    let totalStepCount: Int
+    let longestMoveMeters: CLLocationDistance
+    let busiestWeekday: String?
+    let topPlaces: [MovesSharePlace]
+    let activeDays: [MovesShareDay]
+    let transports: [MovesShareTransport]
+
+    var hasContent: Bool {
+        visitCount > 0 || moveCount > 0
+    }
+
+    static func make(from timelines: [DayTimeline], now: Date = .now) -> MovesShareSnapshot {
+        let recordedDays = timelines.filter(\.hasRecordedActivity)
+        let allPlaces = timelines.flatMap(\.places)
+        let allMoves = timelines.flatMap(\.moves)
+        let calendar = Calendar.autoupdatingCurrent
+
+        struct PlaceAccumulator {
+            var title: String
+            var titlePriority: Int
+            var visits = 0
+            var duration: TimeInterval = 0
+            var dayKeys = Set<String>()
+        }
+
+        var placesByCoordinate: [String: PlaceAccumulator] = [:]
+        for place in allPlaces {
+            let latitudeBucket = Int((place.latitude * 10_000).rounded())
+            let longitudeBucket = Int((place.longitude * 10_000).rounded())
+            let key = "\(latitudeBucket)|\(longitudeBucket)"
+            let userLabel = place.userLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let autoLabel = place.autoLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let candidateTitle: String
+            let candidatePriority: Int
+
+            if let userLabel, !userLabel.isEmpty {
+                candidateTitle = userLabel
+                candidatePriority = 2
+            } else if let autoLabel, !autoLabel.isEmpty {
+                candidateTitle = autoLabel
+                candidatePriority = 1
+            } else {
+                candidateTitle = place.displayTitle
+                candidatePriority = 0
+            }
+
+            var accumulator = placesByCoordinate[key] ?? PlaceAccumulator(
+                title: candidateTitle,
+                titlePriority: candidatePriority
+            )
+            if candidatePriority > accumulator.titlePriority {
+                accumulator.title = candidateTitle
+                accumulator.titlePriority = candidatePriority
+            }
+            accumulator.visits += 1
+            let fallbackDeparture = min(
+                now,
+                calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: place.arrivalDate)) ?? now
+            )
+            accumulator.duration += max((place.departureDate ?? fallbackDeparture).timeIntervalSince(place.arrivalDate), 0)
+            accumulator.dayKeys.insert(place.dayTimeline?.dayKey ?? DayTimeline.makeDayKey(for: place.arrivalDate))
+            placesByCoordinate[key] = accumulator
+        }
+
+        let topPlaces = placesByCoordinate.map { key, value in
+            MovesSharePlace(
+                id: key,
+                title: value.title,
+                visitCount: value.visits,
+                totalDuration: value.duration,
+                dayCount: value.dayKeys.count
+            )
+        }
+        .sorted {
+            if $0.visitCount == $1.visitCount {
+                if $0.totalDuration == $1.totalDuration {
+                    return $0.title.localizedStandardCompare($1.title) == .orderedAscending
+                }
+                return $0.totalDuration > $1.totalDuration
+            }
+            return $0.visitCount > $1.visitCount
+        }
+
+        let activeDays = recordedDays.map { day in
+            let distance = day.moves.reduce(0) { $0 + max($1.distanceMeters, 0) }
+            let duration = day.moves.reduce(0) { $0 + max($1.timelineDuration, 0) }
+            let score = distance + duration / 4 + Double(day.uniqueLocationCount) * 500 + Double(day.moves.count) * 250
+            return MovesShareDay(
+                id: day.dayKey,
+                date: day.dayStart,
+                distanceMeters: distance,
+                moveDuration: duration,
+                placeCount: day.uniqueLocationCount,
+                moveCount: day.moves.count,
+                activityScore: score
+            )
+        }
+        .sorted {
+            if $0.activityScore == $1.activityScore {
+                return $0.date > $1.date
+            }
+            return $0.activityScore > $1.activityScore
+        }
+
+        let transports = TransportMode.allCases.compactMap { mode -> MovesShareTransport? in
+            guard mode != .stationary else { return nil }
+            let moves = allMoves.filter { $0.transportMode == mode }
+            guard !moves.isEmpty else { return nil }
+            return MovesShareTransport(
+                mode: mode,
+                distanceMeters: moves.reduce(0) { $0 + max($1.distanceMeters, 0) },
+                duration: moves.reduce(0) { $0 + max($1.timelineDuration, 0) },
+                segmentCount: moves.count
+            )
+        }
+        .sorted {
+            if $0.distanceMeters == $1.distanceMeters {
+                return $0.duration > $1.duration
+            }
+            return $0.distanceMeters > $1.distanceMeters
+        }
+
+        let weekdayTotals = Dictionary(grouping: activeDays) { day in
+            calendar.component(.weekday, from: day.date)
+        }
+        let busiestWeekdayNumber = weekdayTotals.max { lhs, rhs in
+            let leftScore = lhs.value.reduce(0) { $0 + $1.activityScore }
+            let rightScore = rhs.value.reduce(0) { $0 + $1.activityScore }
+            return leftScore < rightScore
+        }?.key
+        let busiestWeekday: String?
+        if let weekday = busiestWeekdayNumber {
+            let symbols = DateFormatter().weekdaySymbols ?? []
+            busiestWeekday = symbols.indices.contains(weekday - 1) ? symbols[weekday - 1] : nil
+        } else {
+            busiestWeekday = nil
+        }
+
+        let sortedDates = recordedDays.map(\.dayStart).sorted()
+        let periodLabel: String
+        if let first = sortedDates.first, let last = sortedDates.last {
+            if calendar.isDate(first, inSameDayAs: last) {
+                periodLabel = first.formatted(.dateTime.day().month(.abbreviated).year())
+            } else {
+                periodLabel = "\(first.formatted(.dateTime.day().month(.abbreviated).year())) – \(last.formatted(.dateTime.day().month(.abbreviated).year()))"
+            }
+        } else {
+            periodLabel = "No recorded activity"
+        }
+
+        return MovesShareSnapshot(
+            periodLabel: periodLabel,
+            recordedDayCount: recordedDays.count,
+            uniquePlaceCount: placesByCoordinate.count,
+            visitCount: allPlaces.count,
+            moveCount: allMoves.count,
+            totalDistanceMeters: allMoves.reduce(0) { $0 + max($1.distanceMeters, 0) },
+            totalMoveDuration: allMoves.reduce(0) { $0 + max($1.timelineDuration, 0) },
+            totalStepCount: allMoves.compactMap(\.stepCount).reduce(0, +),
+            longestMoveMeters: allMoves.map(\.distanceMeters).max() ?? 0,
+            busiestWeekday: busiestWeekday,
+            topPlaces: topPlaces,
+            activeDays: activeDays,
+            transports: transports
+        )
+    }
+}
+
+private enum MovesShareDesign: String, CaseIterable, Identifiable {
+    case overview
+    case places
+    case activeDays
+    case transport
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .overview: return "Overview"
+        case .places: return "Top Places"
+        case .activeDays: return "Active Days"
+        case .transport: return "Transport Mix"
+        }
+    }
+}
+
+private enum MovesShareBackground: String, CaseIterable, Identifiable {
+    case moves
+    case sunrise
+    case midnight
+    case rainbow
+    case light
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .moves: return "Moves"
+        case .sunrise: return "Sunrise"
+        case .midnight: return "Midnight"
+        case .rainbow: return "Rainbow"
+        case .light: return "Light"
+        }
+    }
+
+    var isLight: Bool { self == .light }
+}
+
+private enum MovesShareAspect: String, CaseIterable, Identifiable {
+    case portrait
+    case square
+    case landscape
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .portrait: return "Portrait"
+        case .square: return "Square"
+        case .landscape: return "Landscape"
+        }
+    }
+
+    var renderSize: CGSize {
+        switch self {
+        case .portrait: return CGSize(width: 1080, height: 1920)
+        case .square: return CGSize(width: 1080, height: 1080)
+        case .landscape: return CGSize(width: 1920, height: 1080)
+        }
+    }
+
+    var ratio: CGFloat { renderSize.width / renderSize.height }
+}
+
+private struct MovesShareGalleryView: View {
+    @Environment(\.dismiss) private var dismiss
+
+    private let snapshot: MovesShareSnapshot
+    @State private var shareTitle = "My Moves"
+    @State private var background: MovesShareBackground = .moves
+    @State private var aspect: MovesShareAspect = .portrait
+    @State private var renderedImages: [MovesShareDesign: UIImage] = [:]
+    @State private var selectedDesigns = Set<MovesShareDesign>()
+    @State private var isRendering = false
+    @State private var renderedCount = 0
+    @State private var activityItems: [Any] = []
+    @State private var showsShareSheet = false
+
+    init(dayTimelines: [DayTimeline]) {
+        snapshot = MovesShareSnapshot.make(from: dayTimelines)
+    }
+
+    private var effectiveTitle: String {
+        let trimmed = shareTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "My Moves" : trimmed
+    }
+
+    private var availableDesigns: [MovesShareDesign] {
+        MovesShareDesign.allCases.filter { design in
+            switch design {
+            case .overview: return snapshot.hasContent
+            case .places: return !snapshot.topPlaces.isEmpty
+            case .activeDays: return !snapshot.activeDays.isEmpty
+            case .transport: return !snapshot.transports.isEmpty
+            }
+        }
+    }
+
+    private var renderSignature: String {
+        [
+            effectiveTitle,
+            background.rawValue,
+            aspect.rawValue,
+            snapshot.periodLabel,
+            String(snapshot.visitCount),
+            String(snapshot.moveCount),
+            String(Int(snapshot.totalDistanceMeters.rounded()))
+        ].joined(separator: "|")
+    }
+
+    private var canShareSelection: Bool {
+        !selectedDesigns.isEmpty && selectedDesigns.allSatisfy { renderedImages[$0] != nil }
+    }
+
+    var body: some View {
+        List {
+            if !snapshot.hasContent {
+                ContentUnavailableView(
+                    "No Share Images",
+                    systemImage: "photo.on.rectangle.angled",
+                    description: Text("Share images become available after Moves records places or movement.")
+                )
+            } else {
+                Section {
+                    NavigationLink {
+                        MovesShareCustomizeView(
+                            title: $shareTitle,
+                            background: $background,
+                            aspect: $aspect
+                        )
+                    } label: {
+                        Label("Customize", systemImage: "slider.horizontal.3")
+                    }
+                } footer: {
+                    Text("\(effectiveTitle) · \(aspect.title) · \(background.title)")
+                }
+
+                Section {
+                    if isRendering {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ProgressView(
+                                value: Double(renderedCount),
+                                total: Double(max(availableDesigns.count, 1))
+                            )
+                            Text("Rendering \(renderedCount) of \(availableDesigns.count) share images")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                        .padding(.vertical, 4)
+                    }
+
+                    LazyVGrid(
+                        columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)],
+                        spacing: 12
+                    ) {
+                        ForEach(availableDesigns) { design in
+                            MovesSharePreviewTile(
+                                title: design.title,
+                                image: renderedImages[design],
+                                aspectRatio: aspect.ratio,
+                                isSelected: selectedDesigns.contains(design),
+                                selectAction: { toggleSelection(design) },
+                                shareAction: { share([design]) }
+                            )
+                        }
+                    }
+                    .padding(.vertical, 4)
+                } header: {
+                    Text("Designs")
+                } footer: {
+                    Text("Tap images to select several, or use the share button on a single design. Statistics are calculated entirely on this device.")
+                }
+                .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+            }
+        }
+        .navigationTitle("Share Images")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Done") { dismiss() }
+            }
+
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    share(Array(selectedDesigns))
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                }
+                .disabled(!canShareSelection)
+                .accessibilityLabel(selectedDesigns.count == 1 ? "Share Selected Image" : "Share Selected Images")
+            }
+        }
+        .task(id: renderSignature) {
+            await renderImages()
+        }
+        .sheet(isPresented: $showsShareSheet, onDismiss: { activityItems = [] }) {
+            MovesActivityView(activityItems: activityItems)
+        }
+    }
+
+    private func toggleSelection(_ design: MovesShareDesign) {
+        if selectedDesigns.contains(design) {
+            selectedDesigns.remove(design)
+        } else {
+            selectedDesigns.insert(design)
+        }
+    }
+
+    private func share(_ designs: [MovesShareDesign]) {
+        let images = designs.compactMap { renderedImages[$0] }
+        guard !images.isEmpty else { return }
+        activityItems = images
+        showsShareSheet = true
+    }
+
+    @MainActor
+    private func renderImages() async {
+        let designs = availableDesigns
+        guard !designs.isEmpty else { return }
+
+        isRendering = true
+        renderedCount = 0
+        renderedImages = [:]
+        await Task.yield()
+
+        var images: [MovesShareDesign: UIImage] = [:]
+        for design in designs {
+            if Task.isCancelled { return }
+            let renderer = ImageRenderer(
+                content: MovesShareCard(
+                    snapshot: snapshot,
+                    design: design,
+                    title: effectiveTitle,
+                    background: background,
+                    aspect: aspect
+                )
+                .frame(width: aspect.renderSize.width, height: aspect.renderSize.height)
+            )
+            renderer.scale = 1
+            if let image = renderer.uiImage {
+                images[design] = image
+                renderedImages = images
+            }
+            renderedCount += 1
+            await Task.yield()
+        }
+
+        selectedDesigns.formIntersection(Set(designs))
+        isRendering = false
+    }
+}
+
+private struct MovesShareCustomizeView: View {
+    @Binding var title: String
+    @Binding var background: MovesShareBackground
+    @Binding var aspect: MovesShareAspect
+
+    var body: some View {
+        Form {
+            Section("Share Image Title") {
+                TextField("Title", text: $title)
+                Button("Reset to Default") { title = "My Moves" }
+            }
+
+            Section("Aspect Ratio") {
+                Picker("Aspect Ratio", selection: $aspect) {
+                    ForEach(MovesShareAspect.allCases) { aspect in
+                        Text(aspect.title).tag(aspect)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+
+            Section("Background") {
+                LazyVGrid(
+                    columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)],
+                    spacing: 12
+                ) {
+                    ForEach(MovesShareBackground.allCases) { option in
+                        Button {
+                            background = option
+                        } label: {
+                            VStack(alignment: .leading, spacing: 8) {
+                                MovesShareBackgroundView(background: option)
+                                    .frame(height: 70)
+                                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                    .overlay {
+                                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                            .stroke(
+                                                background == option ? Color.accentColor : Color.secondary.opacity(0.25),
+                                                lineWidth: background == option ? 3 : 1
+                                            )
+                                    }
+
+                                Label(
+                                    option.title,
+                                    systemImage: background == option ? "checkmark.circle.fill" : "circle"
+                                )
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(background == option ? Color.accentColor : Color.primary)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+        }
+        .navigationTitle("Customize")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct MovesSharePreviewTile: View {
+    let title: String
+    let image: UIImage?
+    let aspectRatio: CGFloat
+    let isSelected: Bool
+    let selectAction: () -> Void
+    let shareAction: () -> Void
+
+    var body: some View {
+        VStack(spacing: 7) {
+            Button(action: selectAction) {
+                ZStack(alignment: .topTrailing) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.secondary.opacity(0.12))
+
+                        if let image {
+                            Image(uiImage: image)
+                                .resizable()
+                                .scaledToFit()
+                        } else {
+                            ProgressView()
+                        }
+                    }
+                    .aspectRatio(aspectRatio, contentMode: .fit)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                        .font(.title3)
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(isSelected ? Color.white : Color.white.opacity(0.9), isSelected ? Color.accentColor : Color.black.opacity(0.35))
+                        .padding(7)
+                }
+                .padding(7)
+                .background(
+                    isSelected ? Color.accentColor.opacity(0.14) : Color.secondary.opacity(0.08),
+                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(isSelected ? Color.accentColor : Color.secondary.opacity(0.18), lineWidth: isSelected ? 2.5 : 1)
+                }
+            }
+            .buttonStyle(.plain)
+
+            HStack(spacing: 4) {
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+
+                Spacer(minLength: 2)
+
+                Button(action: shareAction) {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.caption.weight(.semibold))
+                }
+                .buttonStyle(.borderless)
+                .disabled(image == nil)
+                .accessibilityLabel("Share \(title)")
+            }
+            .padding(.horizontal, 3)
+        }
+    }
+}
+
+private struct MovesActivityView: UIViewControllerRepresentable {
+    let activityItems: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: activityItems, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+}
+
+private struct MovesShareBackgroundView: View {
+    let background: MovesShareBackground
+
+    var body: some View {
+        switch background {
+        case .moves:
+            LinearGradient(
+                colors: [
+                    Color(red: 0.03, green: 0.16, blue: 0.18),
+                    Color(red: 0.03, green: 0.32, blue: 0.29),
+                    Color(red: 0.93, green: 0.40, blue: 0.16)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        case .sunrise:
+            LinearGradient(
+                colors: [
+                    Color(red: 0.25, green: 0.08, blue: 0.30),
+                    Color(red: 0.79, green: 0.20, blue: 0.28),
+                    Color(red: 1.00, green: 0.68, blue: 0.25)
+                ],
+                startPoint: .top,
+                endPoint: .bottomTrailing
+            )
+        case .midnight:
+            LinearGradient(
+                colors: [
+                    Color(red: 0.02, green: 0.03, blue: 0.09),
+                    Color(red: 0.04, green: 0.12, blue: 0.24),
+                    Color(red: 0.14, green: 0.08, blue: 0.28)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        case .rainbow:
+            LinearGradient(
+                colors: [.pink, .orange, .yellow, .green, .cyan, .blue, .purple],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        case .light:
+            LinearGradient(
+                colors: [
+                    Color(red: 0.96, green: 0.98, blue: 0.97),
+                    Color(red: 0.88, green: 0.95, blue: 0.93),
+                    Color(red: 1.00, green: 0.93, blue: 0.83)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        }
+    }
+}
+
+private struct MovesShareCard: View {
+    let snapshot: MovesShareSnapshot
+    let design: MovesShareDesign
+    let title: String
+    let background: MovesShareBackground
+    let aspect: MovesShareAspect
+
+    private var primary: Color { background.isLight ? .black : .white }
+    private var secondary: Color { primary.opacity(background.isLight ? 0.62 : 0.76) }
+    private var scale: CGFloat {
+        switch aspect {
+        case .portrait: return 1
+        case .square: return 0.76
+        case .landscape: return 0.64
+        }
+    }
+    private var padding: CGFloat { max(68 * scale, 42) }
+
+    var body: some View {
+        ZStack {
+            MovesShareBackgroundView(background: background)
+
+            VStack(alignment: .leading, spacing: scaled(36, minimum: 18)) {
+                header
+
+                Group {
+                    switch design {
+                    case .overview:
+                        overviewContent
+                    case .places:
+                        placesContent
+                    case .activeDays:
+                        activeDaysContent
+                    case .transport:
+                        transportContent
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+                footer
+            }
+            .padding(padding)
+        }
+        .foregroundStyle(primary)
+    }
+
+    private func scaled(_ value: CGFloat, minimum: CGFloat = 0) -> CGFloat {
+        max(value * scale, minimum)
+    }
+
+    private var header: some View {
+        HStack(alignment: .top, spacing: scaled(22, minimum: 12)) {
+            VStack(alignment: .leading, spacing: scaled(8, minimum: 5)) {
+                Text(title)
+                    .font(.system(size: scaled(68, minimum: 38), weight: .black, design: .rounded))
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.65)
+
+                Text(design.title.uppercased())
+                    .font(.system(size: scaled(23, minimum: 14), weight: .bold, design: .rounded))
+                    .tracking(scaled(2.2, minimum: 1.2))
+                    .foregroundStyle(secondary)
+            }
+
+            Spacer()
+
+            Image(systemName: "location.fill")
+                .font(.system(size: scaled(48, minimum: 29), weight: .bold))
+                .frame(width: scaled(82, minimum: 50), height: scaled(82, minimum: 50))
+                .background(primary.opacity(0.15), in: Circle())
+                .overlay { Circle().stroke(primary.opacity(0.22), lineWidth: 2) }
+        }
+    }
+
+    private var overviewContent: some View {
+        VStack(alignment: .leading, spacing: scaled(34, minimum: 16)) {
+            HStack(spacing: scaled(18, minimum: 10)) {
+                metricTile(value: distanceText(snapshot.totalDistanceMeters), label: "distance")
+                metricTile(value: "\(snapshot.uniquePlaceCount)", label: "places")
+                metricTile(value: "\(snapshot.recordedDayCount)", label: "active days")
+            }
+
+            LazyVGrid(
+                columns: [GridItem(.flexible()), GridItem(.flexible())],
+                spacing: scaled(18, minimum: 10)
+            ) {
+                detailTile(symbol: "clock.fill", value: durationText(snapshot.totalMoveDuration), label: "moving")
+                if snapshot.totalStepCount > 0 {
+                    detailTile(symbol: "figure.walk", value: snapshot.totalStepCount.formatted(), label: "recorded steps")
+                } else {
+                    detailTile(symbol: "arrow.right", value: distanceText(snapshot.longestMoveMeters), label: "longest move")
+                }
+                detailTile(symbol: "arrow.triangle.swap", value: snapshot.moveCount.formatted(), label: "moves")
+                detailTile(symbol: "mappin.and.ellipse", value: snapshot.visitCount.formatted(), label: "visits")
+            }
+
+            VStack(spacing: scaled(14, minimum: 8)) {
+                if let place = snapshot.topPlaces.first {
+                    highlightRow(
+                        symbol: "heart.fill",
+                        label: "Most visited",
+                        value: place.title,
+                        detail: "\(place.visitCount) visits"
+                    )
+                }
+                if let day = snapshot.activeDays.first {
+                    highlightRow(
+                        symbol: "flame.fill",
+                        label: "Most active",
+                        value: day.date.formatted(.dateTime.weekday(.wide).day().month(.abbreviated)),
+                        detail: distanceText(day.distanceMeters)
+                    )
+                }
+                if let transport = snapshot.transports.first {
+                    highlightRow(
+                        symbol: transport.mode.symbolName,
+                        label: "Top transport",
+                        value: transport.mode.title,
+                        detail: distanceText(transport.distanceMeters)
+                    )
+                }
+            }
+        }
+    }
+
+    private var placesContent: some View {
+        let places = Array(snapshot.topPlaces.prefix(aspect == .landscape ? 5 : 7))
+        let maximumVisits = max(places.first?.visitCount ?? 1, 1)
+
+        return VStack(alignment: .leading, spacing: scaled(19, minimum: 10)) {
+            ForEach(Array(places.enumerated()), id: \.element.id) { index, place in
+                rankedBarRow(
+                    rank: index + 1,
+                    symbol: "mappin.circle.fill",
+                    title: place.title,
+                    value: "\(place.visitCount) \(place.visitCount == 1 ? "visit" : "visits")",
+                    detail: "\(place.dayCount) \(place.dayCount == 1 ? "day" : "days") · \(durationText(place.totalDuration))",
+                    progress: Double(place.visitCount) / Double(maximumVisits),
+                    color: Color(red: 0.98, green: 0.50, blue: 0.24)
+                )
+            }
+        }
+    }
+
+    private var activeDaysContent: some View {
+        let days = Array(snapshot.activeDays.prefix(aspect == .landscape ? 5 : 7))
+        let maximumScore = max(days.first?.activityScore ?? 1, 1)
+
+        return VStack(alignment: .leading, spacing: scaled(19, minimum: 10)) {
+            ForEach(Array(days.enumerated()), id: \.element.id) { index, day in
+                rankedBarRow(
+                    rank: index + 1,
+                    symbol: "calendar",
+                    title: day.date.formatted(.dateTime.weekday(.wide).day().month(.abbreviated).year()),
+                    value: distanceText(day.distanceMeters),
+                    detail: "\(day.placeCount) places · \(day.moveCount) moves · \(durationText(day.moveDuration))",
+                    progress: day.activityScore / maximumScore,
+                    color: Color(red: 0.22, green: 0.85, blue: 0.68)
+                )
+            }
+        }
+    }
+
+    private var transportContent: some View {
+        let transports = Array(snapshot.transports.prefix(aspect == .landscape ? 5 : 7))
+        let usesDistance = snapshot.totalDistanceMeters > 0
+        let maximum = max(
+            transports.map { usesDistance ? $0.distanceMeters : $0.duration }.max() ?? 1,
+            1
+        )
+
+        return VStack(alignment: .leading, spacing: scaled(26, minimum: 13)) {
+            HStack(spacing: scaled(18, minimum: 10)) {
+                metricTile(value: distanceText(snapshot.totalDistanceMeters), label: "total distance")
+                metricTile(value: durationText(snapshot.totalMoveDuration), label: "time moving")
+                metricTile(value: snapshot.busiestWeekday ?? "–", label: "busiest weekday")
+            }
+
+            VStack(alignment: .leading, spacing: scaled(19, minimum: 10)) {
+                ForEach(Array(transports.enumerated()), id: \.element.id) { index, transport in
+                    rankedBarRow(
+                        rank: index + 1,
+                        symbol: transport.mode.symbolName,
+                        title: transport.mode.title,
+                        value: distanceText(transport.distanceMeters),
+                        detail: "\(transport.segmentCount) segments · \(durationText(transport.duration))",
+                        progress: (usesDistance ? transport.distanceMeters : transport.duration) / maximum,
+                        color: MovesPalette.transport(transport.mode)
+                    )
+                }
+            }
+        }
+    }
+
+    private func metricTile(value: String, label: String) -> some View {
+        VStack(alignment: .leading, spacing: scaled(5, minimum: 3)) {
+            Text(value)
+                .font(.system(size: scaled(42, minimum: 23), weight: .black, design: .rounded))
+                .lineLimit(1)
+                .minimumScaleFactor(0.58)
+            Text(label.uppercased())
+                .font(.system(size: scaled(16, minimum: 10), weight: .bold, design: .rounded))
+                .tracking(scaled(1.2, minimum: 0.7))
+                .foregroundStyle(secondary)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(scaled(22, minimum: 13))
+        .background(primary.opacity(background.isLight ? 0.10 : 0.13), in: RoundedRectangle(cornerRadius: scaled(24, minimum: 15)))
+        .overlay {
+            RoundedRectangle(cornerRadius: scaled(24, minimum: 15))
+                .stroke(primary.opacity(0.15), lineWidth: 2)
+        }
+    }
+
+    private func detailTile(symbol: String, value: String, label: String) -> some View {
+        HStack(spacing: scaled(16, minimum: 9)) {
+            Image(systemName: symbol)
+                .font(.system(size: scaled(29, minimum: 18), weight: .bold))
+                .frame(width: scaled(50, minimum: 30), height: scaled(50, minimum: 30))
+                .background(primary.opacity(0.12), in: Circle())
+
+            VStack(alignment: .leading, spacing: scaled(2, minimum: 1)) {
+                Text(value)
+                    .font(.system(size: scaled(28, minimum: 17), weight: .bold, design: .rounded))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.65)
+                Text(label)
+                    .font(.system(size: scaled(17, minimum: 11), weight: .semibold, design: .rounded))
+                    .foregroundStyle(secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(scaled(20, minimum: 12))
+        .background(primary.opacity(background.isLight ? 0.08 : 0.10), in: RoundedRectangle(cornerRadius: scaled(20, minimum: 13)))
+    }
+
+    private func highlightRow(symbol: String, label: String, value: String, detail: String) -> some View {
+        HStack(spacing: scaled(17, minimum: 10)) {
+            Image(systemName: symbol)
+                .font(.system(size: scaled(27, minimum: 17), weight: .bold))
+                .frame(width: scaled(52, minimum: 32), height: scaled(52, minimum: 32))
+                .background(primary.opacity(0.13), in: Circle())
+
+            Text(label)
+                .font(.system(size: scaled(18, minimum: 12), weight: .semibold, design: .rounded))
+                .foregroundStyle(secondary)
+
+            Spacer()
+
+            VStack(alignment: .trailing, spacing: scaled(2, minimum: 1)) {
+                Text(value)
+                    .font(.system(size: scaled(23, minimum: 15), weight: .bold, design: .rounded))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.65)
+                Text(detail)
+                    .font(.system(size: scaled(16, minimum: 10), weight: .semibold, design: .rounded))
+                    .foregroundStyle(secondary)
+            }
+        }
+        .padding(.horizontal, scaled(20, minimum: 12))
+        .padding(.vertical, scaled(15, minimum: 9))
+        .background(primary.opacity(background.isLight ? 0.08 : 0.10), in: RoundedRectangle(cornerRadius: scaled(20, minimum: 13)))
+    }
+
+    private func rankedBarRow(
+        rank: Int,
+        symbol: String,
+        title: String,
+        value: String,
+        detail: String,
+        progress: Double,
+        color: Color
+    ) -> some View {
+        HStack(spacing: scaled(17, minimum: 10)) {
+            Text("\(rank)")
+                .font(.system(size: scaled(25, minimum: 16), weight: .black, design: .rounded))
+                .frame(width: scaled(42, minimum: 26))
+
+            Image(systemName: symbol)
+                .font(.system(size: scaled(27, minimum: 17), weight: .bold))
+                .frame(width: scaled(54, minimum: 33), height: scaled(54, minimum: 33))
+                .background(color.opacity(background.isLight ? 0.20 : 0.28), in: Circle())
+
+            VStack(alignment: .leading, spacing: scaled(8, minimum: 4)) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(title)
+                        .font(.system(size: scaled(25, minimum: 16), weight: .bold, design: .rounded))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.65)
+                    Spacer(minLength: 12)
+                    Text(value)
+                        .font(.system(size: scaled(22, minimum: 14), weight: .bold, design: .rounded))
+                        .lineLimit(1)
+                }
+
+                GeometryReader { geometry in
+                    Capsule()
+                        .fill(primary.opacity(0.12))
+                        .overlay(alignment: .leading) {
+                            Capsule()
+                                .fill(color)
+                                .frame(width: max(geometry.size.width * min(max(progress, 0), 1), scaled(10, minimum: 6)))
+                        }
+                }
+                .frame(height: scaled(13, minimum: 8))
+
+                Text(detail)
+                    .font(.system(size: scaled(16, minimum: 10), weight: .semibold, design: .rounded))
+                    .foregroundStyle(secondary)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.horizontal, scaled(20, minimum: 12))
+        .padding(.vertical, scaled(17, minimum: 9))
+        .background(primary.opacity(background.isLight ? 0.08 : 0.10), in: RoundedRectangle(cornerRadius: scaled(22, minimum: 14)))
+    }
+
+    private var footer: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(snapshot.periodLabel)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+            Spacer()
+            Text("Made with Moves")
+        }
+        .font(.system(size: scaled(18, minimum: 11), weight: .semibold, design: .rounded))
+        .foregroundStyle(secondary)
+    }
+
+    private func distanceText(_ meters: CLLocationDistance) -> String {
+        Measurement(value: max(meters, 0), unit: UnitLength.meters)
+            .formatted(.measurement(width: .abbreviated, usage: .road))
+    }
+
+    private func durationText(_ duration: TimeInterval) -> String {
+        DurationFormatter.text(for: duration)
     }
 }
 
