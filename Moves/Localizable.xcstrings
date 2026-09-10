@@ -1,12 +1,38 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "" : {
+
+    },
     "%@   %@" : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "new",
             "value" : "%1$@   %2$@"
+          }
+        }
+      }
+    },
+    "%@ · %@ · %@ · %@ map" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ · %2$@ · %3$@ · %4$@ map"
+          }
+        }
+      }
+    },
+    "%lld" : {
+
+    },
+    "%lld %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$lld %2$@"
           }
         }
       }
@@ -58,6 +84,9 @@
     "Arrived %@" : {
 
     },
+    "Aspect Ratio" : {
+
+    },
     "Auto-detected: %@" : {
 
     },
@@ -65,6 +94,9 @@
 
     },
     "Back up yesterday every night" : {
+
+    },
+    "Background" : {
 
     },
     "Background tracking uses iOS visit monitoring and significant location changes to record places and movement with low energy use. When this is off, Moves stops background listening until you turn it on again or start temporary route tracking." : {
@@ -92,6 +124,9 @@
 
     },
     "CSV (.csv)" : {
+
+    },
+    "Customize" : {
 
     },
     "Daily iCloud Backup" : {
@@ -125,6 +160,9 @@
 
     },
     "Delete Place?" : {
+
+    },
+    "Designs" : {
 
     },
     "Done" : {
@@ -181,6 +219,9 @@
     "iOS asks for notification permission the first time. If notifications are blocked, open Settings to allow them." : {
 
     },
+    "Jump to date" : {
+
+    },
     "Jump to Date" : {
 
     },
@@ -193,7 +234,13 @@
     "Listen for location changes" : {
 
     },
+    "Made with Moves" : {
+
+    },
     "Manual route" : {
+
+    },
+    "Map Style" : {
 
     },
     "Most active days" : {
@@ -205,6 +252,12 @@
     "Move remarks" : {
 
     },
+    "Move to next %@" : {
+
+    },
+    "Move to previous %@" : {
+
+    },
     "Moves" : {
 
     },
@@ -214,6 +267,9 @@
     "Moves will merge old duplicate places and moves. For duplicate stays at the same location/time, it keeps the one that best fits surrounding moves (or the longer stay if there is no move context). A snapshot is saved first so you can undo." : {
 
     },
+    "No activity" : {
+
+    },
     "No matching days for this filter yet." : {
 
     },
@@ -221,6 +277,9 @@
 
     },
     "No segments for this day yet." : {
+
+    },
+    "No Share Images" : {
 
     },
     "No timeline yet" : {
@@ -247,6 +306,9 @@
     "Organize in year/month folders" : {
 
     },
+    "Period" : {
+
+    },
     "Place" : {
 
     },
@@ -265,6 +327,19 @@
     "Remarks" : {
 
     },
+    "Rendering %lld of %lld share images" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Rendering %1$lld of %2$lld share images"
+          }
+        }
+      }
+    },
+    "Reset to Default" : {
+
+    },
     "Revert" : {
 
     },
@@ -274,10 +349,25 @@
     "Settings" : {
 
     },
+    "Share %@" : {
+
+    },
     "Share GPX" : {
 
     },
+    "Share Image Title" : {
+
+    },
+    "Share Images" : {
+
+    },
     "Share move as GPX" : {
+
+    },
+    "Share Selected Image" : {
+
+    },
+    "Share Selected Images" : {
 
     },
     "Show big map markers" : {
@@ -295,7 +385,13 @@
     "Supports GPX, TCX, KML, and GeoJSON route files. You can select one or multiple files at once. Duplicate points are merged automatically, and imported route tracks are preferred over less accurate phone/watch samples." : {
 
     },
+    "Tap images to select several, or use the share button on a single design. Statistics are calculated entirely on this device." : {
+
+    },
     "Tap to open settings. Touch and hold to start tracking." : {
+
+    },
+    "There are no recorded places or movements in this time span." : {
 
     },
     "These safeguards can end the session early if power gets tight." : {
@@ -305,6 +401,9 @@
 
     },
     "This removes this place from the timeline. You can undo the deletion afterwards." : {
+
+    },
+    "Title" : {
 
     },
     "Today" : {
@@ -332,6 +431,9 @@
 
     },
     "Use frequent GPS updates for the actual route when you need more detail. Battery use increases while this is on." : {
+
+    },
+    "Used by Places Map, All Tracks, Heat Map, and Calendar." : {
 
     },
     "When this is off, maps use small dots so more of the map stays visible." : {

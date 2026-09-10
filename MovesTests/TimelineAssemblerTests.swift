@@ -1298,6 +1298,108 @@ final class TimelineAssemblerTests: XCTestCase {
         XCTAssertEqual(restoredMoves.first?.dedupeKey, "undo-delete-move")
     }
 
+    func testSharePeriodsUseCalendarBoundariesWithoutIncludingTheNextPeriod() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Europe/Berlin")!
+        calendar.firstWeekday = 2
+
+        let selectedDate = calendar.date(from: DateComponents(
+            year: 2026,
+            month: 9,
+            day: 10,
+            hour: 12
+        ))!
+
+        for period in [MovesSharePeriod.day, .week, .month, .year] {
+            let interval = try XCTUnwrap(period.dateInterval(containing: selectedDate, calendar: calendar))
+            let lastMoment = interval.end.addingTimeInterval(-1)
+
+            XCTAssertTrue(
+                period.contains(lastMoment, periodStart: selectedDate, calendar: calendar),
+                "\(period.rawValue) should include its last moment"
+            )
+            XCTAssertFalse(
+                period.contains(interval.end, periodStart: selectedDate, calendar: calendar),
+                "\(period.rawValue) must not include the first moment of the next period"
+            )
+        }
+
+        XCTAssertTrue(
+            MovesSharePeriod.forever.contains(
+                .distantFuture,
+                periodStart: selectedDate,
+                calendar: calendar
+            )
+        )
+    }
+
+    func testSharePeriodsChooseDirectOrAggregatedTrackRendering() {
+        XCTAssertTrue(MovesSharePeriod.day.includesAllTracks)
+        XCTAssertTrue(MovesSharePeriod.week.includesAllTracks)
+        XCTAssertTrue(MovesSharePeriod.month.includesAllTracks)
+        XCTAssertTrue(MovesSharePeriod.year.includesAllTracks)
+        XCTAssertFalse(MovesSharePeriod.forever.includesAllTracks)
+
+        XCTAssertTrue(MovesSharePeriod.day.buildsTracksDirectly)
+        XCTAssertTrue(MovesSharePeriod.week.buildsTracksDirectly)
+        XCTAssertTrue(MovesSharePeriod.month.buildsTracksDirectly)
+        XCTAssertFalse(MovesSharePeriod.year.buildsTracksDirectly)
+        XCTAssertFalse(MovesSharePeriod.forever.buildsTracksDirectly)
+    }
+
+    func testShareCalendarIsOnlyAvailableForMonths() {
+        XCTAssertFalse(MovesSharePeriod.day.includesCalendar)
+        XCTAssertFalse(MovesSharePeriod.week.includesCalendar)
+        XCTAssertTrue(MovesSharePeriod.month.includesCalendar)
+        XCTAssertFalse(MovesSharePeriod.year.includesCalendar)
+        XCTAssertFalse(MovesSharePeriod.forever.includesCalendar)
+    }
+
+    func testShareMapAggregateRoundTripsThroughSwiftData() throws {
+        let schema = Schema([ShareMapAggregate.self])
+        let configuration = ModelConfiguration(
+            schema: schema,
+            isStoredInMemoryOnly: true,
+            cloudKitDatabase: .none
+        )
+        let container = try ModelContainer(for: schema, configurations: [configuration])
+        let context = ModelContext(container)
+        let periodStart = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        let tracks = [
+            ShareMapAggregateTrack(
+                id: UUID(),
+                transportMode: .cycling,
+                coordinates: [
+                    CLLocationCoordinate2D(latitude: 53.55, longitude: 9.99),
+                    CLLocationCoordinate2D(latitude: 53.56, longitude: 10.01)
+                ]
+            )
+        ]
+        let key = try XCTUnwrap(
+            ShareMapAggregateStore.periodKey(for: .year, date: periodStart)
+        )
+        context.insert(ShareMapAggregate(
+            periodKey: key,
+            period: .year,
+            periodStart: periodStart,
+            sourceSignature: ShareMapAggregateStore.sourceSignature(for: []),
+            tracksData: try ShareMapAggregateStore.encodeTracks(tracks)
+        ))
+        try context.save()
+
+        let restored = try XCTUnwrap(ShareMapAggregateStore.cachedTracks(
+            for: .year,
+            periodStart: periodStart,
+            timelines: [],
+            in: context
+        ))
+        XCTAssertEqual(restored.count, 1)
+        let restoredTrack = try XCTUnwrap(restored.first)
+        XCTAssertEqual(restoredTrack.transportMode, .cycling)
+        XCTAssertEqual(restoredTrack.coordinates.count, 2)
+        XCTAssertEqual(restoredTrack.coordinates.first?.latitude ?? 0, 53.55, accuracy: 0.000_001)
+    }
+
     private func makeInMemoryContainer() throws -> ModelContainer {
         let schema = Schema([
             DayTimeline.self,

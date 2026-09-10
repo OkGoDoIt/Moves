@@ -47,6 +47,9 @@
 		A50000012FD0000100000001 /* CloudDataPresencePublisher.swift in Sources */ = {isa = PBXBuildFile; fileRef = A50000012FD0000100000000 /* CloudDataPresencePublisher.swift */; };
 		A50000012FD0000100000002 /* CloudDataPresence in Frameworks */ = {isa = PBXBuildFile; productRef = A50000012FD0000100000004 /* CloudDataPresence */; };
 		A60000012FE0000100000001 /* DailyTimelineBackup.swift in Sources */ = {isa = PBXBuildFile; fileRef = A60000012FE0000100000000 /* DailyTimelineBackup.swift */; };
+		A70000012FF0000100000001 /* MovesShareViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A70000012FF0000100000000 /* MovesShareViews.swift */; };
+		A80000012FF0000100000001 /* MovesJumpToDateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A80000012FF0000100000000 /* MovesJumpToDateView.swift */; };
+		A90000012FF0000100000001 /* ShareMapAggregate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A90000012FF0000100000000 /* ShareMapAggregate.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -155,6 +158,9 @@
 		A40000012FC0000100000000 /* RouteFileImport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteFileImport.swift; sourceTree = "<group>"; };
 		A50000012FD0000100000000 /* CloudDataPresencePublisher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudDataPresencePublisher.swift; sourceTree = "<group>"; };
 		A60000012FE0000100000000 /* DailyTimelineBackup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DailyTimelineBackup.swift; sourceTree = "<group>"; };
+		A70000012FF0000100000000 /* MovesShareViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesShareViews.swift; sourceTree = "<group>"; };
+		A80000012FF0000100000000 /* MovesJumpToDateView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesJumpToDateView.swift; sourceTree = "<group>"; };
+		A90000012FF0000100000000 /* ShareMapAggregate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareMapAggregate.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -233,6 +239,9 @@
 				A50000012FD0000100000000 /* CloudDataPresencePublisher.swift */,
 				A60000012FE0000100000000 /* DailyTimelineBackup.swift */,
 				489A76362C4FC6F300F43B69 /* ContentView.swift */,
+				A70000012FF0000100000000 /* MovesShareViews.swift */,
+				A80000012FF0000100000000 /* MovesJumpToDateView.swift */,
+				A90000012FF0000100000000 /* ShareMapAggregate.swift */,
 				A10000012F00000100000001 /* MovesRouteSupport.swift */,
 				A10000012F00000100000003 /* MovesTimelineViews.swift */,
 				A10000012F00000100000005 /* MovesDetailViews.swift */,
@@ -507,6 +516,9 @@
 				A20000012FA0000100000003 /* WatchRouteInbox.swift in Sources */,
 				A30000012FB0000100000001 /* TimelineWidgetSnapshot.swift in Sources */,
 				489A76372C4FC6F300F43B69 /* ContentView.swift in Sources */,
+				A70000012FF0000100000001 /* MovesShareViews.swift in Sources */,
+				A80000012FF0000100000001 /* MovesJumpToDateView.swift in Sources */,
+				A90000012FF0000100000001 /* ShareMapAggregate.swift in Sources */,
 				A10000012F00000100000002 /* MovesRouteSupport.swift in Sources */,
 				A10000012F00000100000004 /* MovesTimelineViews.swift in Sources */,
 				A10000012F00000100000006 /* MovesDetailViews.swift in Sources */,
@@ -730,6 +742,7 @@
 				INFOPLIST_KEY_NSLocationUsageDescription = "Moves records your visits and routes on this device only to build your private daily timeline.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Moves records your visits and routes on this device only to build your private daily timeline.";
 				INFOPLIST_KEY_NSMotionUsageDescription = "Moves uses motion activity to infer transport modes on-device.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "To save images to the library";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -773,6 +786,7 @@
 				INFOPLIST_KEY_NSLocationUsageDescription = "Moves records your visits and routes on this device only to build your private daily timeline.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Moves records your visits and routes on this device only to build your private daily timeline.";
 				INFOPLIST_KEY_NSMotionUsageDescription = "Moves uses motion activity to infer transport modes on-device.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "To save images to the library";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

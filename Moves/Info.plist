@@ -5,6 +5,7 @@
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
 		<string>de.holgerkrupp.Moves.dailyTimelineBackup</string>
+		<string>de.holgerkrupp.Moves.shareMapAggregates</string>
 	</array>
 	<key>NSUbiquitousContainers</key>
 	<dict>
@@ -17,6 +18,15 @@
 			<key>NSUbiquitousContainerSupportedFolderLevels</key>
 			<string>Any</string>
 		</dict>
+	</dict>
+	<key>UILaunchScreen</key>
+	<dict>
+		<key>UIColorName</key>
+		<string>AccentColor</string>
+		<key>UIImageName</key>
+		<string>LaunchLogo</string>
+		<key>UIImageRespectsSafeAreaInsets</key>
+		<true/>
 	</dict>
 	<key>UIBackgroundModes</key>
 	<array>

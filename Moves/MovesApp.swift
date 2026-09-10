@@ -18,6 +18,7 @@ final class MovesAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
         application.applicationSupportsShakeToEdit = true
         UNUserNotificationCenter.current().delegate = self
         DailyTimelineBackup.registerBackgroundTask()
+        ShareMapAggregateBackgroundTask.register()
         return true
     }
 
@@ -70,30 +71,50 @@ struct MovesApp: App {
     }
 
     static func makeModelContainer() throws -> ModelContainer {
-        let schema = Schema([
+        let timelineSchema = Schema([
             DayTimeline.self,
             VisitPlace.self,
             MoveSegment.self,
             LocationSample.self,
         ])
+        let cacheSchema = Schema([ShareMapAggregate.self])
+        let schema = Schema([
+            DayTimeline.self,
+            VisitPlace.self,
+            MoveSegment.self,
+            LocationSample.self,
+            ShareMapAggregate.self,
+        ])
 
         let modelConfiguration: ModelConfiguration
+        let cacheConfiguration: ModelConfiguration
         #if targetEnvironment(simulator)
         modelConfiguration = ModelConfiguration(
-            schema: schema,
+            schema: timelineSchema,
+            isStoredInMemoryOnly: true,
+            cloudKitDatabase: .none
+        )
+        cacheConfiguration = ModelConfiguration(
+            "ShareMapCache",
+            schema: cacheSchema,
             isStoredInMemoryOnly: true,
             cloudKitDatabase: .none
         )
         #else
         modelConfiguration = ModelConfiguration(
-            schema: schema,
+            schema: timelineSchema,
             cloudKitDatabase: .private(Self.cloudKitContainerIdentifier)
+        )
+        cacheConfiguration = ModelConfiguration(
+            "ShareMapCache",
+            schema: cacheSchema,
+            cloudKitDatabase: .none
         )
         #endif
 
         let container = try ModelContainer(
             for: schema,
-            configurations: [modelConfiguration]
+            configurations: [modelConfiguration, cacheConfiguration]
         )
 
         #if targetEnvironment(simulator)
@@ -115,12 +136,16 @@ struct MovesApp: App {
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .active {
                 DailyTimelineBackup.scheduleNextRun()
+                ShareMapAggregateBackgroundTask.scheduleNextRun()
                 Task {
                     await captureManager.start()
                     await captureManager.refreshHistoricalBackfill()
                     healthWorkoutRouteAutoImporter.refreshInterruptedHistoricalImportState()
                     await healthWorkoutRouteAutoImporter.startIfNeeded()
                     await cloudDataPresencePublisher.publishNow()
+                }
+                Task(priority: .utility) {
+                    await ShareMapAggregateBuilder.refreshAll(in: sharedModelContainer)
                 }
             }
         }
