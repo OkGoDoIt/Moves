@@ -30,10 +30,12 @@
 			<string>Any</string>
 		</dict>
 	</dict>
-	<key>NSSiriUsageDescription</key>
-	<string>Use Siri to start or stop route tracking, hear timeline summaries, and export your private Moves data.</string>
-	<key>NSSupportsLiveActivities</key>
-	<true/>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>location</string>
+		<string>processing</string>
+		<string>remote-notification</string>
+	</array>
 	<key>UILaunchScreen</key>
 	<dict>
 		<key>UIColorName</key>
@@ -43,11 +45,5 @@
 		<key>UIImageRespectsSafeAreaInsets</key>
 		<true/>
 	</dict>
-	<key>UIBackgroundModes</key>
-	<array>
-		<string>location</string>
-		<string>processing</string>
-		<string>remote-notification</string>
-	</array>
 </dict>
 </plist>

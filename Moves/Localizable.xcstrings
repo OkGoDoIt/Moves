@@ -4,6 +4,9 @@
     "" : {
 
     },
+    "%@" : {
+
+    },
     "%@   %@" : {
       "localizations" : {
         "en" : {
@@ -63,10 +66,25 @@
         }
       }
     },
+    "1 hour" : {
+
+    },
+    "2 hours" : {
+
+    },
+    "4 hours" : {
+
+    },
+    "30 minutes" : {
+
+    },
     "A route is needed to share this move as GPX" : {
 
     },
     "Activity filter" : {
+
+    },
+    "All time" : {
 
     },
     "Always location access is needed to keep this running in the background." : {
@@ -121,6 +139,9 @@
 
     },
     "Created in Buxtehude by" : {
+
+    },
+    "CSV" : {
 
     },
     "CSV (.csv)" : {
@@ -183,6 +204,9 @@
     "Enable real route tracking" : {
 
     },
+    "Enabled" : {
+
+    },
     "End" : {
 
     },
@@ -192,19 +216,49 @@
     "Export" : {
 
     },
+    "Export ${period} as ${format}" : {
+
+    },
+    "Export Format" : {
+
+    },
+    "Export Timeline" : {
+
+    },
+    "Exports timeline data as a GPX, GeoJSON, or CSV file." : {
+
+    },
     "File Route Import" : {
 
     },
     "Format" : {
 
     },
+    "GeoJSON" : {
+
+    },
     "GeoJSON (.geojson)" : {
+
+    },
+    "Get Timeline Summary" : {
+
+    },
+    "Get Tracking Status" : {
+
+    },
+    "GPX" : {
 
     },
     "GPX (.gpx)" : {
 
     },
     "GPX route exported from Moves." : {
+
+    },
+    "GPX timeline exported from Moves." : {
+
+    },
+    "GPX Track" : {
 
     },
     "Grant location access above to start recording visits and movement." : {
@@ -214,6 +268,9 @@
 
     },
     "Imports GPS tracks from running, cycling, walking, and hiking workouts. Existing phone or watch points are deduplicated automatically." : {
+
+    },
+    "Includes the visited locations and movement tracks from the selected time span." : {
 
     },
     "iOS asks for notification permission the first time. If notifications are blocked, open Settings to allow them." : {
@@ -229,6 +286,9 @@
 
     },
     "Label (Home, Work...)" : {
+
+    },
+    "Last 7 days" : {
 
     },
     "Listen for location changes" : {
@@ -261,13 +321,22 @@
     "Moves" : {
 
     },
+    "Moves · %@" : {
+
+    },
     "Moves needs notification permission to send a stop alert. You can allow it in Settings." : {
+
+    },
+    "Moves needs to ask for location access before GPS tracking can start." : {
 
     },
     "Moves will merge old duplicate places and moves. For duplicate stays at the same location/time, it keeps the one that best fits surrounding moves (or the longer stay if there is no move context). A snapshot is saved first so you can undo." : {
 
     },
     "No activity" : {
+
+    },
+    "No GPX data in this time span" : {
 
     },
     "No matching days for this filter yet." : {
@@ -303,6 +372,9 @@
     "Open Settings" : {
 
     },
+    "Open Visited Place" : {
+
+    },
     "Organize in year/month folders" : {
 
     },
@@ -313,6 +385,9 @@
 
     },
     "Place remarks" : {
+
+    },
+    "Preparing GPX export…" : {
 
     },
     "Real route tracking" : {
@@ -337,6 +412,9 @@
         }
       }
     },
+    "Reports whether real route and background tracking are active." : {
+
+    },
     "Reset to Default" : {
 
     },
@@ -344,6 +422,12 @@
 
     },
     "Save" : {
+
+    },
+    "Set Background Tracking" : {
+
+    },
+    "Set background tracking to ${enabled}" : {
 
     },
     "Settings" : {
@@ -379,7 +463,40 @@
     "Start" : {
 
     },
+    "Start or stop high-accuracy GPS tracking" : {
+
+    },
+    "Start Real Route Tracking" : {
+
+    },
+    "Start real route tracking for ${duration}" : {
+
+    },
+    "Start Route Tracking" : {
+
+    },
+    "Starts frequent GPS tracking for a limited time." : {
+
+    },
+    "Starts real-route GPS tracking when it is off, or stops it when it is on." : {
+
+    },
     "Stop editing route" : {
+
+    },
+    "Stop Real Route Tracking" : {
+
+    },
+    "Stop Route Tracking" : {
+
+    },
+    "Stops frequent GPS tracking and returns to low-energy tracking." : {
+
+    },
+    "Summarize ${period}" : {
+
+    },
+    "Summarizes places, moves, distance, moving time, and steps." : {
 
     },
     "Supports GPX, TCX, KML, and GeoJSON route files. You can select one or multiple files at once. Duplicate points are merged automatically, and imported route tracks are preferred over less accurate phone/watch samples." : {
@@ -397,10 +514,19 @@
     "These safeguards can end the session early if power gets tight." : {
 
     },
+    "This month" : {
+
+    },
     "This removes this move from the timeline. You can undo the deletion afterwards." : {
 
     },
     "This removes this place from the timeline. You can undo the deletion afterwards." : {
+
+    },
+    "Timeline Period" : {
+
+    },
+    "Timeline Summary" : {
 
     },
     "Title" : {
@@ -409,7 +535,19 @@
     "Today" : {
 
     },
+    "Toggle Real Route Tracking" : {
+
+    },
+    "Toggle route tracking" : {
+
+    },
+    "Toggle Route Tracking" : {
+
+    },
     "Total" : {
+
+    },
+    "Tracking Duration" : {
 
     },
     "Tracking Modes" : {
@@ -427,6 +565,12 @@
     "Turn off in Low Power Mode" : {
 
     },
+    "Turns low-energy visit and significant-location tracking on or off." : {
+
+    },
+    "Until end of day" : {
+
+    },
     "Use Apple Health workout routes" : {
 
     },
@@ -436,7 +580,16 @@
     "Used by Places Map, All Tracks, Heat Map, and Calendar." : {
 
     },
+    "Visited %@" : {
+
+    },
+    "Visited Place" : {
+
+    },
     "When this is off, maps use small dots so more of the map stays visible." : {
+
+    },
+    "Yesterday" : {
 
     }
   },
