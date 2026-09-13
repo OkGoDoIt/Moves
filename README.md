@@ -1,5 +1,7 @@
 # Moves
 
+Moves can optionally upload recorded location samples to [Dawarich](https://dawarich.app), [Reitti](https://github.com/dedicatedcode/reitti), [GeoPulse](https://geopulse.cc), [OwnTracks Recorder](https://github.com/owntracks/recorder), and [Traccar](https://www.traccar.org). Configure each destination independently in Settings → Integrations. Cloud and self-hosted URLs are supported, secrets are stored in the iOS Keychain, and local-network HTTP is allowed while remote servers require HTTPS. Automatic uploads only include newly recorded points; uploading existing local history requires a separate confirmation for each destination.
+
 ## Siri and Shortcuts
 
 Moves provides App Intents for starting and stopping temporary real-route GPS tracking,

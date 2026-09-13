@@ -49,6 +49,7 @@ struct MovesApp: App {
     @StateObject private var watchRouteInbox: WatchRouteInbox
     @StateObject private var healthWorkoutRouteAutoImporter: HealthWorkoutRouteAutoImportManager
     @StateObject private var cloudDataPresencePublisher: MovesCloudDataPresencePublisher
+    @StateObject private var locationServiceSyncManager: LocationServiceSyncManager
 
     init() {
         do {
@@ -66,6 +67,9 @@ struct MovesApp: App {
             )
             _cloudDataPresencePublisher = StateObject(
                 wrappedValue: MovesCloudDataPresencePublisher(modelContainer: container)
+            )
+            _locationServiceSyncManager = StateObject(
+                wrappedValue: LocationServiceSyncManager(modelContainer: container)
             )
             MovesIntentRuntime.shared.configure(
                 modelContainer: container,
@@ -138,6 +142,7 @@ struct MovesApp: App {
                 .environmentObject(undoController)
                 .environmentObject(healthWorkoutRouteAutoImporter)
                 .environmentObject(cloudDataPresencePublisher)
+                .environmentObject(locationServiceSyncManager)
         }
         .modelContainer(sharedModelContainer)
         .onChange(of: scenePhase) { _, newPhase in
@@ -150,6 +155,7 @@ struct MovesApp: App {
                     healthWorkoutRouteAutoImporter.refreshInterruptedHistoricalImportState()
                     await healthWorkoutRouteAutoImporter.startIfNeeded()
                     await cloudDataPresencePublisher.publishNow()
+                    await locationServiceSyncManager.syncNewSamplesIfEnabled()
                 }
                 Task(priority: .utility) {
                     await ShareMapAggregateBuilder.refreshAll(in: sharedModelContainer)

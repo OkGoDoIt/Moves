@@ -18,6 +18,11 @@
 			</array>
 		</dict>
 	</array>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>NSUbiquitousContainers</key>
 	<dict>
 		<key>iCloud.de.holgerkrupp.Moves</key>

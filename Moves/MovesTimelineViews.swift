@@ -228,6 +228,17 @@ struct DayTimelinePageContent: View {
         presentationCache.transportSummaryMetrics
     }
 
+    private var transportSummaryRefreshKey: String {
+        dayTimeline.moves
+            .sorted { $0.id.uuidString < $1.id.uuidString }
+            .map { move in
+                let start = move.timelineStartDate.timeIntervalSinceReferenceDate
+                let end = move.endDate.timeIntervalSinceReferenceDate
+                return "\(move.id.uuidString)|\(move.transportModeRawValue)|\(start)|\(end)|\(move.distanceMeters)"
+            }
+            .joined(separator: ",")
+    }
+
     private static func transportSummaryMetrics(for dayTimeline: DayTimeline) -> [DayTransportSummaryMetric] {
         var durationByBucket: [DayTransportBucket: TimeInterval] = [:]
         var distanceByBucket: [DayTransportBucket: CLLocationDistance] = [:]
@@ -297,6 +308,9 @@ struct DayTimelinePageContent: View {
             await resolveProvisionalSampleTitle()
         }
         .onChange(of: dayTimeline.dayKey) { _, _ in
+            presentationCache = Self.makePresentationCache(for: dayTimeline)
+        }
+        .onChange(of: transportSummaryRefreshKey) { _, _ in
             presentationCache = Self.makePresentationCache(for: dayTimeline)
         }
     }

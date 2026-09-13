@@ -154,6 +154,23 @@ enum MovesSharePeriod: String, CaseIterable, Identifiable {
     }
 }
 
+enum MovesShareHeatScale {
+    static func intensity(frequency: Int, maximum: Int) -> CGFloat {
+        guard frequency > 1 else { return 0 }
+
+        // Keep the scale meaningful even when the selected period only contains
+        // a few repetitions, while still adapting to periods with much more data.
+        let absolute = min(log2(Double(frequency)) / 4, 1)
+        let relative: Double
+        if maximum > 1 {
+            relative = min(log(Double(frequency)) / log(Double(maximum)), 1)
+        } else {
+            relative = 0
+        }
+        return CGFloat(min(max(absolute * 0.8 + relative * 0.2, 0), 1))
+    }
+}
+
 private struct MovesSharePlace: Identifiable {
     let id: String
     let title: String
@@ -391,14 +408,8 @@ private struct MovesShareSnapshot {
         }
 
         let heatTracks: [MovesShareHeatTrack]
-        if period.includesAllTracks, !tracks.isEmpty {
-            heatTracks = tracks.map {
-                MovesShareHeatTrack(
-                    id: $0.id,
-                    coordinates: downsampled($0.coordinates, maximumCount: 160),
-                    usageCount: 1
-                )
-            }
+        if !tracks.isEmpty {
+            heatTracks = groupedHeatTracks(from: tracks)
         } else {
             heatTracks = groupedHeatTracks(from: allMoves)
         }
@@ -531,6 +542,49 @@ private struct MovesShareSnapshot {
                 return MovesShareHeatTrack(
                     id: move.id,
                     coordinates: downsampled(coordinates, maximumCount: 120),
+                    usageCount: route.usageCount
+                )
+            }
+    }
+
+    private static func groupedHeatTracks(from tracks: [MovesShareTrack]) -> [MovesShareHeatTrack] {
+        struct RouteAccumulator {
+            var representative: MovesShareTrack
+            var usageCount: Int
+        }
+
+        func coordinateKey(_ coordinate: CLLocationCoordinate2D) -> String {
+            let latitude = Int((coordinate.latitude * 1_000).rounded())
+            let longitude = Int((coordinate.longitude * 1_000).rounded())
+            return "\(latitude):\(longitude)"
+        }
+
+        var routes: [String: RouteAccumulator] = [:]
+        for track in tracks {
+            guard let start = track.coordinates.first,
+                  let end = track.coordinates.last else { continue }
+            let endpoints = [coordinateKey(start), coordinateKey(end)].sorted()
+            let key = endpoints.joined(separator: "|")
+            var route = routes[key] ?? RouteAccumulator(representative: track, usageCount: 0)
+            route.usageCount += 1
+            if track.coordinates.count > route.representative.coordinates.count {
+                route.representative = track
+            }
+            routes[key] = route
+        }
+
+        return routes.values
+            .sorted {
+                if $0.usageCount == $1.usageCount {
+                    return $0.representative.coordinates.count > $1.representative.coordinates.count
+                }
+                return $0.usageCount > $1.usageCount
+            }
+            .prefix(160)
+            .map { route in
+                MovesShareHeatTrack(
+                    id: route.representative.id,
+                    coordinates: downsampled(route.representative.coordinates, maximumCount: 160),
                     usageCount: route.usageCount
                 )
             }
@@ -1575,7 +1629,10 @@ private enum MovesShareMapRenderer {
                 }
                 return HeatPath(
                     path: path,
-                    intensity: normalizedHeatValue(track.usageCount, maximum: maximumUsage)
+                    intensity: MovesShareHeatScale.intensity(
+                        frequency: track.usageCount,
+                        maximum: maximumUsage
+                    )
                 )
             }
 
@@ -1588,7 +1645,10 @@ private enum MovesShareMapRenderer {
                 guard canvas.insetBy(dx: -80, dy: -80).contains(point) else { return nil }
                 return HeatPoint(
                     point: point,
-                    intensity: normalizedHeatValue(place.visitCount, maximum: maximumVisits)
+                    intensity: MovesShareHeatScale.intensity(
+                        frequency: place.visitCount,
+                        maximum: maximumVisits
+                    )
                 )
             }
 
@@ -1618,14 +1678,14 @@ private enum MovesShareMapRenderer {
         let width: CGFloat
         switch layer {
         case .yellow:
-            color = .systemYellow.withAlphaComponent(0.18 + heatPath.intensity * 0.12)
-            width = 34 + heatPath.intensity * 12
+            color = .systemYellow.withAlphaComponent(0.24 - heatPath.intensity * 0.06)
+            width = 36 + heatPath.intensity * 10
         case .orange:
-            color = .systemOrange.withAlphaComponent(0.24 + heatPath.intensity * 0.28)
-            width = 20 + heatPath.intensity * 8
+            color = .systemOrange.withAlphaComponent(0.55 * pow(heatPath.intensity, 0.8))
+            width = 19 + heatPath.intensity * 9
         case .red:
-            color = .systemRed.withAlphaComponent(0.28 + heatPath.intensity * 0.64)
-            width = 7 + heatPath.intensity * 8
+            color = .systemRed.withAlphaComponent(0.72 * pow(heatPath.intensity, 1.8))
+            width = 5 + heatPath.intensity * 10
         }
         context.addPath(heatPath.path)
         context.setStrokeColor(color.cgColor)
@@ -1642,13 +1702,13 @@ private enum MovesShareMapRenderer {
         let radiusScale: CGFloat
         switch layer {
         case .yellow:
-            color = .systemYellow.withAlphaComponent(0.18 + heatPoint.intensity * 0.18)
+            color = .systemYellow.withAlphaComponent(0.24 - heatPoint.intensity * 0.06)
             radiusScale = 1
         case .orange:
-            color = .systemOrange.withAlphaComponent(0.28 + heatPoint.intensity * 0.38)
+            color = .systemOrange.withAlphaComponent(0.62 * pow(heatPoint.intensity, 0.85))
             radiusScale = 0.64
         case .red:
-            color = .systemRed.withAlphaComponent(0.32 + heatPoint.intensity * 0.62)
+            color = .systemRed.withAlphaComponent(0.78 * pow(heatPoint.intensity, 1.9))
             radiusScale = 0.34
         }
         let radius = (30 + heatPoint.intensity * 44) * radiusScale
@@ -1666,11 +1726,6 @@ private enum MovesShareMapRenderer {
             endRadius: radius,
             options: [.drawsAfterEndLocation]
         )
-    }
-
-    private static func normalizedHeatValue(_ value: Int, maximum: Int) -> CGFloat {
-        guard maximum > 1 else { return 0.5 }
-        return CGFloat(log1p(Double(max(value, 1))) / log1p(Double(maximum)))
     }
 
     private static func drawTracks(

@@ -848,6 +848,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         }
 
         try saveIfNeeded()
+        NotificationCenter.default.post(name: .movesLocationSamplesDidChange, object: nil)
         return inserted
     }
 

@@ -357,6 +357,33 @@ final class TimelineAssemblerTests: XCTestCase {
         XCTAssertNil(segment.cachedRouteCoordinates(for: signature))
     }
 
+    func testMatchedRouteSynchronizesMoveDistanceWithDisplayedCoordinates() async {
+        let displayedCoordinates = [
+            CLLocationCoordinate2D(latitude: 53.481587, longitude: 9.695481),
+            CLLocationCoordinate2D(latitude: 53.482779, longitude: 9.684570),
+            CLLocationCoordinate2D(latitude: 53.480376, longitude: 9.687597),
+        ]
+        let segment = MoveSegment(
+            dedupeKey: "displayed-route-distance",
+            startDate: Date(timeIntervalSince1970: 1_789_195_419),
+            endDate: Date(timeIntervalSince1970: 1_789_195_547),
+            transportMode: .automotive,
+            distanceMeters: 539,
+            stepCount: nil
+        )
+        segment.storeManualRouteCoordinates(displayedCoordinates)
+
+        let matchedCoordinates = await RoadRouteMatcher.matchedCoordinates(for: segment)
+
+        XCTAssertEqual(matchedCoordinates.count, displayedCoordinates.count)
+        XCTAssertEqual(
+            segment.distanceMeters,
+            routeDistance(for: matchedCoordinates),
+            accuracy: 0.01
+        )
+        XCTAssertEqual(segment.distanceMeters, 1_071, accuracy: 1)
+    }
+
     func testPlaneArcBendsAboveShadowInNorthernHemisphere() {
         let start = CLLocationCoordinate2D(latitude: 37.6213, longitude: -122.3790)
         let end = CLLocationCoordinate2D(latitude: 40.6413, longitude: -73.7781)
@@ -1411,6 +1438,25 @@ final class TimelineAssemblerTests: XCTestCase {
             MovesSharePeriod.forever.gpxFileStem(for: selectedDate, calendar: calendar),
             "moves-all-days"
         )
+    }
+
+    func testShareHeatIntensityChangesGraduallyWithFrequency() {
+        let once = MovesShareHeatScale.intensity(frequency: 1, maximum: 100)
+        let twice = MovesShareHeatScale.intensity(frequency: 2, maximum: 100)
+        let fourTimes = MovesShareHeatScale.intensity(frequency: 4, maximum: 100)
+        let sixteenTimes = MovesShareHeatScale.intensity(frequency: 16, maximum: 100)
+        let maximum = MovesShareHeatScale.intensity(frequency: 100, maximum: 100)
+
+        XCTAssertEqual(once, 0)
+        XCTAssertGreaterThan(twice, once)
+        XCTAssertGreaterThan(fourTimes, twice)
+        XCTAssertGreaterThan(sixteenTimes, fourTimes)
+        XCTAssertGreaterThan(maximum, sixteenTimes)
+        XCTAssertLessThanOrEqual(maximum, 1)
+
+        // A low-frequency route must not become fully hot just because it is the
+        // most-used route in a short selected period.
+        XCTAssertLessThan(MovesShareHeatScale.intensity(frequency: 2, maximum: 2), 0.5)
     }
 
     func testSharePeriodsChooseDirectOrAggregatedTrackRendering() {

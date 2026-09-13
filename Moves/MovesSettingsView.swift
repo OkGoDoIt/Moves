@@ -17,6 +17,7 @@ import UIKit
 struct MovesSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
+    @EnvironmentObject private var locationServiceSyncManager: LocationServiceSyncManager
     @AppStorage(MapMarkerDisplaySettings.showsBigMarkersKey) private var showsBigMarkers = false
     @AppStorage(DailyTimelineBackup.isEnabledKey) private var dailyBackupIsEnabled = false
     @AppStorage(DailyTimelineBackup.formatKey) private var dailyBackupFormat = DailyTimelineBackupFormat.gpx.rawValue
@@ -115,6 +116,25 @@ struct MovesSettingsView: View {
                                 .font(.system(size: 12, weight: .medium, design: .rounded))
                                 .foregroundStyle(.secondary)
                         }
+                    }
+
+                    SettingsCard(title: "Integrations") {
+                        ForEach(LocationService.allCases) { service in
+                            NavigationLink {
+                                LocationServiceSettingsView(service: service)
+                            } label: {
+                                SettingsNavigationRow(
+                                    title: service.title,
+                                    systemImage: service.systemImage,
+                                    status: locationServiceSyncManager.connectionSummary(for: service)
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        Text("Optionally upload recorded points to one or more supported cloud or self-hosted location servers.")
+                            .font(.system(size: 12, weight: .medium, design: .rounded))
+                            .foregroundStyle(.secondary)
                     }
 
                     SettingsCard(title: "GPX Export") {
@@ -633,7 +653,7 @@ private struct HealthWorkoutRouteImportSettingsView: View {
     }
 }
 
-private struct SettingsCard<Content: View>: View {
+struct SettingsCard<Content: View>: View {
     let title: String
     @ViewBuilder let content: () -> Content
 

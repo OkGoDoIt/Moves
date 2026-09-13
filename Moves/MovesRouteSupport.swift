@@ -909,6 +909,15 @@ enum RoadRouteMatcher {
     private static let transientFallbackMemoTTL: TimeInterval = 3 * 60
 
     static func matchedCoordinates(for move: MoveSegment) async -> [CLLocationCoordinate2D] {
+        let coordinates = await resolveDisplayedCoordinates(for: move)
+        let displayedDistance = routeDistance(for: coordinates)
+        if abs(move.distanceMeters - displayedDistance) > 0.01 {
+            move.distanceMeters = displayedDistance
+        }
+        return coordinates
+    }
+
+    private static func resolveDisplayedCoordinates(for move: MoveSegment) async -> [CLLocationCoordinate2D] {
         if let manualCoordinates = move.manualRouteCoordinates {
             return manualCoordinates
         }

@@ -450,7 +450,7 @@ struct MoveMapDetailView: View {
                         .font(.system(size: 12, weight: .semibold, design: .rounded))
                         .foregroundStyle(activeRenderedRoute.tint)
                 }
-                Text("\(DurationFormatter.text(for: segment.timelineDuration))   \(Measurement(value: max(segment.distanceMeters, 0), unit: UnitLength.meters).formatted(.measurement(width: .abbreviated, usage: .road)))")
+                Text("\(DurationFormatter.text(for: segment.timelineDuration))   \(Measurement(value: max(routeDistance(for: routeCoordinates), 0), unit: UnitLength.meters).formatted(.measurement(width: .abbreviated, usage: .road)))")
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
                     .foregroundStyle(Color.primary.opacity(0.75))
 
@@ -634,6 +634,7 @@ struct MoveMapDetailView: View {
         segment.clearCachedRouteCoordinates()
         segment.clearManualRouteCoordinates()
         routeCoordinates = MoveRouteGeometry.rawCoordinates(for: segment)
+        segment.distanceMeters = routeDistance(for: routeCoordinates)
         refreshMoveGPXShareFile()
         manualRouteWaypointCoordinates = isEditingManualRoute
             ? ManualRouteGeometry.waypoints(for: routeCoordinates, transportMode: newMode)
@@ -754,6 +755,7 @@ struct MoveMapDetailView: View {
 
             segment.storeManualRouteCoordinates(committed)
             routeCoordinates = committed
+            segment.distanceMeters = routeDistance(for: committed)
             refreshMoveGPXShareFile()
             if isEditingManualRoute {
                 manualRouteWaypointCoordinates = ManualRouteGeometry.waypoints(

@@ -90,6 +90,9 @@
     "Always location access is needed to keep this running in the background." : {
 
     },
+    "API key" : {
+
+    },
     "Apple Health could not be opened from this device." : {
 
     },
@@ -109,6 +112,9 @@
 
     },
     "Auto-off %@." : {
+
+    },
+    "Automatically upload new points" : {
 
     },
     "Back up yesterday every night" : {
@@ -159,6 +165,9 @@
     "Date" : {
 
     },
+    "Dawarich" : {
+
+    },
     "Day Summary" : {
 
     },
@@ -186,6 +195,15 @@
     "Designs" : {
 
     },
+    "Disconnect" : {
+
+    },
+    "Disconnect Dawarich" : {
+
+    },
+    "Disconnect Dawarich?" : {
+
+    },
     "Done" : {
 
     },
@@ -210,6 +228,9 @@
     "End" : {
 
     },
+    "Every location sample stored in Moves will be sent to the connected Dawarich account. Existing matching points are deduplicated by Dawarich." : {
+
+    },
     "Expand map" : {
 
     },
@@ -229,6 +250,9 @@
 
     },
     "File Route Import" : {
+
+    },
+    "Find the API key in Dawarich Account → API access" : {
 
     },
     "Format" : {
@@ -267,6 +291,9 @@
     "Grant location access first to use this feature." : {
 
     },
+    "https://dawarich.example.com" : {
+
+    },
     "Imports GPS tracks from running, cycling, walking, and hiking workouts. Existing phone or watch points are deduplicated automatically." : {
 
     },
@@ -289,6 +316,12 @@
 
     },
     "Last 7 days" : {
+
+    },
+    "Last successful upload %@." : {
+
+    },
+    "Leave blank to keep saved API key" : {
 
     },
     "Listen for location changes" : {
@@ -328,6 +361,9 @@
 
     },
     "Moves needs to ask for location access before GPS tracking can start." : {
+
+    },
+    "Moves sends recorded location samples only. Dawarich deduplicates repeated points, so retrying or uploading all history is safe." : {
 
     },
     "Moves will merge old duplicate places and moves. For duplicate stays at the same location/time, it keeps the one that best fits surrounding moves (or the longer stay if there is no move context). A snapshot is saved first so you can undo." : {
@@ -373,6 +409,9 @@
 
     },
     "Open Visited Place" : {
+
+    },
+    "Optionally upload recorded points to Dawarich Cloud or your own self-hosted Dawarich server." : {
 
     },
     "Organize in year/month folders" : {
@@ -422,6 +461,12 @@
 
     },
     "Save" : {
+
+    },
+    "Self-hosted URLs may include a port or path. HTTPS is required outside your local network; local HTTP hosts are supported." : {
+
+    },
+    "Server" : {
 
     },
     "Set Background Tracking" : {
@@ -508,6 +553,15 @@
     "Tap to open settings. Touch and hold to start tracking." : {
 
     },
+    "Test and Save Connection" : {
+
+    },
+    "Testing…" : {
+
+    },
+    "The saved server and API key will be removed. Data already uploaded to Dawarich is not deleted." : {
+
+    },
     "There are no recorded places or movements in this time span." : {
 
     },
@@ -569,6 +623,21 @@
 
     },
     "Until end of day" : {
+
+    },
+    "Upload All History" : {
+
+    },
+    "Upload All Local History" : {
+
+    },
+    "Upload All Location History?" : {
+
+    },
+    "Upload New Points Now" : {
+
+    },
+    "Uploading location points…" : {
 
     },
     "Use Apple Health workout routes" : {
