@@ -127,23 +127,6 @@ struct MovesSettingsView: View {
                         }
                     }
 
-                    SettingsCard(title: "Insights") {
-                        NavigationLink {
-                            MovesStatisticsSearchView(dayTimelines: dayTimelines)
-                        } label: {
-                            SettingsNavigationRow(
-                                title: "Statistics & Search",
-                                systemImage: "chart.bar.xaxis",
-                                status: dayTimelines.isEmpty ? "No data" : nil
-                            )
-                        }
-                        .buttonStyle(.plain)
-
-                        Text("See your most visited locations, find past visits, and compare direct or indirect journeys between two places.")
-                            .font(.system(size: 12, weight: .medium, design: .rounded))
-                            .foregroundStyle(.secondary)
-                    }
-
                     AppIconPickerSection()
 
                     SettingsCard(title: "Integrations") {

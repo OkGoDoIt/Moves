@@ -211,6 +211,10 @@ struct MovesStatisticsSearchView: View {
         var id: String { rawValue }
     }
 
+    @Environment(\.dismiss) private var dismiss
+
+    private let dayTimelines: [DayTimeline]
+    private let initialDate: Date
     private let snapshot: MovesStatisticsSnapshot
 
     @State private var selectedSection = Section.overview
@@ -221,7 +225,9 @@ struct MovesStatisticsSearchView: View {
     @State private var includesReturnTrips = false
     @State private var endpointBeingSelected: ConnectionEndpoint?
 
-    init(dayTimelines: [DayTimeline]) {
+    init(dayTimelines: [DayTimeline], initialDate: Date = .now) {
+        self.dayTimelines = dayTimelines
+        self.initialDate = initialDate
         snapshot = MovesStatisticsSnapshot(dayTimelines: dayTimelines)
     }
 
@@ -257,6 +263,11 @@ struct MovesStatisticsSearchView: View {
         }
         .navigationTitle("Statistics & Search")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Done") { dismiss() }
+            }
+        }
         .sheet(item: $endpointBeingSelected) { endpoint in
             LocationSelectionView(
                 title: endpoint == .origin ? "Choose Start" : "Choose Destination",
@@ -276,6 +287,39 @@ struct MovesStatisticsSearchView: View {
                         StatisticsMetric(title: "Places", value: snapshot.locations.count.formatted())
                         StatisticsMetric(title: "Moves", value: snapshot.moves.count.formatted())
                     }
+                }
+
+                SettingsCard(title: "Create & Share") {
+                    NavigationLink {
+                        MovesShareGalleryView(
+                            dayTimelines: dayTimelines,
+                            initialDate: initialDate,
+                            showsDismissButton: false
+                        )
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "photo.stack")
+                                .foregroundStyle(MovesPalette.move)
+
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Share Images")
+                                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(.primary)
+                                Text("Create visual summaries and export GPX tracks")
+                                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Spacer(minLength: 8)
+                            Image(systemName: "chevron.right")
+                                .font(.footnote.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                        .contentShape(Rectangle())
+                        .padding(.vertical, 5)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(dayTimelines.allSatisfy { !$0.hasRecordedActivity })
                 }
 
                 SettingsCard(title: "Most Visited Locations") {

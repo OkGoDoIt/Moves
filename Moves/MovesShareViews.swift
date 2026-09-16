@@ -740,6 +740,7 @@ struct MovesShareGalleryView: View {
     @Environment(\.modelContext) private var modelContext
 
     private let dayTimelines: [DayTimeline]
+    private let showsDismissButton: Bool
     @State private var selectedPeriod: MovesSharePeriod = .day
     @State private var selectedDate: Date
     @State private var shareTitle = "My Moves"
@@ -760,8 +761,13 @@ struct MovesShareGalleryView: View {
     @State private var showsShareSheet = false
     @State private var isShowingDatePicker = false
 
-    init(dayTimelines: [DayTimeline], initialDate: Date) {
+    init(
+        dayTimelines: [DayTimeline],
+        initialDate: Date,
+        showsDismissButton: Bool = true
+    ) {
         self.dayTimelines = dayTimelines
+        self.showsDismissButton = showsDismissButton
         _selectedDate = State(initialValue: initialDate)
         let initialPeriodStart = MovesSharePeriod.day.start(for: initialDate)
         _snapshot = State(initialValue: MovesShareSnapshot.make(
@@ -1006,8 +1012,10 @@ struct MovesShareGalleryView: View {
         .navigationTitle("Share Images")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
-                Button("Done") { dismiss() }
+            if showsDismissButton {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
             }
 
             ToolbarItem(placement: .primaryAction) {

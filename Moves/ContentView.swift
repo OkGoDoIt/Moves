@@ -341,10 +341,9 @@ struct ContentView: View {
     @State private var selectedDayKey = ""
     @State private var selectedPageIndex = 0
     @State private var isShowingSettings = false
-    @State private var isShowingShareImages = false
+    @State private var isShowingStatisticsSearch = false
     @State private var isShowingRouteTrackingSettings = false
     @State private var isShowingDatePicker = false
-    @State private var shareImagesInitialDate = Date.now
 
     private var selectedDay: DayTimeline? {
         guard dayTimelines.indices.contains(selectedPageIndex) else { return nil }
@@ -442,14 +441,12 @@ struct ContentView: View {
 
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
-                        shareImagesInitialDate = selectedDay?.dayStart ?? .now
-                        isShowingShareImages = true
+                        isShowingStatisticsSearch = true
                     } label: {
-                        Image(systemName: "photo.stack")
+                        Image(systemName: "magnifyingglass")
                     }
-                    .disabled(dayTimelines.allSatisfy { !$0.hasRecordedActivity })
-                    .help("Share Images")
-                    .accessibilityLabel("Share Images")
+                    .help("Statistics & Search")
+                    .accessibilityLabel("Statistics & Search")
                 }
 
                 ToolbarItem(placement: .topBarTrailing) {
@@ -483,11 +480,11 @@ struct ContentView: View {
                 captureManager: captureManager
             )
         }
-        .sheet(isPresented: $isShowingShareImages) {
+        .sheet(isPresented: $isShowingStatisticsSearch) {
             NavigationStack {
-                MovesShareGalleryView(
+                MovesStatisticsSearchView(
                     dayTimelines: dayTimelines,
-                    initialDate: shareImagesInitialDate
+                    initialDate: selectedDay?.dayStart ?? .now
                 )
             }
         }
