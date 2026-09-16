@@ -17,12 +17,32 @@
         }
       }
     },
+    "%@ · %@ · %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ · %2$@ · %3$@"
+          }
+        }
+      }
+    },
     "%@ · %@ · %@ · %@ map" : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "new",
             "value" : "%1$@ · %2$@ · %3$@ · %4$@ map"
+          }
+        }
+      }
+    },
+    "%@ → %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ → %2$@"
           }
         }
       }
@@ -36,6 +56,16 @@
           "stringUnit" : {
             "state" : "new",
             "value" : "%1$lld %2$@"
+          }
+        }
+      }
+    },
+    "%lld journey%@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$lld journey%2$@"
           }
         }
       }
@@ -66,6 +96,26 @@
         }
       }
     },
+    "%lld visit%@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$lld visit%2$@"
+          }
+        }
+      }
+    },
+    "%lld visit%@ · %@ total" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$lld visit%2$@ · %3$@ total"
+          }
+        }
+      }
+    },
     "1 hour" : {
 
     },
@@ -90,7 +140,7 @@
     "Always location access is needed to keep this running in the background." : {
 
     },
-    "API key" : {
+    "App Icon" : {
 
     },
     "Apple Health could not be opened from this device." : {
@@ -135,6 +185,15 @@
     "Captured location" : {
 
     },
+    "Choose two different locations" : {
+
+    },
+    "Connection" : {
+
+    },
+    "Controls on left in landscape" : {
+
+    },
     "Could Not Delete Move" : {
 
     },
@@ -163,9 +222,6 @@
 
     },
     "Date" : {
-
-    },
-    "Dawarich" : {
 
     },
     "Day Summary" : {
@@ -198,10 +254,10 @@
     "Disconnect" : {
 
     },
-    "Disconnect Dawarich" : {
+    "Disconnect %@" : {
 
     },
-    "Disconnect Dawarich?" : {
+    "Disconnect %@?" : {
 
     },
     "Done" : {
@@ -228,7 +284,7 @@
     "End" : {
 
     },
-    "Every location sample stored in Moves will be sent to the connected Dawarich account. Existing matching points are deduplicated by Dawarich." : {
+    "Every location sample stored in Moves will be sent to %@. Repeating this action may create duplicate points if the server does not deduplicate them." : {
 
     },
     "Expand map" : {
@@ -250,9 +306,6 @@
 
     },
     "File Route Import" : {
-
-    },
-    "Find the API key in Dawarich Account → API access" : {
 
     },
     "Format" : {
@@ -291,13 +344,19 @@
     "Grant location access first to use this feature." : {
 
     },
-    "https://dawarich.example.com" : {
-
-    },
     "Imports GPS tracks from running, cycling, walking, and hiking workouts. Existing phone or watch points are deduplicated automatically." : {
 
     },
+    "Include indirect connections" : {
+
+    },
+    "Include return trips" : {
+
+    },
     "Includes the visited locations and movement tracks from the selected time span." : {
+
+    },
+    "Indirect connections can include up to eight legs and stops of up to 12 hours. Turn on return trips to calculate two-way commute statistics." : {
 
     },
     "iOS asks for notification permission the first time. If notifications are blocked, open Settings to allow them." : {
@@ -321,10 +380,13 @@
     "Last successful upload %@." : {
 
     },
-    "Leave blank to keep saved API key" : {
+    "Listen for location changes" : {
 
     },
-    "Listen for location changes" : {
+    "Location, note, or date" : {
+
+    },
+    "Locations will appear here after Moves records visits." : {
 
     },
     "Made with Moves" : {
@@ -363,19 +425,22 @@
     "Moves needs to ask for location access before GPS tracking can start." : {
 
     },
-    "Moves sends recorded location samples only. Dawarich deduplicates repeated points, so retrying or uploading all history is safe." : {
-
-    },
     "Moves will merge old duplicate places and moves. For duplicate stays at the same location/time, it keeps the one that best fits surrounding moves (or the longer stay if there is no move context). A snapshot is saved first so you can undo." : {
 
     },
     "No activity" : {
 
     },
+    "No Connections Found" : {
+
+    },
     "No GPX data in this time span" : {
 
     },
     "No matching days for this filter yet." : {
+
+    },
+    "No matching recorded journey exists between these locations." : {
 
     },
     "No movement summary available yet." : {
@@ -390,6 +455,9 @@
     "No timeline yet" : {
 
     },
+    "No Visits Yet" : {
+
+    },
     "Not Now" : {
 
     },
@@ -402,6 +470,12 @@
     "OK" : {
 
     },
+    "Open %@ setup documentation" : {
+
+    },
+    "Open details" : {
+
+    },
     "Open in Apple Health" : {
 
     },
@@ -411,7 +485,7 @@
     "Open Visited Place" : {
 
     },
-    "Optionally upload recorded points to Dawarich Cloud or your own self-hosted Dawarich server." : {
+    "Optionally upload recorded points to one or more supported cloud or self-hosted location servers." : {
 
     },
     "Organize in year/month folders" : {
@@ -426,7 +500,19 @@
     "Place remarks" : {
 
     },
+    "Places & Moves" : {
+
+    },
+    "Places, moves, and edit controls can be swapped to the left for comfortable one-handed use." : {
+
+    },
     "Preparing GPX export…" : {
+
+    },
+    "Put controls on left" : {
+
+    },
+    "Put controls on right" : {
 
     },
     "Real route tracking" : {
@@ -463,7 +549,13 @@
     "Save" : {
 
     },
-    "Self-hosted URLs may include a port or path. HTTPS is required outside your local network; local HTTP hosts are supported." : {
+    "Search by place, note, or date" : {
+
+    },
+    "Search locations" : {
+
+    },
+    "See your most visited locations, find past visits, and compare direct or indirect journeys between two places." : {
 
     },
     "Server" : {
@@ -526,6 +618,9 @@
     "Starts real-route GPS tracking when it is off, or stops it when it is on." : {
 
     },
+    "Statistics & Search" : {
+
+    },
     "Stop editing route" : {
 
     },
@@ -547,6 +642,9 @@
     "Supports GPX, TCX, KML, and GeoJSON route files. You can select one or multiple files at once. Duplicate points are merged automatically, and imported route tracks are preferred over less accurate phone/watch samples." : {
 
     },
+    "Swap" : {
+
+    },
     "Tap images to select several, or use the share button on a single design. Statistics are calculated entirely on this device." : {
 
     },
@@ -559,7 +657,7 @@
     "Testing…" : {
 
     },
-    "The saved server and API key will be removed. Data already uploaded to Dawarich is not deleted." : {
+    "The saved server and credentials will be removed. Data already uploaded to %@ is not deleted." : {
 
     },
     "There are no recorded places or movements in this time span." : {
@@ -610,6 +708,9 @@
     "Transport mode" : {
 
     },
+    "Try a location such as Hamburg, a note, or a date from your history." : {
+
+    },
     "Turn off" : {
 
     },
@@ -640,6 +741,9 @@
     "Uploading location points…" : {
 
     },
+    "URLs may include a port or path. HTTPS is required outside your local network; local HTTP hosts are supported." : {
+
+    },
     "Use Apple Health workout routes" : {
 
     },
@@ -647,6 +751,9 @@
 
     },
     "Used by Places Map, All Tracks, Heat Map, and Calendar." : {
+
+    },
+    "View" : {
 
     },
     "Visited %@" : {
@@ -659,6 +766,9 @@
 
     },
     "Yesterday" : {
+
+    },
+    "You will see when you traveled between them, plus minimum, average, and maximum journey times." : {
 
     }
   },

@@ -23,6 +23,82 @@ enum TrackingStatusBannerContext {
     case settings
 }
 
+enum LandscapeLayoutSettings {
+    static let controlsOnLeftKey = "landscapeControlsOnLeft"
+
+    static func isLandscapePhone(_ size: CGSize) -> Bool {
+        UIDevice.current.userInterfaceIdiom == .phone && size.width > size.height
+    }
+
+    static func controlPaneWidth(for size: CGSize) -> CGFloat {
+        min(max(size.width * 0.42, 300), 390)
+    }
+}
+
+struct LandscapeSplitView<MapPane: View, ControlPane: View>: View {
+    @AppStorage(LandscapeLayoutSettings.controlsOnLeftKey) private var controlsOnLeft = false
+
+    let spacing: CGFloat
+    @ViewBuilder let mapPane: () -> MapPane
+    @ViewBuilder let controlPane: () -> ControlPane
+
+    init(
+        spacing: CGFloat = 10,
+        @ViewBuilder mapPane: @escaping () -> MapPane,
+        @ViewBuilder controlPane: @escaping () -> ControlPane
+    ) {
+        self.spacing = spacing
+        self.mapPane = mapPane
+        self.controlPane = controlPane
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let controlWidth = LandscapeLayoutSettings.controlPaneWidth(for: proxy.size)
+
+            HStack(spacing: spacing) {
+                if controlsOnLeft {
+                    controlPane()
+                        .frame(width: controlWidth)
+                    mapPane()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    mapPane()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    controlPane()
+                        .frame(width: controlWidth)
+                }
+            }
+        }
+    }
+}
+
+struct LandscapePaneSideButton: View {
+    @AppStorage(LandscapeLayoutSettings.controlsOnLeftKey) private var controlsOnLeft = false
+
+    var body: some View {
+        Button {
+            withAnimation(.snappy(duration: 0.25)) {
+                controlsOnLeft.toggle()
+            }
+        } label: {
+            Label(
+                controlsOnLeft ? "Put controls on right" : "Put controls on left",
+                systemImage: controlsOnLeft
+                    ? "rectangle.righthalf.inset.filled"
+                    : "rectangle.lefthalf.inset.filled"
+            )
+            .labelStyle(.iconOnly)
+            .frame(width: 36, height: 36)
+            .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .frostedCircle(enabled: true)
+        .accessibilityLabel(controlsOnLeft ? "Put controls on right" : "Put controls on left")
+        .help(controlsOnLeft ? "Put controls on right" : "Put controls on left")
+    }
+}
+
 struct TrackingStatusBannerData {
     let title: String
     let message: String
@@ -311,6 +387,7 @@ struct ContentView: View {
                 VStack(spacing: 12) {
                     if let trackingPermissionPrompt {
                         trackingPermissionBanner(trackingPermissionPrompt)
+                            .safeAreaPadding(.horizontal, 14)
                     }
 
                     if let bannerData = trackingStatusBannerData(
@@ -323,12 +400,16 @@ struct ContentView: View {
                                 captureManager.disableTemporaryRouteTracking()
                             }
                         )
+                        .safeAreaPadding(.horizontal, 14)
                     }
 
                     if dayTimelines.isEmpty {
                         emptyState
+                            .safeAreaPadding(.horizontal, 14)
                     } else {
                         dayHeader
+                            .safeAreaPadding(.horizontal, 14)
+                            .padding(.top, 10)
 
                         TabView(selection: $selectedPageIndex) {
                             ForEach(Array(dayTimelines.enumerated()), id: \.element.dayKey) { index, day in
@@ -340,12 +421,10 @@ struct ContentView: View {
                                     
                             }
                         }
-                        .ignoresSafeArea()
                         .tabViewStyle(.page(indexDisplayMode: .never))
+                        .ignoresSafeArea(.container, edges: .bottom)
                     }
                 }
-                .padding(.horizontal, 14)
-                .padding(.top, 10)
                 
             }
             

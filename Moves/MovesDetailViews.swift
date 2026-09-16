@@ -39,17 +39,35 @@ struct PlaceMapDetailView: View {
     }
 
     var body: some View {
-        Map(position: $camera) {
-            if showsBigMarkers {
-                Marker(place.displayTitle, coordinate: place.coordinate)
-                    .tint(MovesPalette.place)
-            } else {
-                Annotation(place.displayTitle, coordinate: place.coordinate, anchor: .center) {
-                    MapLocationDot(tint: MovesPalette.place)
+        GeometryReader { proxy in
+            if LandscapeLayoutSettings.isLandscapePhone(proxy.size) {
+                LandscapeSplitView {
+                    placeMap
+                } controlPane: {
+                    ScrollView {
+                        VStack(spacing: 8) {
+                            HStack {
+                                Spacer()
+                                LandscapePaneSideButton()
+                            }
+                            placeControls
+                        }
+                        .padding(12)
+                    }
+                    .scrollIndicators(.hidden)
                 }
+                .safeAreaPadding(.horizontal, 12)
+                .safeAreaPadding(.bottom, 8)
+            } else {
+                placeMap
+                    .overlay(alignment: .bottom) {
+                        placeControls
+                            .padding(.horizontal, 12)
+                            .padding(.top, 12)
+                            .safeAreaPadding(.bottom, 12)
+                    }
             }
         }
-        .mapStyle(.standard(elevation: .flat, emphasis: .muted))
         .navigationTitle("Place")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -60,7 +78,6 @@ struct PlaceMapDetailView: View {
                     Image(systemName: "trash")
                 }
                 .disabled(isDeleting)
-                
             }
         }
         .confirmationDialog(
@@ -81,8 +98,24 @@ struct PlaceMapDetailView: View {
         } message: {
             Text(deleteErrorMessage)
         }
-        .overlay(alignment: .bottom) {
-            VStack(alignment: .leading, spacing: 8) {
+    }
+
+    private var placeMap: some View {
+        Map(position: $camera) {
+            if showsBigMarkers {
+                Marker(place.displayTitle, coordinate: place.coordinate)
+                    .tint(MovesPalette.place)
+            } else {
+                Annotation(place.displayTitle, coordinate: place.coordinate, anchor: .center) {
+                    MapLocationDot(tint: MovesPalette.place)
+                }
+            }
+        }
+        .mapStyle(.standard(elevation: .flat, emphasis: .muted))
+    }
+
+    private var placeControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
                 Text(place.displayTitle)
                     .font(.system(size: 18, weight: .bold, design: .rounded))
                 Text("Arrived \(place.arrivalDate, format: .dateTime.hour().minute())")
@@ -146,12 +179,10 @@ struct PlaceMapDetailView: View {
                     }
                     .buttonStyle(.bordered)
                 }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(14)
-            .panelSurface()
-            .padding(12)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .panelSurface()
     }
 
     private func saveLabel() {
@@ -298,51 +329,35 @@ struct MoveMapDetailView: View {
     }
 
     var body: some View {
-        MapReader { proxy in
-            Map(position: $camera, interactionModes: mapInteractionModes) {
-                if let start = segment.startPlace?.coordinate {
-                    if showsBigMarkers {
-                        Marker("Start", coordinate: start)
-                            .tint(MovesPalette.place)
-                    } else {
-                        Annotation("Start", coordinate: start, anchor: .center) {
-                            MapLocationDot(tint: MovesPalette.place)
+        GeometryReader { proxy in
+            if LandscapeLayoutSettings.isLandscapePhone(proxy.size) {
+                LandscapeSplitView {
+                    moveMap
+                } controlPane: {
+                    ScrollView {
+                        VStack(spacing: 8) {
+                            HStack {
+                                Spacer()
+                                LandscapePaneSideButton()
+                            }
+                            moveControls
                         }
+                        .padding(12)
                     }
+                    .scrollIndicators(.hidden)
                 }
-
-                if activeRenderedRoute.shadowCoordinates.count > 1 {
-                    MapPolyline(coordinates: activeRenderedRoute.shadowCoordinates)
-                        .stroke(activeRenderedRoute.shadowTint, lineWidth: activeRenderedRoute.shadowLineWidth)
-                }
-
-                if activeRenderedRoute.coordinates.count > 1 {
-                    MapPolyline(coordinates: activeRenderedRoute.coordinates)
-                        .stroke(activeRenderedRoute.tint, lineWidth: activeRenderedRoute.lineWidth)
-                }
-
-                if let end = segment.endPlace?.coordinate {
-                    if showsBigMarkers {
-                        Marker("End", coordinate: end)
-                            .tint(.red)
-                    } else {
-                        Annotation("End", coordinate: end, anchor: .center) {
-                            MapLocationDot(tint: .red)
-                        }
+                .safeAreaPadding(.horizontal, 12)
+                .safeAreaPadding(.bottom, 8)
+            } else {
+                moveMap
+                    .overlay(alignment: .bottom) {
+                        moveControls
+                            .padding(.horizontal, 12)
+                            .padding(.top, 12)
+                            .safeAreaPadding(.bottom, 12)
                     }
-                }
-
-                if isEditingManualRoute {
-                    ForEach(Array(manualRouteWaypointCoordinates.enumerated()), id: \.offset) { index, coordinate in
-                        Annotation("Waypoint", coordinate: coordinate, anchor: .center) {
-                            ManualRouteWaypointMarker(isActive: index == activeManualRouteWaypointIndex)
-                        }
-                    }
-                }
             }
-            .simultaneousGesture(manualRouteEditGesture(proxy: proxy))
         }
-        .mapStyle(.standard(elevation: .flat, emphasis: .muted))
         .navigationTitle("Move")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -419,8 +434,58 @@ struct MoveMapDetailView: View {
         .task(id: routeRefreshKey) {
             await refreshRouteCoordinates()
         }
-        .overlay(alignment: .bottom) {
-            VStack(alignment: .leading, spacing: 6) {
+    }
+
+    private var moveMap: some View {
+        MapReader { proxy in
+            Map(position: $camera, interactionModes: mapInteractionModes) {
+                if let start = segment.startPlace?.coordinate {
+                    if showsBigMarkers {
+                        Marker("Start", coordinate: start)
+                            .tint(MovesPalette.place)
+                    } else {
+                        Annotation("Start", coordinate: start, anchor: .center) {
+                            MapLocationDot(tint: MovesPalette.place)
+                        }
+                    }
+                }
+
+                if activeRenderedRoute.shadowCoordinates.count > 1 {
+                    MapPolyline(coordinates: activeRenderedRoute.shadowCoordinates)
+                        .stroke(activeRenderedRoute.shadowTint, lineWidth: activeRenderedRoute.shadowLineWidth)
+                }
+
+                if activeRenderedRoute.coordinates.count > 1 {
+                    MapPolyline(coordinates: activeRenderedRoute.coordinates)
+                        .stroke(activeRenderedRoute.tint, lineWidth: activeRenderedRoute.lineWidth)
+                }
+
+                if let end = segment.endPlace?.coordinate {
+                    if showsBigMarkers {
+                        Marker("End", coordinate: end)
+                            .tint(.red)
+                    } else {
+                        Annotation("End", coordinate: end, anchor: .center) {
+                            MapLocationDot(tint: .red)
+                        }
+                    }
+                }
+
+                if isEditingManualRoute {
+                    ForEach(Array(manualRouteWaypointCoordinates.enumerated()), id: \.offset) { index, coordinate in
+                        Annotation("Waypoint", coordinate: coordinate, anchor: .center) {
+                            ManualRouteWaypointMarker(isActive: index == activeManualRouteWaypointIndex)
+                        }
+                    }
+                }
+            }
+            .simultaneousGesture(manualRouteEditGesture(proxy: proxy))
+        }
+        .mapStyle(.standard(elevation: .flat, emphasis: .muted))
+    }
+
+    private var moveControls: some View {
+        VStack(alignment: .leading, spacing: 6) {
                 Text(moveRouteTitle)
                     .font(.system(size: 18, weight: .bold, design: .rounded))
                 Text(segment.transportMode.title)
@@ -471,12 +536,10 @@ struct MoveMapDetailView: View {
                     }
                     .buttonStyle(.bordered)
                 }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(14)
-            .panelSurface()
-            .padding(12)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .panelSurface()
     }
 
     @ViewBuilder

@@ -19,6 +19,7 @@ struct MovesSettingsView: View {
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var locationServiceSyncManager: LocationServiceSyncManager
     @AppStorage(MapMarkerDisplaySettings.showsBigMarkersKey) private var showsBigMarkers = false
+    @AppStorage(LandscapeLayoutSettings.controlsOnLeftKey) private var landscapeControlsOnLeft = false
     @AppStorage(DailyTimelineBackup.isEnabledKey) private var dailyBackupIsEnabled = false
     @AppStorage(DailyTimelineBackup.formatKey) private var dailyBackupFormat = DailyTimelineBackupFormat.gpx.rawValue
     @AppStorage(DailyTimelineBackup.usesMonthlyFoldersKey) private var dailyBackupUsesMonthlyFolders = false
@@ -115,8 +116,35 @@ struct MovesSettingsView: View {
                             Text("When this is off, maps use small dots so more of the map stays visible.")
                                 .font(.system(size: 12, weight: .medium, design: .rounded))
                                 .foregroundStyle(.secondary)
+
+                            Divider()
+
+                            Toggle("Controls on left in landscape", isOn: $landscapeControlsOnLeft)
+
+                            Text("Places, moves, and edit controls can be swapped to the left for comfortable one-handed use.")
+                                .font(.system(size: 12, weight: .medium, design: .rounded))
+                                .foregroundStyle(.secondary)
                         }
                     }
+
+                    SettingsCard(title: "Insights") {
+                        NavigationLink {
+                            MovesStatisticsSearchView(dayTimelines: dayTimelines)
+                        } label: {
+                            SettingsNavigationRow(
+                                title: "Statistics & Search",
+                                systemImage: "chart.bar.xaxis",
+                                status: dayTimelines.isEmpty ? "No data" : nil
+                            )
+                        }
+                        .buttonStyle(.plain)
+
+                        Text("See your most visited locations, find past visits, and compare direct or indirect journeys between two places.")
+                            .font(.system(size: 12, weight: .medium, design: .rounded))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    AppIconPickerSection()
 
                     SettingsCard(title: "Integrations") {
                         ForEach(LocationService.allCases) { service in

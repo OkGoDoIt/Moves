@@ -24,11 +24,60 @@
 		48F58C362FBB0F200027EE58 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 489A763A2C4FC6F500F43B69 /* Assets.xcassets */; };
 		48F58C372FBB0F200027EE58 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 489A763A2C4FC6F500F43B69 /* Assets.xcassets */; };
 		48F58C382FBB0F200027EE58 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 489A763A2C4FC6F500F43B69 /* Assets.xcassets */; };
+		48F91DF2305A5FF30011EEA3 /* BMW.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F91DF1305A5FF30011EEA3 /* BMW.icon */; };
+		48F91DF4305A608A0011EEA3 /* Magicneu.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F91DF3305A608A0011EEA3 /* Magicneu.icon */; };
+		48F91DF6305A61F70011EEA3 /* Magicalt.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F91DF5305A61F70011EEA3 /* Magicalt.icon */; };
+		48F91DF8305A62470011EEA3 /* maserati.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F91DF7305A62470011EEA3 /* maserati.icon */; };
+		48F91DFA305A63000011EEA3 /* ironman.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F91DF9305A63000011EEA3 /* ironman.icon */; };
+		48F91DFC305A63600011EEA3 /* NYC.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F91DFB305A63600011EEA3 /* NYC.icon */; };
+		48F91DFE305A6B7E0011EEA3 /* macro.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F91DFD305A6B7E0011EEA3 /* macro.icon */; };
+		48F91E00305A6B830011EEA3 /* moto.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F91DFF305A6B830011EEA3 /* moto.icon */; };
+		48F91E02305A710E0011EEA3 /* doom.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F91E01305A710E0011EEA3 /* doom.icon */; };
+		48F91E04305A73690011EEA3 /* OG.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F91E03305A73690011EEA3 /* OG.icon */; };
+		48F91E06305A743F0011EEA3 /* IBM.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F91E05305A743F0011EEA3 /* IBM.icon */; };
+		48F92460305A76250011EEA3 /* star.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F9245F305A76250011EEA3 /* star.icon */; };
+		48F92464305A78450011EEA3 /* MUC.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F92463305A78450011EEA3 /* MUC.icon */; };
+		48F92465305A78450011EEA3 /* Mac.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F92461305A78450011EEA3 /* Mac.icon */; };
+		48F92466305A78450011EEA3 /* mclaren.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F92462305A78450011EEA3 /* mclaren.icon */; };
+		48F9246E305A82D60011EEA3 /* mms.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F9246D305A82D60011EEA3 /* mms.icon */; };
+		48F92472305A83BC0011EEA3 /* paris.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F92471305A83BC0011EEA3 /* paris.icon */; };
+		48F92474305A844C0011EEA3 /* barcelona.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F92473305A844C0011EEA3 /* barcelona.icon */; };
+		48F92476305A85930011EEA3 /* DC.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F92475305A85930011EEA3 /* DC.icon */; };
+		48F92478305A86710011EEA3 /* mortal.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F92477305A86710011EEA3 /* mortal.icon */; };
+		48F9247B305A89B10011EEA3 /* mario.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F92479305A89B10011EEA3 /* mario.icon */; };
+		48F9247C305A89B10011EEA3 /* sunshine.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F9247A305A89B10011EEA3 /* sunshine.icon */; };
+		48F9247F305A8DB80011EEA3 /* megamanPerspective.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F9247E305A8DB80011EEA3 /* megamanPerspective.icon */; };
+		48F92480305A8DB80011EEA3 /* megaman.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F9247D305A8DB80011EEA3 /* megaman.icon */; };
+		48F92482305A8E540011EEA3 /* monsters.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F92481305A8E540011EEA3 /* monsters.icon */; };
+		48F92484305A9D500011EEA3 /* massi.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F92483305A9D500011EEA3 /* massi.icon */; };
+		48F92486305A9DF00011EEA3 /* impossible.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F92485305A9DF00011EEA3 /* impossible.icon */; };
+		48F92488305AA9190011EEA3 /* magnum.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F92487305AA9190011EEA3 /* magnum.icon */; };
+		48F9248A305AAA820011EEA3 /* metroid.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F92489305AAA820011EEA3 /* metroid.icon */; };
+		48F9248C305AAF070011EEA3 /* montblanc.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F9248B305AAF070011EEA3 /* montblanc.icon */; };
+		48F9248E305AB0340011EEA3 /* monsterEnergy.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F9248D305AB0340011EEA3 /* monsterEnergy.icon */; };
+		48F92490305AB31F0011EEA3 /* berg.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F9248F305AB31F0011EEA3 /* berg.icon */; };
+		48F92492305AB5C80011EEA3 /* Pride.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F92491305AB5C80011EEA3 /* Pride.icon */; };
+		48F925DA305AC1870011EEA3 /* milka.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F925D9305AC1870011EEA3 /* milka.icon */; };
+		48F925DC305AC3290011EEA3 /* Moritz.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F925DB305AC3290011EEA3 /* Moritz.icon */; };
+		48F925DE305AC4680011EEA3 /* mars.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F925DD305AC4680011EEA3 /* mars.icon */; };
+		48F925E1305AC5790011EEA3 /* megadrive.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F925DF305AC5790011EEA3 /* megadrive.icon */; };
+		48F925E2305AC5790011EEA3 /* megadrive2.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F925E0305AC5790011EEA3 /* megadrive2.icon */; };
+		48F925E6305ACD540011EEA3 /* metallica.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F925E5305ACD540011EEA3 /* metallica.icon */; };
+		48F925E9305ACE510011EEA3 /* ironMaiden.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F925E7305ACE510011EEA3 /* ironMaiden.icon */; };
+		48F925EA305ACE510011EEA3 /* ironMaiden2.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F925E8305ACE510011EEA3 /* ironMaiden2.icon */; };
+		48F925EC305ACF0B0011EEA3 /* madsen.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F925EB305ACF0B0011EEA3 /* madsen.icon */; };
+		48F925EF305AD1710011EEA3 /* TLS2016.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F925ED305AD1710011EEA3 /* TLS2016.icon */; };
+		48F925F0305AD1710011EEA3 /* TLSold.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F925EE305AD1710011EEA3 /* TLSold.icon */; };
+		48F925F2305AD31C0011EEA3 /* metroMelbourne.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F925F1305AD31C0011EEA3 /* metroMelbourne.icon */; };
+		48F925F4305AD7120011EEA3 /* sydney.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F925F3305AD7120011EEA3 /* sydney.icon */; };
+		48F925F6305B073A0011EEA3 /* M-stadt.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48F925F5305B073A0011EEA3 /* M-stadt.icon */; };
 		9A1B00012F00000100000004 /* TimelineAssemblerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A1B00012F00000100000002 /* TimelineAssemblerTests.swift */; };
 		A10000012F00000100000002 /* MovesRouteSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012F00000100000001 /* MovesRouteSupport.swift */; };
 		A10000012F00000100000004 /* MovesTimelineViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012F00000100000003 /* MovesTimelineViews.swift */; };
 		A10000012F00000100000006 /* MovesDetailViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012F00000100000005 /* MovesDetailViews.swift */; };
 		A10000012F00000100000008 /* MovesSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012F00000100000007 /* MovesSettingsView.swift */; };
+		A10000012F00000100000108 /* AppIconPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012F00000100000107 /* AppIconPicker.swift */; };
+		A10000012F00000100000208 /* GeneratedAppIcons.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012F00000100000207 /* GeneratedAppIcons.swift */; };
 		A20000012FA0000100000001 /* HealthWorkoutRouteImporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000012FA0000100000000 /* HealthWorkoutRouteImporter.swift */; };
 		A20000012FA0000100000003 /* WatchRouteInbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000012FA0000100000002 /* WatchRouteInbox.swift */; };
 		A20000012FA0000100000011 /* WatchMovesApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000012FA0000100000010 /* WatchMovesApp.swift */; };
@@ -57,6 +106,8 @@
 		C10000013000000100000006 /* MovesRouteTrackingAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000013000000100000004 /* MovesRouteTrackingAttributes.swift */; };
 		D10000013010000100000001 /* DawarichSync.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10000013010000100000000 /* DawarichSync.swift */; };
 		D10000013010000100000003 /* DawarichSyncTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10000013010000100000002 /* DawarichSyncTests.swift */; };
+		E10000013020000100000001 /* MovesStatisticsSearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10000013020000100000000 /* MovesStatisticsSearchView.swift */; };
+		E20000013020000100000001 /* MovesStatisticsSearchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000013020000100000000 /* MovesStatisticsSearchTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -140,12 +191,61 @@
 		48A8FC0E2F8CCC7E000EAECA /* CreatedByView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CreatedByView.swift; sourceTree = "<group>"; };
 		48A8FC102F8CCD27000EAECA /* VersionNumberView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VersionNumberView.swift; sourceTree = "<group>"; };
 		48E2BF8B2F9958A3004B7600 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
+		48F91DF1305A5FF30011EEA3 /* BMW.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = BMW.icon; sourceTree = "<group>"; };
+		48F91DF3305A608A0011EEA3 /* Magicneu.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = Magicneu.icon; sourceTree = "<group>"; };
+		48F91DF5305A61F70011EEA3 /* Magicalt.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = Magicalt.icon; sourceTree = "<group>"; };
+		48F91DF7305A62470011EEA3 /* maserati.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = maserati.icon; sourceTree = "<group>"; };
+		48F91DF9305A63000011EEA3 /* ironman.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = ironman.icon; sourceTree = "<group>"; };
+		48F91DFB305A63600011EEA3 /* NYC.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = NYC.icon; sourceTree = "<group>"; };
+		48F91DFD305A6B7E0011EEA3 /* macro.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = macro.icon; sourceTree = "<group>"; };
+		48F91DFF305A6B830011EEA3 /* moto.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = moto.icon; sourceTree = "<group>"; };
+		48F91E01305A710E0011EEA3 /* doom.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = doom.icon; sourceTree = "<group>"; };
+		48F91E03305A73690011EEA3 /* OG.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = OG.icon; sourceTree = "<group>"; };
+		48F91E05305A743F0011EEA3 /* IBM.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = IBM.icon; sourceTree = "<group>"; };
+		48F9245F305A76250011EEA3 /* star.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = star.icon; sourceTree = "<group>"; };
+		48F92461305A78450011EEA3 /* Mac.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = Mac.icon; sourceTree = "<group>"; };
+		48F92462305A78450011EEA3 /* mclaren.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = mclaren.icon; sourceTree = "<group>"; };
+		48F92463305A78450011EEA3 /* MUC.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = MUC.icon; sourceTree = "<group>"; };
+		48F9246D305A82D60011EEA3 /* mms.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = mms.icon; sourceTree = "<group>"; };
+		48F92471305A83BC0011EEA3 /* paris.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = paris.icon; sourceTree = "<group>"; };
+		48F92473305A844C0011EEA3 /* barcelona.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = barcelona.icon; sourceTree = "<group>"; };
+		48F92475305A85930011EEA3 /* DC.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = DC.icon; sourceTree = "<group>"; };
+		48F92477305A86710011EEA3 /* mortal.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = mortal.icon; sourceTree = "<group>"; };
+		48F92479305A89B10011EEA3 /* mario.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = mario.icon; sourceTree = "<group>"; };
+		48F9247A305A89B10011EEA3 /* sunshine.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = sunshine.icon; sourceTree = "<group>"; };
+		48F9247D305A8DB80011EEA3 /* megaman.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = megaman.icon; sourceTree = "<group>"; };
+		48F9247E305A8DB80011EEA3 /* megamanPerspective.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = megamanPerspective.icon; sourceTree = "<group>"; };
+		48F92481305A8E540011EEA3 /* monsters.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = monsters.icon; sourceTree = "<group>"; };
+		48F92483305A9D500011EEA3 /* massi.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = massi.icon; sourceTree = "<group>"; };
+		48F92485305A9DF00011EEA3 /* impossible.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = impossible.icon; sourceTree = "<group>"; };
+		48F92487305AA9190011EEA3 /* magnum.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = magnum.icon; sourceTree = "<group>"; };
+		48F92489305AAA820011EEA3 /* metroid.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = metroid.icon; sourceTree = "<group>"; };
+		48F9248B305AAF070011EEA3 /* montblanc.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = montblanc.icon; sourceTree = "<group>"; };
+		48F9248D305AB0340011EEA3 /* monsterEnergy.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = monsterEnergy.icon; sourceTree = "<group>"; };
+		48F9248F305AB31F0011EEA3 /* berg.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = berg.icon; sourceTree = "<group>"; };
+		48F92491305AB5C80011EEA3 /* Pride.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = Pride.icon; sourceTree = "<group>"; };
+		48F925D9305AC1870011EEA3 /* milka.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = milka.icon; sourceTree = "<group>"; };
+		48F925DB305AC3290011EEA3 /* Moritz.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = Moritz.icon; sourceTree = "<group>"; };
+		48F925DD305AC4680011EEA3 /* mars.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = mars.icon; sourceTree = "<group>"; };
+		48F925DF305AC5790011EEA3 /* megadrive.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = megadrive.icon; sourceTree = "<group>"; };
+		48F925E0305AC5790011EEA3 /* megadrive2.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = megadrive2.icon; sourceTree = "<group>"; };
+		48F925E5305ACD540011EEA3 /* metallica.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = metallica.icon; sourceTree = "<group>"; };
+		48F925E7305ACE510011EEA3 /* ironMaiden.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = ironMaiden.icon; sourceTree = "<group>"; };
+		48F925E8305ACE510011EEA3 /* ironMaiden2.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = ironMaiden2.icon; sourceTree = "<group>"; };
+		48F925EB305ACF0B0011EEA3 /* madsen.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = madsen.icon; sourceTree = "<group>"; };
+		48F925ED305AD1710011EEA3 /* TLS2016.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = TLS2016.icon; sourceTree = "<group>"; };
+		48F925EE305AD1710011EEA3 /* TLSold.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = TLSold.icon; sourceTree = "<group>"; };
+		48F925F1305AD31C0011EEA3 /* metroMelbourne.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = metroMelbourne.icon; sourceTree = "<group>"; };
+		48F925F3305AD7120011EEA3 /* sydney.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = sydney.icon; sourceTree = "<group>"; };
+		48F925F5305B073A0011EEA3 /* M-stadt.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = "M-stadt.icon"; sourceTree = "<group>"; };
 		9A1B00012F00000100000001 /* MovesTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MovesTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		9A1B00012F00000100000002 /* TimelineAssemblerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineAssemblerTests.swift; sourceTree = "<group>"; };
 		A10000012F00000100000001 /* MovesRouteSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesRouteSupport.swift; sourceTree = "<group>"; };
 		A10000012F00000100000003 /* MovesTimelineViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesTimelineViews.swift; sourceTree = "<group>"; };
 		A10000012F00000100000005 /* MovesDetailViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesDetailViews.swift; sourceTree = "<group>"; };
 		A10000012F00000100000007 /* MovesSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesSettingsView.swift; sourceTree = "<group>"; };
+		A10000012F00000100000107 /* AppIconPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppIconPicker.swift; sourceTree = "<group>"; };
+		A10000012F00000100000207 /* GeneratedAppIcons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeneratedAppIcons.swift; sourceTree = "<group>"; };
 		A20000012FA0000100000000 /* HealthWorkoutRouteImporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthWorkoutRouteImporter.swift; sourceTree = "<group>"; };
 		A20000012FA0000100000002 /* WatchRouteInbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchRouteInbox.swift; sourceTree = "<group>"; };
 		A20000012FA0000100000010 /* WatchMovesApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchMovesApp.swift; sourceTree = "<group>"; };
@@ -174,6 +274,8 @@
 		C10000013000000100000004 /* MovesRouteTrackingAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesRouteTrackingAttributes.swift; sourceTree = "<group>"; };
 		D10000013010000100000000 /* DawarichSync.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DawarichSync.swift; sourceTree = "<group>"; };
 		D10000013010000100000002 /* DawarichSyncTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DawarichSyncTests.swift; sourceTree = "<group>"; };
+		E10000013020000100000000 /* MovesStatisticsSearchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesStatisticsSearchView.swift; sourceTree = "<group>"; };
+		E20000013020000100000000 /* MovesStatisticsSearchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesStatisticsSearchTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -243,6 +345,7 @@
 		489A76332C4FC6F300F43B69 /* Moves */ = {
 			isa = PBXGroup;
 			children = (
+				48F91DF0305A5FD70011EEA3 /* Icons */,
 				D10000013010000100000000 /* DawarichSync.swift */,
 				48A8FC0E2F8CCC7E000EAECA /* CreatedByView.swift */,
 				48A8FC102F8CCD27000EAECA /* VersionNumberView.swift */,
@@ -262,6 +365,9 @@
 				A10000012F00000100000003 /* MovesTimelineViews.swift */,
 				A10000012F00000100000005 /* MovesDetailViews.swift */,
 				A10000012F00000100000007 /* MovesSettingsView.swift */,
+				E10000013020000100000000 /* MovesStatisticsSearchView.swift */,
+				A10000012F00000100000107 /* AppIconPicker.swift */,
+				A10000012F00000100000207 /* GeneratedAppIcons.swift */,
 				A20000012FA0000100000000 /* HealthWorkoutRouteImporter.swift */,
 				A40000012FC0000100000000 /* RouteFileImport.swift */,
 				A20000012FA0000100000002 /* WatchRouteInbox.swift */,
@@ -290,10 +396,65 @@
 			name = Frameworks;
 			sourceTree = "<group>";
 		};
+		48F91DF0305A5FD70011EEA3 /* Icons */ = {
+			isa = PBXGroup;
+			children = (
+				48F925EB305ACF0B0011EEA3 /* madsen.icon */,
+				48F925E7305ACE510011EEA3 /* ironMaiden.icon */,
+				48F925E8305ACE510011EEA3 /* ironMaiden2.icon */,
+				48F925E5305ACD540011EEA3 /* metallica.icon */,
+				48F925DF305AC5790011EEA3 /* megadrive.icon */,
+				48F925E0305AC5790011EEA3 /* megadrive2.icon */,
+				48F925DD305AC4680011EEA3 /* mars.icon */,
+				48F925D9305AC1870011EEA3 /* milka.icon */,
+				48F925DB305AC3290011EEA3 /* Moritz.icon */,
+				48F925F3305AD7120011EEA3 /* sydney.icon */,
+				48F92491305AB5C80011EEA3 /* Pride.icon */,
+				48F92485305A9DF00011EEA3 /* impossible.icon */,
+				48F92483305A9D500011EEA3 /* massi.icon */,
+				48F9248D305AB0340011EEA3 /* monsterEnergy.icon */,
+				48F92481305A8E540011EEA3 /* monsters.icon */,
+				48F9247D305A8DB80011EEA3 /* megaman.icon */,
+				48F9247E305A8DB80011EEA3 /* megamanPerspective.icon */,
+				48F92479305A89B10011EEA3 /* mario.icon */,
+				48F9248B305AAF070011EEA3 /* montblanc.icon */,
+				48F92489305AAA820011EEA3 /* metroid.icon */,
+				48F9247A305A89B10011EEA3 /* sunshine.icon */,
+				48F92477305A86710011EEA3 /* mortal.icon */,
+				48F92475305A85930011EEA3 /* DC.icon */,
+				48F92487305AA9190011EEA3 /* magnum.icon */,
+				48F92471305A83BC0011EEA3 /* paris.icon */,
+				48F92473305A844C0011EEA3 /* barcelona.icon */,
+				48F9246D305A82D60011EEA3 /* mms.icon */,
+				48F9248F305AB31F0011EEA3 /* berg.icon */,
+				48F92461305A78450011EEA3 /* Mac.icon */,
+				48F925F5305B073A0011EEA3 /* M-stadt.icon */,
+				48F92462305A78450011EEA3 /* mclaren.icon */,
+				48F92463305A78450011EEA3 /* MUC.icon */,
+				48F91E05305A743F0011EEA3 /* IBM.icon */,
+				48F91E03305A73690011EEA3 /* OG.icon */,
+				48F91E01305A710E0011EEA3 /* doom.icon */,
+				48F91DF1305A5FF30011EEA3 /* BMW.icon */,
+				48F91DF3305A608A0011EEA3 /* Magicneu.icon */,
+				48F91DF5305A61F70011EEA3 /* Magicalt.icon */,
+				48F91DF7305A62470011EEA3 /* maserati.icon */,
+				48F925F1305AD31C0011EEA3 /* metroMelbourne.icon */,
+				48F925ED305AD1710011EEA3 /* TLS2016.icon */,
+				48F925EE305AD1710011EEA3 /* TLSold.icon */,
+				48F91DF9305A63000011EEA3 /* ironman.icon */,
+				48F91DFB305A63600011EEA3 /* NYC.icon */,
+				48F91DFD305A6B7E0011EEA3 /* macro.icon */,
+				48F9245F305A76250011EEA3 /* star.icon */,
+				48F91DFF305A6B830011EEA3 /* moto.icon */,
+			);
+			path = Icons;
+			sourceTree = "<group>";
+		};
 		9A1B00012F00000100000003 /* MovesTests */ = {
 			isa = PBXGroup;
 			children = (
 				D10000013010000100000002 /* DawarichSyncTests.swift */,
+				E20000013020000100000000 /* MovesStatisticsSearchTests.swift */,
 				9A1B00012F00000100000002 /* TimelineAssemblerTests.swift */,
 			);
 			path = MovesTests;
@@ -332,6 +493,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 489A76412C4FC6F500F43B69 /* Build configuration list for PBXNativeTarget "Moves" */;
 			buildPhases = (
+				A10000012F00000100000209 /* Generate App Icon Previews */,
 				489A762D2C4FC6F300F43B69 /* Sources */,
 				489A762E2C4FC6F300F43B69 /* Frameworks */,
 				489A762F2C4FC6F300F43B69 /* Resources */,
@@ -481,10 +643,57 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				48F92490305AB31F0011EEA3 /* berg.icon in Resources */,
+				48F91E06305A743F0011EEA3 /* IBM.icon in Resources */,
+				48F9248C305AAF070011EEA3 /* montblanc.icon in Resources */,
+				48F92482305A8E540011EEA3 /* monsters.icon in Resources */,
+				48F925EC305ACF0B0011EEA3 /* madsen.icon in Resources */,
+				48F91DF4305A608A0011EEA3 /* Magicneu.icon in Resources */,
+				48F925F4305AD7120011EEA3 /* sydney.icon in Resources */,
+				48F92474305A844C0011EEA3 /* barcelona.icon in Resources */,
+				48F91DF2305A5FF30011EEA3 /* BMW.icon in Resources */,
+				48F91E04305A73690011EEA3 /* OG.icon in Resources */,
+				48F9246E305A82D60011EEA3 /* mms.icon in Resources */,
+				48F92488305AA9190011EEA3 /* magnum.icon in Resources */,
+				48F92472305A83BC0011EEA3 /* paris.icon in Resources */,
+				48F91DF8305A62470011EEA3 /* maserati.icon in Resources */,
+				48F925EF305AD1710011EEA3 /* TLS2016.icon in Resources */,
+				48F925F0305AD1710011EEA3 /* TLSold.icon in Resources */,
+				48F925E6305ACD540011EEA3 /* metallica.icon in Resources */,
+				48F925E1305AC5790011EEA3 /* megadrive.icon in Resources */,
+				48F925E2305AC5790011EEA3 /* megadrive2.icon in Resources */,
+				48F925F2305AD31C0011EEA3 /* metroMelbourne.icon in Resources */,
+				48F91DFA305A63000011EEA3 /* ironman.icon in Resources */,
+				48F92484305A9D500011EEA3 /* massi.icon in Resources */,
+				48F92478305A86710011EEA3 /* mortal.icon in Resources */,
+				48F91E02305A710E0011EEA3 /* doom.icon in Resources */,
+				48F9248E305AB0340011EEA3 /* monsterEnergy.icon in Resources */,
 				489A763E2C4FC6F500F43B69 /* Preview Assets.xcassets in Resources */,
+				48F9248A305AAA820011EEA3 /* metroid.icon in Resources */,
+				48F925DE305AC4680011EEA3 /* mars.icon in Resources */,
+				48F91DFC305A63600011EEA3 /* NYC.icon in Resources */,
+				48F91DFE305A6B7E0011EEA3 /* macro.icon in Resources */,
+				48F92460305A76250011EEA3 /* star.icon in Resources */,
+				48F91DF6305A61F70011EEA3 /* Magicalt.icon in Resources */,
 				489A763B2C4FC6F500F43B69 /* Assets.xcassets in Resources */,
+				48F9247B305A89B10011EEA3 /* mario.icon in Resources */,
+				48F925DA305AC1870011EEA3 /* milka.icon in Resources */,
+				48F9247C305A89B10011EEA3 /* sunshine.icon in Resources */,
+				48F92464305A78450011EEA3 /* MUC.icon in Resources */,
+				48F925DC305AC3290011EEA3 /* Moritz.icon in Resources */,
+				48F92486305A9DF00011EEA3 /* impossible.icon in Resources */,
+				48F92476305A85930011EEA3 /* DC.icon in Resources */,
+				48F92465305A78450011EEA3 /* Mac.icon in Resources */,
+				48F925F6305B073A0011EEA3 /* M-stadt.icon in Resources */,
+				48F92466305A78450011EEA3 /* mclaren.icon in Resources */,
 				48E2BF8C2F9958A3004B7600 /* Localizable.xcstrings in Resources */,
 				48A8FACF2F85166D000EAECA /* AppIcon.icon in Resources */,
+				48F91E00305A6B830011EEA3 /* moto.icon in Resources */,
+				48F9247F305A8DB80011EEA3 /* megamanPerspective.icon in Resources */,
+				48F92480305A8DB80011EEA3 /* megaman.icon in Resources */,
+				48F92492305AB5C80011EEA3 /* Pride.icon in Resources */,
+				48F925E9305ACE510011EEA3 /* ironMaiden.icon in Resources */,
+				48F925EA305ACE510011EEA3 /* ironMaiden2.icon in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -524,6 +733,28 @@
 		};
 /* End PBXResourcesBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		A10000012F00000100000209 /* Generate App Icon Previews */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Generate App Icon Previews";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# Regenerates icon previews, the picker's icon list, and CFBundleAlternateIcons\n# from the .icon bundles in Moves/Icons. See the script for details.\n\"${SRCROOT}/Scripts/generate-icon-previews.sh\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		489A762D2C4FC6F300F43B69 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -543,6 +774,9 @@
 				A10000012F00000100000004 /* MovesTimelineViews.swift in Sources */,
 				A10000012F00000100000006 /* MovesDetailViews.swift in Sources */,
 				A10000012F00000100000008 /* MovesSettingsView.swift in Sources */,
+				E10000013020000100000001 /* MovesStatisticsSearchView.swift in Sources */,
+				A10000012F00000100000108 /* AppIconPicker.swift in Sources */,
+				A10000012F00000100000208 /* GeneratedAppIcons.swift in Sources */,
 				489A76452C4FC70D00F43B69 /* LocationChange.swift in Sources */,
 				A50000012FD0000100000001 /* CloudDataPresencePublisher.swift in Sources */,
 				A60000012FE0000100000001 /* DailyTimelineBackup.swift in Sources */,
@@ -560,6 +794,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				D10000013010000100000003 /* DawarichSyncTests.swift in Sources */,
+				E20000013020000100000001 /* MovesStatisticsSearchTests.swift in Sources */,
 				9A1B00012F00000100000004 /* TimelineAssemblerTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -752,11 +987,13 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_ENTITLEMENTS = Moves/Moves.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 32;
+				CURRENT_PROJECT_VERSION = 36;
 				DEVELOPMENT_ASSET_PATHS = "\"Moves/Preview Content\"";
 				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Moves/Info.plist;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -780,7 +1017,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 2026.14;
+				MARKETING_VERSION = 2026.16;
 				PRODUCT_BUNDLE_IDENTIFIER = de.holgerkrupp.Moves;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -798,11 +1035,13 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_ENTITLEMENTS = Moves/Moves.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 32;
+				CURRENT_PROJECT_VERSION = 36;
 				DEVELOPMENT_ASSET_PATHS = "\"Moves/Preview Content\"";
 				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Moves/Info.plist;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -826,7 +1065,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 2026.14;
+				MARKETING_VERSION = 2026.16;
 				PRODUCT_BUNDLE_IDENTIFIER = de.holgerkrupp.Moves;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -896,14 +1135,14 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = "Moves Watch App/MovesWatch.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 32;
+				CURRENT_PROJECT_VERSION = 36;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Moves Watch App/Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 2026.14;
+				MARKETING_VERSION = 2026.16;
 				PRODUCT_BUNDLE_IDENTIFIER = de.holgerkrupp.Moves.watchkitapp;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = watchos;
@@ -922,14 +1161,14 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = "Moves Watch App/MovesWatch.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 32;
+				CURRENT_PROJECT_VERSION = 36;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Moves Watch App/Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 2026.14;
+				MARKETING_VERSION = 2026.16;
 				PRODUCT_BUNDLE_IDENTIFIER = de.holgerkrupp.Moves.watchkitapp;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = watchos;
@@ -948,7 +1187,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = "Moves Widgets/MovesWidgets.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 32;
+				CURRENT_PROJECT_VERSION = 36;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Moves Widgets/MovesWidgets-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -956,7 +1195,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 2026.14;
+				MARKETING_VERSION = 2026.16;
 				PRODUCT_BUNDLE_IDENTIFIER = de.holgerkrupp.Moves.widgets;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -974,7 +1213,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = "Moves Widgets/MovesWidgets.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 32;
+				CURRENT_PROJECT_VERSION = 36;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Moves Widgets/MovesWidgets-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -982,7 +1221,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 2026.14;
+				MARKETING_VERSION = 2026.16;
 				PRODUCT_BUNDLE_IDENTIFIER = de.holgerkrupp.Moves.widgets;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -1000,7 +1239,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = "Moves Widgets/MovesWidgets.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 32;
+				CURRENT_PROJECT_VERSION = 36;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Moves Widgets/MovesWidgets-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1008,7 +1247,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 2026.14;
+				MARKETING_VERSION = 2026.16;
 				PRODUCT_BUNDLE_IDENTIFIER = de.holgerkrupp.Moves.watchkitapp.widgets;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = watchos;
@@ -1027,7 +1266,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = "Moves Widgets/MovesWidgets.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 32;
+				CURRENT_PROJECT_VERSION = 36;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Moves Widgets/MovesWidgets-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1035,7 +1274,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 2026.14;
+				MARKETING_VERSION = 2026.16;
 				PRODUCT_BUNDLE_IDENTIFIER = de.holgerkrupp.Moves.watchkitapp.widgets;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = watchos;
