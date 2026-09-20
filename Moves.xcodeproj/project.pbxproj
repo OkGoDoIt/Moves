@@ -134,6 +134,16 @@
 		F2100001305000010000000F /* NearbyPlaceSuggester.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2100001305000010000000E /* NearbyPlaceSuggester.swift */; };
 		F21000013050000100000011 /* NearbyPlaceSuggesterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F21000013050000100000010 /* NearbyPlaceSuggesterTests.swift */; };
 		F40000013050000100000003 /* RouteMatchPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F40000013050000100000002 /* RouteMatchPolicyTests.swift */; };
+		F61000013060000100000001 /* MapTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F61000013060000100000000 /* MapTabView.swift */; };
+		F61000013060000100000003 /* MapRangeSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = F61000013060000100000002 /* MapRangeSelection.swift */; };
+		F61000013060000100000005 /* MapRangePill.swift in Sources */ = {isa = PBXBuildFile; fileRef = F61000013060000100000004 /* MapRangePill.swift */; };
+		F61000013060000100000007 /* MapRangeSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = F61000013060000100000006 /* MapRangeSheet.swift */; };
+		F61000013060000100000009 /* MapTimeScrubber.swift in Sources */ = {isa = PBXBuildFile; fileRef = F61000013060000100000008 /* MapTimeScrubber.swift */; };
+		F6100001306000010000000B /* MapLayerChips.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6100001306000010000000A /* MapLayerChips.swift */; };
+		F6100001306000010000000D /* MapWindowLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6100001306000010000000C /* MapWindowLoader.swift */; };
+		F6100001306000010000000F /* VisitedCellStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6100001306000010000000E /* VisitedCellStore.swift */; };
+		F61000013060000100000011 /* MapRangeSelectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F61000013060000100000010 /* MapRangeSelectionTests.swift */; };
+		F61000013060000100000013 /* VisitedCellStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F61000013060000100000012 /* VisitedCellStoreTests.swift */; };
 		F10000013030000100000003 /* TimelineArchiveImportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000013030000100000002 /* TimelineArchiveImportTests.swift */; };
 		F10000013030000100000005 /* LocationLogImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000013030000100000004 /* LocationLogImport.swift */; };
 		F10000013030000100000007 /* LocationLogImportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000013030000100000006 /* LocationLogImportTests.swift */; };
@@ -333,6 +343,16 @@
 		F2100001305000010000000E /* NearbyPlaceSuggester.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NearbyPlaceSuggester.swift; sourceTree = "<group>"; };
 		F21000013050000100000010 /* NearbyPlaceSuggesterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NearbyPlaceSuggesterTests.swift; sourceTree = "<group>"; };
 		F40000013050000100000002 /* RouteMatchPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteMatchPolicyTests.swift; sourceTree = "<group>"; };
+		F61000013060000100000000 /* MapTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapTabView.swift; sourceTree = "<group>"; };
+		F61000013060000100000002 /* MapRangeSelection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapRangeSelection.swift; sourceTree = "<group>"; };
+		F61000013060000100000004 /* MapRangePill.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapRangePill.swift; sourceTree = "<group>"; };
+		F61000013060000100000006 /* MapRangeSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapRangeSheet.swift; sourceTree = "<group>"; };
+		F61000013060000100000008 /* MapTimeScrubber.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapTimeScrubber.swift; sourceTree = "<group>"; };
+		F6100001306000010000000A /* MapLayerChips.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapLayerChips.swift; sourceTree = "<group>"; };
+		F6100001306000010000000C /* MapWindowLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapWindowLoader.swift; sourceTree = "<group>"; };
+		F6100001306000010000000E /* VisitedCellStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisitedCellStore.swift; sourceTree = "<group>"; };
+		F61000013060000100000010 /* MapRangeSelectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapRangeSelectionTests.swift; sourceTree = "<group>"; };
+		F61000013060000100000012 /* VisitedCellStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisitedCellStoreTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -427,6 +447,7 @@
 				A60000012FE0000100000000 /* DailyTimelineBackup.swift */,
 				489A76362C4FC6F300F43B69 /* ContentView.swift */,
 				F20000013040000100000000 /* MovesRootView.swift */,
+				F6100001306000010000001F /* MapTab */,
 				F21100013051000100000000 /* TimelineTabView.swift */,
 				F21000013050000100000000 /* TimelineItemActions.swift */,
 				F30000013050000100000000 /* RouteRendering.swift */,
@@ -535,6 +556,21 @@
 			path = Icons;
 			sourceTree = "<group>";
 		};
+		F6100001306000010000001F /* MapTab */ = {
+			isa = PBXGroup;
+			children = (
+				F61000013060000100000000 /* MapTabView.swift */,
+				F61000013060000100000002 /* MapRangeSelection.swift */,
+				F61000013060000100000004 /* MapRangePill.swift */,
+				F61000013060000100000006 /* MapRangeSheet.swift */,
+				F61000013060000100000008 /* MapTimeScrubber.swift */,
+				F6100001306000010000000A /* MapLayerChips.swift */,
+				F6100001306000010000000C /* MapWindowLoader.swift */,
+				F6100001306000010000000E /* VisitedCellStore.swift */,
+			);
+			path = MapTab;
+			sourceTree = "<group>";
+		};
 		9A1B00012F00000100000003 /* MovesTests */ = {
 			isa = PBXGroup;
 			children = (
@@ -549,6 +585,8 @@
 				F30000013050000100000004 /* SpeedProfileBuilderTests.swift */,
 				F21000013050000100000010 /* NearbyPlaceSuggesterTests.swift */,
 				F40000013050000100000002 /* RouteMatchPolicyTests.swift */,
+				F61000013060000100000010 /* MapRangeSelectionTests.swift */,
+				F61000013060000100000012 /* VisitedCellStoreTests.swift */,
 			);
 			path = MovesTests;
 			sourceTree = "<group>";
@@ -864,6 +902,14 @@
 				A30000012FB0000100000001 /* TimelineWidgetSnapshot.swift in Sources */,
 				489A76372C4FC6F300F43B69 /* ContentView.swift in Sources */,
 				F20000013040000100000001 /* MovesRootView.swift in Sources */,
+				F61000013060000100000001 /* MapTabView.swift in Sources */,
+				F61000013060000100000003 /* MapRangeSelection.swift in Sources */,
+				F61000013060000100000005 /* MapRangePill.swift in Sources */,
+				F61000013060000100000007 /* MapRangeSheet.swift in Sources */,
+				F61000013060000100000009 /* MapTimeScrubber.swift in Sources */,
+				F6100001306000010000000B /* MapLayerChips.swift in Sources */,
+				F6100001306000010000000D /* MapWindowLoader.swift in Sources */,
+				F6100001306000010000000F /* VisitedCellStore.swift in Sources */,
 				F21100013051000100000001 /* TimelineTabView.swift in Sources */,
 				F21000013050000100000001 /* TimelineItemActions.swift in Sources */,
 				F30000013050000100000001 /* RouteRendering.swift in Sources */,
@@ -915,6 +961,8 @@
 				F30000013050000100000005 /* SpeedProfileBuilderTests.swift in Sources */,
 				F21000013050000100000011 /* NearbyPlaceSuggesterTests.swift in Sources */,
 				F40000013050000100000003 /* RouteMatchPolicyTests.swift in Sources */,
+				F61000013060000100000011 /* MapRangeSelectionTests.swift in Sources */,
+				F61000013060000100000013 /* VisitedCellStoreTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

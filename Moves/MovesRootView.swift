@@ -44,6 +44,8 @@ final class MovesRootController: ObservableObject {
     /// When set, the Timeline tab locates this instant and highlights the row.
     @Published var requestedJumpMoment: Date?
     @Published var isShowingReviewInbox = false
+    /// Applied once from `moves://map?from=&to=`, then cleared.
+    @Published var requestedMapInterval: DateInterval?
 
     /// Honors `MOVES_START_TAB` so agents can screenshot a destination without tapping.
     private static func initialTab() -> MovesTab {
@@ -88,12 +90,7 @@ struct MovesRootView: View {
             .badge(pendingReviewVisits.count + pendingReviewMoves.count)
 
             Tab("Map", systemImage: "map", value: MovesTab.map) {
-                MovesPlaceholderTabView(
-                    title: MovesTab.map.title,
-                    symbolName: "map.fill",
-                    summary: String(localized: "See a day, a week, or a year on one map."),
-                    detail: String(localized: "Filter by how you moved, scrub through time, and switch between routes, heat, and the streets you’ve covered.")
-                )
+                MapTabView()
             }
 
             Tab("Places", systemImage: "mappin.and.ellipse", value: MovesTab.places) {
@@ -277,6 +274,9 @@ struct MovesRootView: View {
             controller.requestedPlaceID = placeID
         case "map":
             controller.selectedTab = .map
+            if let interval = MapDeepLink.interval(from: url) {
+                controller.requestedMapInterval = interval
+            }
         case "places":
             controller.selectedTab = .places
         case "insights":

@@ -88,6 +88,7 @@ Optional: `DEVICE_UDID=... ./Scripts/install-iphone.sh`.
 | Bundle IDs, App Group, iCloud container, team | `Config/Moves.xcconfig`, `Moves/MovesAppIdentity.swift` |
 | App entry, SwiftData / CloudKit container | `Moves/MovesApp.swift` |
 | Timeline UI, maps, day paging | `Moves/ContentView.swift`, `Moves/MovesRootView.swift`, `Moves/TimelineTabView.swift`, `Moves/MovesTimelineViews.swift`, `Moves/MovesJumpToDateView.swift`, `Moves/MovesDetailViews.swift` |
+| Map tab | `Moves/MapTab/` (`MapTabView`, range pill/sheet/scrubber, layer chips, `MapWindowLoader`, `VisitedCellStore`); `ShareMapAggregate.swift` per-day buckets |
 | Corrections, Review inbox, undo pill | `Moves/TimelineItemActions.swift`, `Moves/TimelineEditController.swift`, `Moves/PlaceRenameSheet.swift`, `Moves/EditTimesSheet.swift`, `Moves/SplitSheet.swift`, `Moves/ReviewInboxView.swift`, `Moves/UndoToast.swift`, `Moves/NearbyPlaceSuggester.swift` |
 | Route matching / path policy | `Moves/RoadRouteMatcher.swift` (`RoadRouteMatcher`, `RouteMatchPlausibility`, `DirectionsProvider`); Path control in `MovesDetailViews.swift`; Settings → Map Appearance Path level |
 | Models + repository | `Moves/VisitedLocation.swift` (`DayTimeline`, `VisitPlace`, `MoveSegment`, `LocationSample`, `KnownPlace`, `PhotoAttachment`, `PlaceCorrectionEvent`, `VisitedCell`) |

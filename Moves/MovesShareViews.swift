@@ -764,20 +764,22 @@ struct MovesShareGalleryView: View {
     init(
         dayTimelines: [DayTimeline],
         initialDate: Date,
+        initialPeriod: MovesSharePeriod = .day,
         showsDismissButton: Bool = true
     ) {
         self.dayTimelines = dayTimelines
         self.showsDismissButton = showsDismissButton
         _selectedDate = State(initialValue: initialDate)
-        let initialPeriodStart = MovesSharePeriod.day.start(for: initialDate)
+        _selectedPeriod = State(initialValue: initialPeriod)
+        let initialPeriodStart = initialPeriod.start(for: initialDate)
         _snapshot = State(initialValue: MovesShareSnapshot.make(
             from: dayTimelines,
-            period: .day,
+            period: initialPeriod,
             periodStart: initialPeriodStart
         ))
         _snapshotDataSignature = State(initialValue: Self.makeDataSignature(
             timelines: dayTimelines,
-            period: .day,
+            period: initialPeriod,
             periodStart: initialPeriodStart
         ))
     }

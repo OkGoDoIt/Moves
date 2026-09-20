@@ -1182,6 +1182,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         guard !locations.isEmpty else { return [] }
 
         var inserted: [LocationSample] = []
+        var newlyInserted: [LocationSample] = []
         inserted.reserveCapacity(locations.count)
 
         for location in locations {
@@ -1195,6 +1196,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                 modelContext.insert(sample)
                 archiveImportSampleKeys?.insert(dedupeKey)
                 inserted.append(sample)
+                newlyInserted.append(sample)
                 continue
             }
 
@@ -1210,12 +1212,15 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             sample.dayTimeline = try timeline(for: location.timestamp)
             modelContext.insert(sample)
             inserted.append(sample)
+            newlyInserted.append(sample)
         }
 
         if archiveImportSampleKeys == nil {
             try saveIfNeeded()
             NotificationCenter.default.post(name: .movesLocationSamplesDidChange, object: nil)
         }
+        // WS6: incremental fog / heat cells. Keep this hook tiny — WS5 edits inferredUserLabel elsewhere in this file.
+        VisitedCellStore.ingest(newlyInserted, in: modelContext)
         return inserted
     }
 
