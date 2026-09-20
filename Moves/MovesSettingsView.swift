@@ -196,6 +196,17 @@ struct MovesSettingsView: View {
 
                     SettingsCard(title: "Import") {
                         NavigationLink {
+                            TimelineArchiveImportSettingsView(modelContext: modelContext)
+                        } label: {
+                            SettingsNavigationRow(
+                                title: "Moves timeline export",
+                                systemImage: "clock.arrow.circlepath",
+                                status: nil
+                            )
+                        }
+                        .buttonStyle(.plain)
+
+                        NavigationLink {
                             HealthWorkoutRouteImportSettingsView()
                         } label: {
                             SettingsNavigationRow(
@@ -217,7 +228,7 @@ struct MovesSettingsView: View {
                         }
                         .buttonStyle(.plain)
 
-                        Text("Imports GPS tracks from running, cycling, walking, and hiking workouts. Existing phone or watch points are deduplicated automatically.")
+                        Text("Use Moves timeline export to restore another Moves install from its GPX, GeoJSON, and CSV files. Health and Files import only add GPS tracks.")
                             .font(.system(size: 12, weight: .medium, design: .rounded))
                             .foregroundStyle(.secondary)
                     }

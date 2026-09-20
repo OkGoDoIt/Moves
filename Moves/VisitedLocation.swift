@@ -535,6 +535,7 @@ enum TimelineDeduplicationSnapshotStore {
 
 final class SwiftDataTimelineRepository: TimelineRepository {
     private let modelContext: ModelContext
+    private var archiveImportSampleKeys: Set<String>?
     private static let sampleDedupeTimeWindow: TimeInterval = 5 * 60
     private static let sampleDedupeDistanceThreshold: CLLocationDistance = 120
     private static let placeDedupeArrivalWindow: TimeInterval = 3 * 60
@@ -833,6 +834,18 @@ final class SwiftDataTimelineRepository: TimelineRepository {
 
         for location in locations {
             let dedupeKey = Self.makeSampleDedupeKey(for: location)
+            if archiveImportSampleKeys != nil {
+                if archiveImportSampleKeys?.contains(dedupeKey) == true {
+                    continue
+                }
+                let sample = LocationSample(location: location, source: source, dedupeKey: dedupeKey)
+                sample.dayTimeline = try timeline(for: location.timestamp)
+                modelContext.insert(sample)
+                archiveImportSampleKeys?.insert(dedupeKey)
+                inserted.append(sample)
+                continue
+            }
+
             let existing = try findSample(byDedupeKey: dedupeKey)
                 ?? (source.preservesRouteResolution ? nil : findNearbySample(matching: location))
             if let existing {
@@ -847,8 +860,10 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             inserted.append(sample)
         }
 
-        try saveIfNeeded()
-        NotificationCenter.default.post(name: .movesLocationSamplesDidChange, object: nil)
+        if archiveImportSampleKeys == nil {
+            try saveIfNeeded()
+            NotificationCenter.default.post(name: .movesLocationSamplesDidChange, object: nil)
+        }
         return inserted
     }
 
@@ -901,6 +916,61 @@ final class SwiftDataTimelineRepository: TimelineRepository {
 
         try saveIfNeeded()
         return move
+    }
+
+    /// Rebuilds visits, moves, and GPS samples from a merged Moves export.
+    ///
+    /// Places are written first so moves can reconnect to the same stays. Timed
+    /// GPX vertices become `LocationSample` values; GeoJSON/CSV supply names,
+    /// transport modes, and the original `day_key`.
+    @discardableResult
+    func importTimelineArchive(
+        _ archive: TimelineArchive,
+        progress: ((Double, String) -> Void)? = nil
+    ) throws -> TimelineArchiveImportReport {
+        guard !archive.isEmpty else {
+            throw TimelineArchiveImportError.noTimelineData
+        }
+
+        let existingSamples = try modelContext.fetch(FetchDescriptor<LocationSample>())
+        archiveImportSampleKeys = Set(existingSamples.map(\.dedupeKey))
+        defer { archiveImportSampleKeys = nil }
+
+        let places = archive.places.sorted(by: { $0.arrivalDate < $1.arrivalDate })
+        let moves = archive.moves.sorted(by: { $0.startDate < $1.startDate })
+        let total = max(places.count + moves.count, 1)
+        var importedPlaceCount = 0
+        var importedMoveCount = 0
+        var importedSampleCount = 0
+
+        for (index, record) in places.enumerated() {
+            progress?(Double(index) / Double(total), "Restoring places…")
+            _ = try upsertImportedPlace(record)
+            importedPlaceCount += 1
+        }
+        try saveIfNeeded()
+
+        for (index, record) in moves.enumerated() {
+            progress?(Double(places.count + index) / Double(total), "Restoring moves…")
+            importedSampleCount += try importArchiveMove(record)
+            importedMoveCount += 1
+        }
+
+        try fillMissingDeparturesFromMoves()
+        try saveIfNeeded()
+        NotificationCenter.default.post(name: .movesLocationSamplesDidChange, object: nil)
+        progress?(1, "Done")
+
+        return TimelineArchiveImportReport(
+            fileCount: 0,
+            parsedFileCount: 0,
+            placeCount: importedPlaceCount,
+            moveCount: importedMoveCount,
+            sampleCount: importedSampleCount,
+            formats: archive.formats,
+            skippedFileNames: [],
+            warnings: []
+        )
     }
 
     func latestPlace(before date: Date, excluding placeID: UUID?) throws -> VisitPlace? {
@@ -1023,6 +1093,280 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         guard modelContext.hasChanges else { return }
         try modelContext.save()
     }
+
+    private func timeline(for date: Date, exportedDayKey: String?) throws -> DayTimeline {
+        let trimmed = exportedDayKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmed.isEmpty {
+            var descriptor = FetchDescriptor<DayTimeline>(
+                predicate: #Predicate { timeline in
+                    timeline.dayKey == trimmed
+                }
+            )
+            descriptor.fetchLimit = 1
+            if let existing = try modelContext.fetch(descriptor).first {
+                return existing
+            }
+            if let dayStart = Self.exportedDayKeyParser.date(from: trimmed) {
+                let timeline = DayTimeline(dayStart: dayStart)
+                modelContext.insert(timeline)
+                return timeline
+            }
+        }
+        return try timeline(for: date)
+    }
+
+    private func upsertImportedPlace(_ record: TimelineArchivePlace) throws -> VisitPlace {
+        if let existing = try existingPlace(at: record.coordinate, covering: record.arrivalDate) {
+            applyArchiveMetadata(record, to: existing)
+            existing.dayTimeline = try timeline(for: record.arrivalDate, exportedDayKey: record.dayKey)
+            return try collapseDuplicatePlaces(around: existing)
+        }
+
+        let place = VisitPlace(
+            arrivalDate: record.arrivalDate,
+            departureDate: record.departureDate,
+            latitude: record.latitude,
+            longitude: record.longitude,
+            horizontalAccuracy: 20,
+            userLabel: record.userLabel,
+            autoLabel: record.autoLabel,
+            comment: record.comment
+        )
+        place.dayTimeline = try timeline(for: record.arrivalDate, exportedDayKey: record.dayKey)
+        modelContext.insert(place)
+        return try collapseDuplicatePlaces(around: place)
+    }
+
+    private func importArchiveMove(_ record: TimelineArchiveMove) throws -> Int {
+        var locations = record.locations()
+            .filter { $0.horizontalAccuracy >= 0 && $0.horizontalAccuracy <= 200 }
+            .sorted(by: { $0.timestamp < $1.timestamp })
+
+        let startPlace = try resolveImportedPlace(
+            title: record.startPlaceTitle,
+            date: record.startDate,
+            coordinate: locations.first?.coordinate,
+            exportedDayKey: record.dayKey,
+            role: .start
+        )
+        let endPlace = try resolveImportedPlace(
+            title: record.endPlaceTitle,
+            date: record.endDate,
+            coordinate: locations.last?.coordinate,
+            exportedDayKey: record.dayKey,
+            role: .end
+        )
+
+        if locations.count < 2 {
+            locations = [
+                CLLocation(
+                    coordinate: startPlace.coordinate,
+                    altitude: 0,
+                    horizontalAccuracy: 20,
+                    verticalAccuracy: -1,
+                    course: -1,
+                    speed: -1,
+                    timestamp: record.startDate
+                ),
+                CLLocation(
+                    coordinate: endPlace.coordinate,
+                    altitude: 0,
+                    horizontalAccuracy: 20,
+                    verticalAccuracy: -1,
+                    course: -1,
+                    speed: -1,
+                    timestamp: max(record.endDate, record.startDate.addingTimeInterval(1))
+                ),
+            ]
+        }
+
+        guard let firstLocation = locations.first, let lastLocation = locations.last else {
+            return 0
+        }
+
+        let endDate = lastLocation.timestamp > firstLocation.timestamp
+            ? lastLocation.timestamp
+            : record.endDate > record.startDate ? record.endDate : record.startDate.addingTimeInterval(1)
+
+        let samples = try appendSamples(from: locations, source: .fileRouteImport)
+        let existing = try findSimilarMove(
+            startCoordinate: startPlace.coordinate,
+            endCoordinate: endPlace.coordinate,
+            startDate: record.startDate,
+            endDate: endDate,
+            distanceMeters: record.distanceMeters ?? Self.totalDistance(for: locations),
+            transportMode: record.transportMode
+        )
+        let transportMode = record.transportMode != .unknown
+            ? record.transportMode
+            : existing?.transportMode ?? .unknown
+        let distance = (record.distanceMeters ?? 0) > 0
+            ? record.distanceMeters!
+            : max(Self.totalDistance(for: locations), existing?.distanceMeters ?? 0)
+        let stepCount = record.stepCount ?? existing?.stepCount
+
+        let move = try upsertMove(
+            startPlace: startPlace,
+            endPlace: endPlace,
+            startDate: record.startDate,
+            endDate: endDate,
+            transportMode: transportMode,
+            distanceMeters: distance,
+            stepCount: stepCount,
+            samples: samples
+        )
+        move.dayTimeline = try timeline(for: record.startDate, exportedDayKey: record.dayKey)
+        if let comment = record.comment, !comment.isEmpty, move.comment?.isEmpty ?? true {
+            move.comment = comment
+        }
+        move.storeCachedRouteCoordinates(
+            locations.map(\.coordinate),
+            signature: "imported-archive-\(samples.count)-\(Int(distance.rounded()))"
+        )
+        return samples.count
+    }
+
+    private enum ImportedPlaceRole {
+        case start
+        case end
+    }
+
+    private func resolveImportedPlace(
+        title: String?,
+        date: Date,
+        coordinate: CLLocationCoordinate2D?,
+        exportedDayKey: String?,
+        role: ImportedPlaceRole
+    ) throws -> VisitPlace {
+        if let coordinate, let existing = try existingPlace(at: coordinate, covering: date) {
+            return existing
+        }
+        if let title, let named = try existingNamedPlace(title: title, near: date) {
+            return named
+        }
+        if let coordinate {
+            return try routeEndpointPlace(
+                at: CLLocation(
+                    coordinate: coordinate,
+                    altitude: 0,
+                    horizontalAccuracy: 20,
+                    verticalAccuracy: -1,
+                    course: -1,
+                    speed: -1,
+                    timestamp: date
+                ),
+                arrivalDate: date,
+                departureDate: role == .start ? date : nil
+            )
+        }
+
+        let place = VisitPlace(
+            arrivalDate: date,
+            departureDate: role == .start ? date : nil,
+            latitude: 0,
+            longitude: 0,
+            horizontalAccuracy: 20,
+            userLabel: title,
+            autoLabel: nil
+        )
+        place.dayTimeline = try timeline(for: date, exportedDayKey: exportedDayKey)
+        modelContext.insert(place)
+        return place
+    }
+
+    private func existingPlace(
+        at coordinate: CLLocationCoordinate2D,
+        covering date: Date
+    ) throws -> VisitPlace? {
+        if let arrivedThen = try existingVisit(near: date, coordinate: coordinate) {
+            return arrivedThen
+        }
+
+        let windowStart = date.addingTimeInterval(-48 * 60 * 60)
+        let windowEnd = date.addingTimeInterval(Self.placeDedupeArrivalWindow)
+        var descriptor = FetchDescriptor<VisitPlace>(
+            predicate: #Predicate { place in
+                place.arrivalDate >= windowStart && place.arrivalDate <= windowEnd
+            },
+            sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .reverse)]
+        )
+        descriptor.fetchLimit = 64
+        let candidates = try modelContext.fetch(descriptor)
+        return candidates.first { place in
+            Self.distanceMeters(from: coordinate, to: place.coordinate) <= Self.moveDedupeEndpointDistanceThreshold
+                && placeCovers(place, at: date)
+        }
+    }
+
+    private func placeCovers(_ place: VisitPlace, at date: Date) -> Bool {
+        if let departure = place.departureDate {
+            let start = place.arrivalDate.addingTimeInterval(-Self.placeDedupeArrivalWindow)
+            let end = departure.addingTimeInterval(Self.placeDedupeDepartureWindow)
+            return date >= start && date <= end
+        }
+        return place.arrivalDate <= date.addingTimeInterval(Self.placeDedupeArrivalWindow)
+    }
+
+    private func existingNamedPlace(title: String, near date: Date) throws -> VisitPlace? {
+        let windowStart = date.addingTimeInterval(-24 * 60 * 60)
+        let windowEnd = date.addingTimeInterval(24 * 60 * 60)
+        var descriptor = FetchDescriptor<VisitPlace>(
+            predicate: #Predicate { place in
+                place.arrivalDate >= windowStart && place.arrivalDate <= windowEnd
+            },
+            sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .forward)]
+        )
+        descriptor.fetchLimit = 80
+        let candidates = try modelContext.fetch(descriptor)
+        return candidates.first { place in
+            labelsMatch(place, title: title)
+        }
+    }
+
+    private func labelsMatch(_ place: VisitPlace, title: String) -> Bool {
+        let labels = [place.userLabel, place.autoLabel, place.displayTitle]
+        return labels.contains {
+            guard let label = $0, !label.isEmpty else { return false }
+            return label.compare(title, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
+        }
+    }
+
+    private func applyArchiveMetadata(_ record: TimelineArchivePlace, to place: VisitPlace) {
+        if place.userLabel?.isEmpty ?? true, let userLabel = record.userLabel, !userLabel.isEmpty {
+            place.userLabel = userLabel
+        }
+        if place.autoLabel?.isEmpty ?? true, let autoLabel = record.autoLabel, !autoLabel.isEmpty {
+            place.autoLabel = autoLabel
+        }
+        if place.comment?.isEmpty ?? true, let comment = record.comment, !comment.isEmpty {
+            place.comment = comment
+        }
+        if let departure = record.departureDate {
+            if let current = place.departureDate {
+                place.departureDate = max(current, departure)
+            } else {
+                place.departureDate = departure
+            }
+        }
+    }
+
+    private func fillMissingDeparturesFromMoves() throws {
+        let places = try modelContext.fetch(FetchDescriptor<VisitPlace>())
+        for place in places where place.departureDate == nil {
+            if let leave = place.outgoingMoves.min(by: { $0.startDate < $1.startDate }) {
+                place.departureDate = leave.timelineStartDate
+            }
+        }
+    }
+
+    private static let exportedDayKeyParser: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = Calendar.current.timeZone
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
 
     private func timeline(for date: Date) throws -> DayTimeline {
         let dayStart = Calendar.current.startOfDay(for: date)
@@ -1256,6 +1600,12 @@ final class SwiftDataTimelineRepository: TimelineRepository {
            let autoLabel = source.autoLabel,
            !autoLabel.isEmpty {
             destination.autoLabel = autoLabel
+        }
+
+        if destination.comment?.isEmpty ?? true,
+           let comment = source.comment,
+           !comment.isEmpty {
+            destination.comment = comment
         }
 
         if destination.dayTimeline == nil {
@@ -1527,6 +1877,12 @@ final class SwiftDataTimelineRepository: TimelineRepository {
 
         if destination.transportMode == .unknown, source.transportMode != .unknown {
             destination.transportMode = source.transportMode
+        }
+
+        if destination.comment?.isEmpty ?? true,
+           let comment = source.comment,
+           !comment.isEmpty {
+            destination.comment = comment
         }
 
         if destination.startPlace == nil {

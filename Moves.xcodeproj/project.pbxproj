@@ -112,6 +112,8 @@
 		D10000013010000100000003 /* DawarichSyncTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10000013010000100000002 /* DawarichSyncTests.swift */; };
 		E10000013020000100000001 /* MovesStatisticsSearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10000013020000100000000 /* MovesStatisticsSearchView.swift */; };
 		E20000013020000100000001 /* MovesStatisticsSearchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000013020000100000000 /* MovesStatisticsSearchTests.swift */; };
+		F10000013030000100000001 /* TimelineArchiveImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000013030000100000000 /* TimelineArchiveImport.swift */; };
+		F10000013030000100000003 /* TimelineArchiveImportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000013030000100000002 /* TimelineArchiveImportTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -283,6 +285,8 @@
 		D10000013010000100000002 /* DawarichSyncTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DawarichSyncTests.swift; sourceTree = "<group>"; };
 		E10000013020000100000000 /* MovesStatisticsSearchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesStatisticsSearchView.swift; sourceTree = "<group>"; };
 		E20000013020000100000000 /* MovesStatisticsSearchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesStatisticsSearchTests.swift; sourceTree = "<group>"; };
+		F10000013030000100000000 /* TimelineArchiveImport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineArchiveImport.swift; sourceTree = "<group>"; };
+		F10000013030000100000002 /* TimelineArchiveImportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineArchiveImportTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -388,6 +392,7 @@
 				A10000012F00000100000207 /* GeneratedAppIcons.swift */,
 				A20000012FA0000100000000 /* HealthWorkoutRouteImporter.swift */,
 				A40000012FC0000100000000 /* RouteFileImport.swift */,
+				F10000013030000100000000 /* TimelineArchiveImport.swift */,
 				A20000012FA0000100000002 /* WatchRouteInbox.swift */,
 				A30000012FB0000100000000 /* TimelineWidgetSnapshot.swift */,
 				489A76442C4FC70D00F43B69 /* LocationChange.swift */,
@@ -473,6 +478,7 @@
 			children = (
 				D10000013010000100000002 /* DawarichSyncTests.swift */,
 				E20000013020000100000000 /* MovesStatisticsSearchTests.swift */,
+				F10000013030000100000002 /* TimelineArchiveImportTests.swift */,
 				9A1B00012F00000100000002 /* TimelineAssemblerTests.swift */,
 			);
 			path = MovesTests;
@@ -783,6 +789,7 @@
 				489A76492C4FDE1E00F43B69 /* VisitedLocation.swift in Sources */,
 				A20000012FA0000100000001 /* HealthWorkoutRouteImporter.swift in Sources */,
 				A40000012FC0000100000001 /* RouteFileImport.swift in Sources */,
+				F10000013030000100000001 /* TimelineArchiveImport.swift in Sources */,
 				A20000012FA0000100000003 /* WatchRouteInbox.swift in Sources */,
 				A30000012FB0000100000001 /* TimelineWidgetSnapshot.swift in Sources */,
 				489A76372C4FC6F300F43B69 /* ContentView.swift in Sources */,
@@ -814,6 +821,7 @@
 			files = (
 				D10000013010000100000003 /* DawarichSyncTests.swift in Sources */,
 				E20000013020000100000001 /* MovesStatisticsSearchTests.swift in Sources */,
+				F10000013030000100000003 /* TimelineArchiveImportTests.swift in Sources */,
 				9A1B00012F00000100000004 /* TimelineAssemblerTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
