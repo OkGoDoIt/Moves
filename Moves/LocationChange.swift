@@ -455,6 +455,7 @@ final class DefaultTimelineAssembler: TimelineAssembler {
     func ingestVisit(_ visit: CLVisit) async {
         do {
             let visitPlace = try repository.addOrUpdateVisit(from: visit)
+            try repository.applyPlaceLearning(to: visitPlace)
             await fillAutomaticPlaceLabelIfNeeded(for: visitPlace)
 
             let normalizedArrival = visitPlace.arrivalDate
@@ -594,11 +595,19 @@ final class DefaultTimelineAssembler: TimelineAssembler {
         let hasUserLabel = !(place.userLabel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         let hasAutoLabel = !(place.autoLabel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
 
+        guard place.assignmentSource == .none, place.knownPlace == nil else { return }
         guard !hasUserLabel, !hasAutoLabel else { return }
         guard place.horizontalAccuracy <= 180 else { return }
 
         if let resolvedName = await placeNameResolver.resolveName(for: place.coordinate) {
             do {
+                let nearby = try repository.knownPlaces(
+                    near: place.coordinate,
+                    within: PlaceLearningEngine.rejectedLabelSearchRadius
+                )
+                if PlaceLearningEngine.shouldSuppress(resolvedName, nearbyPlaces: nearby) {
+                    return
+                }
                 try repository.setAutomaticLabel(resolvedName, for: place.id)
                 try repository.saveIfNeeded()
             } catch {

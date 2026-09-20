@@ -759,6 +759,7 @@ protocol TimelineRepository {
     func createKnownPlace(from visit: VisitPlace, name: String) throws -> KnownPlace
     func knownPlaces(near coordinate: CLLocationCoordinate2D, within meters: CLLocationDistance) throws -> [KnownPlace]
     func recordCorrection(_ event: PlaceCorrectionEvent) throws
+    func applyPlaceLearning(to visit: VisitPlace) throws
     func timelineItem(at date: Date) throws -> TimelineLocator.Result
     func moves(in range: DateInterval, modes: Set<TransportMode>?) throws -> [MoveSegment]
     func visits(in range: DateInterval) throws -> [VisitPlace]
@@ -883,6 +884,8 @@ final class SwiftDataTimelineRepository: TimelineRepository {
     private var bulkDayTimelineCache: [String: DayTimeline]?
     /// User-labelled places, populated only during bulk imports.
     private var bulkLabeledPlaces: [(label: String, coordinate: CLLocationCoordinate2D)]?
+    /// Learned places, populated only during bulk imports.
+    private var bulkKnownPlaces: [KnownPlace]?
     /// Visits inserted by the running bulk import; never merged into each other.
     private var bulkCreatedPlaceIDs: Set<UUID>?
     private static let logPlaceMatchDistance: CLLocationDistance = 120
@@ -1157,23 +1160,22 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             existing.horizontalAccuracy = min(existing.horizontalAccuracy, visit.horizontalAccuracy)
             existing.dayTimeline = try timeline(for: arrival)
             let canonical = try collapseDuplicatePlaces(around: existing)
+            try applyPlaceLearning(to: canonical)
             try saveIfNeeded()
             return canonical
         }
-
-        let inferredUserLabel = try inferredUserLabel(near: visit.coordinate)
 
         let place = VisitPlace(
             arrivalDate: arrival,
             departureDate: departure,
             latitude: visit.coordinate.latitude,
             longitude: visit.coordinate.longitude,
-            horizontalAccuracy: visit.horizontalAccuracy,
-            userLabel: inferredUserLabel
+            horizontalAccuracy: visit.horizontalAccuracy
         )
         place.dayTimeline = try timeline(for: arrival)
         modelContext.insert(place)
         let canonical = try collapseDuplicatePlaces(around: place)
+        try applyPlaceLearning(to: canonical)
         try saveIfNeeded()
         return canonical
     }
@@ -1444,6 +1446,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             }
             return (label, place.coordinate)
         }
+        bulkKnownPlaces = try modelContext.fetch(FetchDescriptor<KnownPlace>())
         bulkCreatedPlaceIDs = []
     }
 
@@ -1451,6 +1454,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         archiveImportSampleKeys = nil
         bulkDayTimelineCache = nil
         bulkLabeledPlaces = nil
+        bulkKnownPlaces = nil
         bulkCreatedPlaceIDs = nil
     }
 
@@ -1530,11 +1534,11 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             departureDate: stay.departureDate,
             latitude: stay.latitude,
             longitude: stay.longitude,
-            horizontalAccuracy: Self.logPlaceAccuracy(for: stay),
-            userLabel: try inferredUserLabel(near: stay.coordinate)
+            horizontalAccuracy: Self.logPlaceAccuracy(for: stay)
         )
         place.dayTimeline = try timeline(for: stay.arrivalDate)
         modelContext.insert(place)
+        try applyPlaceLearning(to: place)
         bulkCreatedPlaceIDs?.insert(place.id)
         return (place, true)
     }
@@ -1772,6 +1776,17 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             return
         }
         if let existingAuto = place.autoLabel, !existingAuto.isEmpty {
+            return
+        }
+        if place.assignmentSource != .none || place.knownPlace != nil {
+            return
+        }
+
+        let nearby = try knownPlaces(
+            near: place.coordinate,
+            within: PlaceLearningEngine.rejectedLabelSearchRadius
+        )
+        if PlaceLearningEngine.shouldSuppress(trimmed, nearbyPlaces: nearby) {
             return
         }
 
@@ -2108,10 +2123,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                 if !trimmed.isEmpty {
                     visit.userLabel = trimmed
                 }
-                place.confirmedVisitCount = max(place.confirmedVisitCount, place.visits.count)
-                if place.lastVisitAt == nil || visit.arrivalDate > (place.lastVisitAt ?? .distantPast) {
-                    place.lastVisitAt = visit.arrivalDate
-                }
+                PlaceLearningEngine.learn(from: visit, onto: place)
             }
         }
     }
@@ -2137,6 +2149,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             if !trimmed.isEmpty {
                 visit.userLabel = trimmed
             }
+            PlaceLearningEngine.learn(from: visit, onto: place)
             return place
         }
     }
@@ -2162,6 +2175,38 @@ final class SwiftDataTimelineRepository: TimelineRepository {
     func recordCorrection(_ event: PlaceCorrectionEvent) throws {
         try performingUndoableChange(named: "Remember Correction") {
             modelContext.insert(event)
+            let fromPlace = try knownPlace(id: event.fromKnownPlaceID)
+            let toPlace = try knownPlace(id: event.toKnownPlaceID)
+            let eventID = event.id
+            let fromID = event.fromKnownPlaceID
+            let prior = try modelContext.fetch(FetchDescriptor<PlaceCorrectionEvent>()).filter { prior in
+                prior.id != eventID && prior.fromKnownPlaceID == fromID
+            }
+            PlaceLearningEngine.applyNegatives(
+                event: event,
+                fromPlace: fromPlace,
+                toPlace: toPlace,
+                priorEventsFromPlace: prior
+            )
+        }
+    }
+
+    func applyPlaceLearning(to visit: VisitPlace) throws {
+        guard visit.assignmentSource != .user else { return }
+
+        let knownPlaces: [KnownPlace]
+        if let cached = bulkKnownPlaces {
+            knownPlaces = cached
+        } else {
+            knownPlaces = try modelContext.fetch(FetchDescriptor<KnownPlace>())
+        }
+
+        let resolution = PlaceLearningEngine.resolve(visit: visit, knownPlaces: knownPlaces)
+        PlaceLearningEngine.apply(resolution, to: visit, knownPlaces: knownPlaces)
+
+        if visit.assignmentSource == .none,
+           visit.userLabel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
+            visit.userLabel = try nearbyUserLabel(near: visit.coordinate)
         }
     }
 
@@ -2588,7 +2633,9 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                 existing.departureDate = departureDate
             }
             existing.dayTimeline = try timeline(for: arrivalDate)
-            return try collapseDuplicatePlaces(around: existing)
+            let canonical = try collapseDuplicatePlaces(around: existing)
+            try applyPlaceLearning(to: canonical)
+            return canonical
         }
 
         let place = VisitPlace(
@@ -2596,12 +2643,13 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             departureDate: departureDate,
             latitude: location.coordinate.latitude,
             longitude: location.coordinate.longitude,
-            horizontalAccuracy: max(location.horizontalAccuracy, 20),
-            userLabel: try inferredUserLabel(near: location.coordinate)
+            horizontalAccuracy: max(location.horizontalAccuracy, 20)
         )
         place.dayTimeline = try timeline(for: arrivalDate)
         modelContext.insert(place)
-        return try collapseDuplicatePlaces(around: place)
+        let canonical = try collapseDuplicatePlaces(around: place)
+        try applyPlaceLearning(to: canonical)
+        return canonical
     }
 
     private func existingVisit(near arrivalDate: Date, coordinate: CLLocationCoordinate2D) throws -> VisitPlace? {
@@ -3336,7 +3384,20 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         }
     }
 
-    private func inferredUserLabel(near coordinate: CLLocationCoordinate2D) throws -> String? {
+    private func knownPlace(id: UUID?) throws -> KnownPlace? {
+        guard let id else { return nil }
+        var descriptor = FetchDescriptor<KnownPlace>(
+            predicate: #Predicate { place in
+                place.id == id
+            }
+        )
+        descriptor.fetchLimit = 1
+        return try modelContext.fetch(descriptor).first
+    }
+
+    /// Copies a nearby confirmed name when no `KnownPlace` matched. Display
+    /// only — this does not assign a place or teach a footprint.
+    private func nearbyUserLabel(near coordinate: CLLocationCoordinate2D) throws -> String? {
         if let cached = bulkLabeledPlaces {
             return cached
                 .map { ($0.label, Self.distanceMeters(from: coordinate, to: $0.coordinate)) }

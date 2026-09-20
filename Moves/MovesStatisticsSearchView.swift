@@ -198,7 +198,6 @@ struct MovesStatisticsSnapshot {
 struct MovesStatisticsSearchView: View {
     private enum Section: String, CaseIterable, Identifiable {
         case overview = "Statistics"
-        case visits = "Visits"
         case connections = "Connections"
 
         var id: String { rawValue }
@@ -218,7 +217,6 @@ struct MovesStatisticsSearchView: View {
     private let snapshot: MovesStatisticsSnapshot
 
     @State private var selectedSection = Section.overview
-    @State private var visitSearchText = ""
     @State private var originKey: String?
     @State private var destinationKey: String?
     @State private var includesIndirectConnections = true
@@ -246,8 +244,6 @@ struct MovesStatisticsSearchView: View {
                 switch selectedSection {
                 case .overview:
                     statisticsView
-                case .visits:
-                    visitsView
                 case .connections:
                     connectionsView
                 }
@@ -348,57 +344,6 @@ struct MovesStatisticsSearchView: View {
             .padding(.horizontal, 14)
             .padding(.bottom, 18)
         }
-    }
-
-    private var visitsView: some View {
-        let locations = snapshot.filteredLocations(matching: visitSearchText)
-        let visits = snapshot.filteredVisits(matching: visitSearchText)
-
-        return ScrollView {
-            LazyVStack(spacing: 14) {
-                if visitSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    SettingsCard(title: "Search Visits") {
-                        Label("Search by place, note, or date", systemImage: "magnifyingglass")
-                            .foregroundStyle(.secondary)
-                        Text("Try a location such as Hamburg, a note, or a date from your history.")
-                            .font(.system(size: 12, weight: .medium, design: .rounded))
-                            .foregroundStyle(.secondary)
-                    }
-                } else if locations.isEmpty && visits.isEmpty {
-                    ContentUnavailableView.search(text: visitSearchText)
-                        .panelSurface()
-                } else {
-                    if !locations.isEmpty {
-                        SettingsCard(title: "Locations") {
-                            ForEach(locations.prefix(20)) { location in
-                                NavigationLink {
-                                    LocationHistoryDetailView(location: location)
-                                } label: {
-                                    LocationSummaryRow(location: location, rank: nil)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                    }
-
-                    if !visits.isEmpty {
-                        SettingsCard(title: "Visits") {
-                            ForEach(visits.prefix(250)) { visit in
-                                NavigationLink {
-                                    PlaceMapDetailView(place: visit)
-                                } label: {
-                                    VisitSearchResultRow(place: visit)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                    }
-                }
-            }
-            .padding(.horizontal, 14)
-            .padding(.bottom, 18)
-        }
-        .searchable(text: $visitSearchText, prompt: "Location, note, or date")
     }
 
     private var connectionsView: some View {

@@ -134,6 +134,14 @@
 		F2100001305000010000000F /* NearbyPlaceSuggester.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2100001305000010000000E /* NearbyPlaceSuggester.swift */; };
 		F21000013050000100000011 /* NearbyPlaceSuggesterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F21000013050000100000010 /* NearbyPlaceSuggesterTests.swift */; };
 		F40000013050000100000003 /* RouteMatchPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F40000013050000100000002 /* RouteMatchPolicyTests.swift */; };
+		F50000013060000100000001 /* PlaceLearningEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = F50000013060000100000000 /* PlaceLearningEngine.swift */; };
+		F50000013060000100000003 /* PlaceLearningEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F50000013060000100000002 /* PlaceLearningEngineTests.swift */; };
+		F70000013070000100000001 /* PlacesTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F70000013070000100000000 /* PlacesTabView.swift */; };
+		F70000013070000100000003 /* PlaceDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F70000013070000100000002 /* PlaceDetailView.swift */; };
+		F70000013070000100000005 /* OccupancyChartView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F70000013070000100000004 /* OccupancyChartView.swift */; };
+		F70000013070000100000007 /* PlacesIndex.swift in Sources */ = {isa = PBXBuildFile; fileRef = F70000013070000100000006 /* PlacesIndex.swift */; };
+		F70000013070000100000009 /* PlaceGeocodeBackfill.swift in Sources */ = {isa = PBXBuildFile; fileRef = F70000013070000100000008 /* PlaceGeocodeBackfill.swift */; };
+		F7000001307000010000000B /* PlacesIndexTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F7000001307000010000000A /* PlacesIndexTests.swift */; };
 		F10000013030000100000003 /* TimelineArchiveImportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000013030000100000002 /* TimelineArchiveImportTests.swift */; };
 		F10000013030000100000005 /* LocationLogImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000013030000100000004 /* LocationLogImport.swift */; };
 		F10000013030000100000007 /* LocationLogImportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000013030000100000006 /* LocationLogImportTests.swift */; };
@@ -333,6 +341,14 @@
 		F2100001305000010000000E /* NearbyPlaceSuggester.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NearbyPlaceSuggester.swift; sourceTree = "<group>"; };
 		F21000013050000100000010 /* NearbyPlaceSuggesterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NearbyPlaceSuggesterTests.swift; sourceTree = "<group>"; };
 		F40000013050000100000002 /* RouteMatchPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteMatchPolicyTests.swift; sourceTree = "<group>"; };
+		F50000013060000100000000 /* PlaceLearningEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaceLearningEngine.swift; sourceTree = "<group>"; };
+		F50000013060000100000002 /* PlaceLearningEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaceLearningEngineTests.swift; sourceTree = "<group>"; };
+		F70000013070000100000000 /* PlacesTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlacesTabView.swift; sourceTree = "<group>"; };
+		F70000013070000100000002 /* PlaceDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaceDetailView.swift; sourceTree = "<group>"; };
+		F70000013070000100000004 /* OccupancyChartView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OccupancyChartView.swift; sourceTree = "<group>"; };
+		F70000013070000100000006 /* PlacesIndex.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlacesIndex.swift; sourceTree = "<group>"; };
+		F70000013070000100000008 /* PlaceGeocodeBackfill.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaceGeocodeBackfill.swift; sourceTree = "<group>"; };
+		F7000001307000010000000A /* PlacesIndexTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlacesIndexTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -428,11 +444,14 @@
 				489A76362C4FC6F300F43B69 /* ContentView.swift */,
 				F20000013040000100000000 /* MovesRootView.swift */,
 				F21100013051000100000000 /* TimelineTabView.swift */,
+				F70000013070000100000020 /* PlacesTab */,
+				F70000013070000100000008 /* PlaceGeocodeBackfill.swift */,
 				F21000013050000100000000 /* TimelineItemActions.swift */,
 				F30000013050000100000000 /* RouteRendering.swift */,
 				F30000013050000100000002 /* SpeedProfileBuilder.swift */,
 				F20000013040000100000002 /* TimelineSchemaUpgrader.swift */,
 				F20000013040000100000004 /* TimelineLocator.swift */,
+				F50000013060000100000000 /* PlaceLearningEngine.swift */,
 				F21000013050000100000002 /* TimelineEditController.swift */,
 				F21000013050000100000004 /* PlaceRenameSheet.swift */,
 				F21000013050000100000006 /* EditTimesSheet.swift */,
@@ -535,6 +554,17 @@
 			path = Icons;
 			sourceTree = "<group>";
 		};
+		F70000013070000100000020 /* PlacesTab */ = {
+			isa = PBXGroup;
+			children = (
+				F70000013070000100000000 /* PlacesTabView.swift */,
+				F70000013070000100000002 /* PlaceDetailView.swift */,
+				F70000013070000100000004 /* OccupancyChartView.swift */,
+				F70000013070000100000006 /* PlacesIndex.swift */,
+			);
+			path = PlacesTab;
+			sourceTree = "<group>";
+		};
 		9A1B00012F00000100000003 /* MovesTests */ = {
 			isa = PBXGroup;
 			children = (
@@ -549,6 +579,8 @@
 				F30000013050000100000004 /* SpeedProfileBuilderTests.swift */,
 				F21000013050000100000010 /* NearbyPlaceSuggesterTests.swift */,
 				F40000013050000100000002 /* RouteMatchPolicyTests.swift */,
+				F50000013060000100000002 /* PlaceLearningEngineTests.swift */,
+				F7000001307000010000000A /* PlacesIndexTests.swift */,
 			);
 			path = MovesTests;
 			sourceTree = "<group>";
@@ -865,11 +897,17 @@
 				489A76372C4FC6F300F43B69 /* ContentView.swift in Sources */,
 				F20000013040000100000001 /* MovesRootView.swift in Sources */,
 				F21100013051000100000001 /* TimelineTabView.swift in Sources */,
+				F70000013070000100000001 /* PlacesTabView.swift in Sources */,
+				F70000013070000100000003 /* PlaceDetailView.swift in Sources */,
+				F70000013070000100000005 /* OccupancyChartView.swift in Sources */,
+				F70000013070000100000007 /* PlacesIndex.swift in Sources */,
+				F70000013070000100000009 /* PlaceGeocodeBackfill.swift in Sources */,
 				F21000013050000100000001 /* TimelineItemActions.swift in Sources */,
 				F30000013050000100000001 /* RouteRendering.swift in Sources */,
 				F30000013050000100000003 /* SpeedProfileBuilder.swift in Sources */,
 				F20000013040000100000003 /* TimelineSchemaUpgrader.swift in Sources */,
 				F20000013040000100000005 /* TimelineLocator.swift in Sources */,
+				F50000013060000100000001 /* PlaceLearningEngine.swift in Sources */,
 				F21000013050000100000003 /* TimelineEditController.swift in Sources */,
 				F21000013050000100000005 /* PlaceRenameSheet.swift in Sources */,
 				F21000013050000100000007 /* EditTimesSheet.swift in Sources */,
@@ -915,6 +953,8 @@
 				F30000013050000100000005 /* SpeedProfileBuilderTests.swift in Sources */,
 				F21000013050000100000011 /* NearbyPlaceSuggesterTests.swift in Sources */,
 				F40000013050000100000003 /* RouteMatchPolicyTests.swift in Sources */,
+				F50000013060000100000003 /* PlaceLearningEngineTests.swift in Sources */,
+				F7000001307000010000000B /* PlacesIndexTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
