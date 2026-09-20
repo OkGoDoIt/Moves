@@ -331,6 +331,7 @@ struct ContentView: View {
     @EnvironmentObject private var captureManager: MovesLocationCaptureManager
     @EnvironmentObject private var undoController: AppUndoController
     @EnvironmentObject private var cloudDataPresencePublisher: MovesCloudDataPresencePublisher
+    @EnvironmentObject private var rootController: MovesRootController
     @Environment(\.modelContext) private var modelContext
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
@@ -340,10 +341,6 @@ struct ContentView: View {
 
     @State private var selectedDayKey = ""
     @State private var selectedPageIndex = 0
-    @State private var isShowingSettings = false
-    @State private var isShowingStatisticsSearch = false
-    @State private var isShowingRouteTrackingSettings = false
-    @State private var isShowingDatePicker = false
 
     private var selectedDay: DayTimeline? {
         guard dayTimelines.indices.contains(selectedPageIndex) else { return nil }
@@ -421,7 +418,6 @@ struct ContentView: View {
                             }
                         }
                         .tabViewStyle(.page(indexDisplayMode: .never))
-                        .ignoresSafeArea(.container, edges: .bottom)
                     }
                 }
                 
@@ -432,7 +428,7 @@ struct ContentView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
-                        isShowingSettings = true
+                        rootController.isShowingSettings = true
                     } label: {
                         Image(systemName: "gearshape")
                     }
@@ -441,7 +437,7 @@ struct ContentView: View {
 
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
-                        isShowingStatisticsSearch = true
+                        rootController.isShowingStatisticsSearch = true
                     } label: {
                         Image(systemName: "magnifyingglass")
                     }
@@ -456,7 +452,7 @@ struct ContentView: View {
                                 endsAt: captureManager.temporaryRouteTrackingEndsAt,
                                 authorizationStatus: captureManager.authorizationStatus,
                                 tapAction: {
-                                    isShowingRouteTrackingSettings = true
+                                    rootController.isShowingRouteTrackingSettings = true
                                 },
                                 longPressAction: {
                                     captureManager.enableTemporaryRouteTracking(
@@ -473,27 +469,6 @@ struct ContentView: View {
                
             }
         }
-        .sheet(isPresented: $isShowingSettings) {
-            MovesSettingsView(
-                dayTimelines: dayTimelines,
-                selectedDayKey: selectedDayKey,
-                captureManager: captureManager
-            )
-        }
-        .sheet(isPresented: $isShowingStatisticsSearch) {
-            NavigationStack {
-                MovesStatisticsSearchView(
-                    dayTimelines: dayTimelines,
-                    initialDate: selectedDay?.dayStart ?? .now
-                )
-            }
-        }
-        .sheet(isPresented: $isShowingRouteTrackingSettings) {
-            RouteTrackingSettingsSheet(captureManager: captureManager)
-        }
-        .sheet(isPresented: $isShowingDatePicker) {
-            datePickerSheet
-        }
         .task {
             guard !ProcessInfo.processInfo.isRunningForPreviews else { return }
             await captureManager.start()
@@ -504,6 +479,7 @@ struct ContentView: View {
             publishWidgetSnapshot()
             refreshSpotlightIndex()
             cloudDataPresencePublisher.publishSoon()
+            rootController.selectedDayKey = selectedDayKey
         }
         .onChange(of: dayTimelines.map(\.dayKey)) { _, _ in
             syncSelectedDayIfNeeded()
@@ -528,18 +504,29 @@ struct ContentView: View {
             refreshSpotlightIndex()
             cloudDataPresencePublisher.publishSoon()
         }
-        .onOpenURL(perform: handleDeepLink)
         .onChange(of: selectedPageIndex) { _, newIndex in
             guard dayTimelines.indices.contains(newIndex) else { return }
             selectedDayKey = dayTimelines[newIndex].dayKey
         }
-        .overlay {
-            ShakeToUndoDetector(undoManager: undoController.manager) {
-                handleShakeToUndo()
+        .onChange(of: selectedDayKey) { _, newKey in
+            if rootController.selectedDayKey != newKey {
+                rootController.selectedDayKey = newKey
             }
-            .frame(width: 1, height: 1)
-            .opacity(0.01)
-            .accessibilityHidden(true)
+        }
+        .onChange(of: rootController.shouldOpenToday) { _, shouldOpen in
+            guard shouldOpen else { return }
+            openCurrentDay()
+            rootController.shouldOpenToday = false
+        }
+        .onChange(of: rootController.requestedPlaceID) { _, placeID in
+            guard let placeID else { return }
+            selectPlace(placeID)
+            rootController.requestedPlaceID = nil
+        }
+        .onChange(of: rootController.requestedJumpDate) { _, date in
+            guard let date else { return }
+            jumpToDate(date)
+            rootController.requestedJumpDate = nil
         }
     }
 
@@ -596,7 +583,7 @@ struct ContentView: View {
             VStack(spacing: 2) {
                 if let selectedDay {
                     Button {
-                        isShowingDatePicker = true
+                        rootController.isShowingDatePicker = true
                     } label: {
                         Text(selectedDay.dayStart, format: .dateTime.weekday(.wide).day().month(.wide))
                             .font(.system(size: 18, weight: .bold, design: .rounded))
@@ -757,25 +744,12 @@ struct ContentView: View {
         }
     }
 
-    private func handleDeepLink(_ url: URL) {
-        guard url.scheme?.lowercased() == "moves" else { return }
-
-        switch url.host?.lowercased() {
-        case "today":
-            openCurrentDay()
-        case "tracking":
-            isShowingRouteTrackingSettings = true
-        case "place":
-            guard let identifier = url.pathComponents.dropFirst().first,
-                  let placeID = UUID(uuidString: identifier),
-                  let dayIndex = dayTimelines.firstIndex(where: { day in
-                      day.places.contains(where: { $0.id == placeID })
-                  }) else { return }
-            selectedPageIndex = dayIndex
-            selectedDayKey = dayTimelines[dayIndex].dayKey
-        default:
-            break
-        }
+    private func selectPlace(_ placeID: UUID) {
+        guard let dayIndex = dayTimelines.firstIndex(where: { day in
+            day.places.contains(where: { $0.id == placeID })
+        }) else { return }
+        selectedPageIndex = dayIndex
+        selectedDayKey = dayTimelines[dayIndex].dayKey
     }
 
     private func syncSelectedDayIfNeeded() {
@@ -832,32 +806,6 @@ struct ContentView: View {
         guard let closest else { return }
         selectedPageIndex = closest.offset
         selectedDayKey = closest.element.dayKey
-    }
-
-    private var datePickerSheet: some View {
-        MovesJumpToDateView(
-            dayTimelines: dayTimelines,
-            selectedDate: selectedDay?.dayStart ?? .now,
-            onSelectDate: jumpToDate,
-            onDismiss: { isShowingDatePicker = false }
-        )
-    }
-
-    @MainActor
-    private func handleShakeToUndo() {
-        let undoManager = undoController.manager
-        guard undoManager.canUndo else { return }
-        modelContext.undoManager = undoManager
-
-        undoManager.undo()
-
-        if modelContext.hasChanges {
-            do {
-                try modelContext.save()
-            } catch {
-                print("Failed to save undo changes: \(error.localizedDescription)")
-            }
-        }
     }
 }
 
@@ -1515,7 +1463,7 @@ extension View {
     }
 }
 
-private struct ShakeToUndoDetector: UIViewRepresentable {
+struct ShakeToUndoDetector: UIViewRepresentable {
     let undoManager: UndoManager
     let onShake: () -> Void
 
@@ -1532,7 +1480,7 @@ private struct ShakeToUndoDetector: UIViewRepresentable {
     }
 }
 
-private final class ShakeToUndoView: UIView {
+final class ShakeToUndoView: UIView {
     var managedUndoManager: UndoManager?
     var onShake: (() -> Void)?
     private var activeObserver: NSObjectProtocol?
@@ -1606,10 +1554,7 @@ struct ContentView_Previews: PreviewProvider {
             cloudKitDatabase: .none
         )
         let container = try! ModelContainer(
-            for: DayTimeline.self,
-            VisitPlace.self,
-            MoveSegment.self,
-            LocationSample.self,
+            for: Schema(MovesTimelineSchema.models),
             configurations: configuration
         )
 
@@ -1618,5 +1563,6 @@ struct ContentView_Previews: PreviewProvider {
             .environmentObject(MovesLocationCaptureManager(modelContainer: container))
             .environmentObject(AppUndoController())
             .environmentObject(MovesCloudDataPresencePublisher(modelContainer: container))
+            .environmentObject(MovesRootController())
     }
 }

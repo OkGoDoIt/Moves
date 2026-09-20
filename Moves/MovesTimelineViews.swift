@@ -139,7 +139,6 @@ struct DayTimelinePageContent: View {
     @EnvironmentObject private var captureManager: MovesLocationCaptureManager
     let dayTimeline: DayTimeline
     let isActive: Bool
-    private static let transientStopMaximumDuration: TimeInterval = 5 * 60
     private static let provisionalPlaceNameResolver = CLGeocoderPlaceNameResolver()
 
     @State private var provisionalSampleResolvedTitle: String?
@@ -221,29 +220,7 @@ struct DayTimelinePageContent: View {
 
     private static func shouldHidePlaceFromTimeline(_ place: VisitPlace) -> Bool {
         guard let dayTimeline = place.dayTimeline else { return false }
-
-        if hasExplicitUserLabel(place) {
-            return false
-        }
-
-        let hasIncomingMove = dayTimeline.moves.contains { $0.endPlace?.id == place.id }
-        let hasOutgoingMove = dayTimeline.moves.contains { $0.startPlace?.id == place.id }
-
-        if place.departureDate == nil {
-            return hasOutgoingMove
-        }
-
-        guard let departureDate = place.departureDate else {
-            return false
-        }
-
-        let duration = departureDate.timeIntervalSince(place.arrivalDate)
-        let isShortTransitStop = duration < Self.transientStopMaximumDuration
-        return isShortTransitStop && hasIncomingMove && hasOutgoingMove
-    }
-
-    private static func hasExplicitUserLabel(_ place: VisitPlace) -> Bool {
-        !(place.userLabel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        return place.matchesShortStopHeuristic(in: dayTimeline)
     }
 
     private var transportSummaryMetrics: [DayTransportSummaryMetric] {

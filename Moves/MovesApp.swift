@@ -76,26 +76,18 @@ struct MovesApp: App {
                 captureManager: captureManager
             )
             MovesAppShortcuts.updateAppShortcutParameters()
+            if !ProcessInfo.processInfo.isRunningUnitTests {
+                TimelineSchemaUpgrader.runIfNeeded(container: container)
+            }
         } catch {
             fatalError("Could not create ModelContainer: \(error)")
         }
     }
 
     static func makeModelContainer() throws -> ModelContainer {
-        let timelineSchema = Schema([
-            DayTimeline.self,
-            VisitPlace.self,
-            MoveSegment.self,
-            LocationSample.self,
-        ])
+        let timelineSchema = Schema(MovesTimelineSchema.models)
         let cacheSchema = Schema([ShareMapAggregate.self])
-        let schema = Schema([
-            DayTimeline.self,
-            VisitPlace.self,
-            MoveSegment.self,
-            LocationSample.self,
-            ShareMapAggregate.self,
-        ])
+        let schema = Schema(MovesTimelineSchema.models + [ShareMapAggregate.self])
 
         let cacheConfiguration: ModelConfiguration
         #if targetEnvironment(simulator)
@@ -193,7 +185,7 @@ struct MovesApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            MovesRootView()
                 .environmentObject(captureManager)
                 .environmentObject(undoController)
                 .environmentObject(healthWorkoutRouteAutoImporter)

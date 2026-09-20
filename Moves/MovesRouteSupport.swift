@@ -30,8 +30,10 @@ enum MovesPalette {
 
     static func transportColorAssetName(for mode: TransportMode) -> String {
         switch mode {
-        case .walking, .running:
+        case .walking:
             return "MovesTransportWalking"
+        case .running:
+            return "MovesTransportRunning"
         case .swimming:
             return "MovesTransportBoat"
         case .cycling:
@@ -45,8 +47,14 @@ enum MovesPalette {
         case .boat:
             return "MovesTransportBoat"
         case .stationary, .unknown:
-            return "MovesMove"
+            return "MovesTransportUnknown"
         }
+    }
+
+    /// Lightens `base` as `fraction` goes from 0 (slow) to 1 (fast).
+    static func speedShade(base: Color, fraction: Double) -> Color {
+        let t = min(max(fraction, 0), 1)
+        return base.mix(with: .white, by: t * 0.42)
     }
 }
 
@@ -104,20 +112,18 @@ struct RenderedRoute: Identifiable {
     }
 
     var tint: Color {
+        MovesPalette.transport(transportMode)
+    }
+
+    /// Thin overlay for recorded Health / route-tracking legs (inner stroke in WS3).
+    var recordedOverlayTint: Color? {
         if usesHealthWorkoutRoute {
             return MovesPalette.healthRoute
         }
-
         if usesHighAccuracyRouteTracking {
             return MovesPalette.routeTracking
         }
-
-        switch transportMode {
-        case .stationary, .walking, .running, .cycling, .automotive, .unknown:
-            return MovesPalette.move
-        case .swimming, .train, .plane, .boat:
-            return MovesPalette.transport(transportMode)
-        }
+        return nil
     }
 
     var shadowTint: Color {
@@ -410,11 +416,7 @@ extension MoveSegment {
     }
 
     var routeDisplayTint: Color {
-        if usesHealthWorkoutRoute {
-            return MovesPalette.healthRoute
-        }
-
-        return usesHighAccuracyRouteTracking ? MovesPalette.routeTracking : MovesPalette.move
+        MovesPalette.transport(transportMode)
     }
 }
 

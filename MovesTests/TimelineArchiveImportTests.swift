@@ -240,12 +240,7 @@ final class TimelineArchiveImportTests: XCTestCase {
     }
 
     private func makeInMemoryContainer() throws -> ModelContainer {
-        let schema = Schema([
-            DayTimeline.self,
-            VisitPlace.self,
-            MoveSegment.self,
-            LocationSample.self,
-        ])
+        let schema = Schema(MovesTimelineSchema.models)
         let configuration = ModelConfiguration(
             schema: schema,
             isStoredInMemoryOnly: true,

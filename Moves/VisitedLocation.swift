@@ -58,40 +58,118 @@ enum LocationSampleSource: String, Codable, CaseIterable {
     case healthWorkoutRoute
     case launchBackfill
     case authorizationGrant
+    /// A geotagged photo from the user's library. Not a route track.
+    case photoLibrary
+    /// Imported from Google Timeline (Records, Semantic Location History, or on-device JSON).
+    case googleTimelineImport
+    /// Reserved for a future Arc Timeline importer; stored as a string so existing rows stay valid.
+    case arcImport
 }
 
 extension LocationSampleSource {
     var priority: Int {
         switch self {
-        case .fileRouteImport: return 7
+        case .fileRouteImport, .googleTimelineImport, .arcImport: return 7
         case .watchRouteTracking: return 6
         case .healthWorkoutRoute: return 5
         case .routeTracking: return 4
         case .visit: return 3
         case .watchSignificantChange: return 2
         case .significantChange: return 2
-        case .authorizationGrant: return 1
+        case .authorizationGrant, .photoLibrary: return 1
         case .launchBackfill: return 0
         }
     }
 
     var isRouteTrack: Bool {
         switch self {
-        case .routeTracking, .watchRouteTracking, .healthWorkoutRoute, .fileRouteImport:
+        case .routeTracking, .watchRouteTracking, .healthWorkoutRoute, .fileRouteImport, .googleTimelineImport, .arcImport:
             return true
-        case .visit, .significantChange, .watchSignificantChange, .launchBackfill, .authorizationGrant:
+        case .visit, .significantChange, .watchSignificantChange, .launchBackfill, .authorizationGrant, .photoLibrary:
             return false
         }
     }
 
     var preservesRouteResolution: Bool {
         switch self {
-        case .healthWorkoutRoute, .watchRouteTracking, .fileRouteImport:
+        case .healthWorkoutRoute, .watchRouteTracking, .fileRouteImport, .googleTimelineImport, .arcImport:
             return true
-        case .routeTracking, .visit, .significantChange, .watchSignificantChange, .launchBackfill, .authorizationGrant:
+        case .routeTracking, .visit, .significantChange, .watchSignificantChange, .launchBackfill, .authorizationGrant, .photoLibrary:
             return false
         }
     }
+}
+
+/// How a visit was attached to a `KnownPlace`.
+enum PlaceAssignmentSource: String, Codable, CaseIterable {
+    case none
+    case user
+    case auto
+    case autoAmbiguous
+}
+
+/// Where a visit or move originally came from.
+enum TimelineItemOrigin: String, Codable, CaseIterable {
+    case sensor
+    case imported
+    case photoInferred
+    case manual
+}
+
+/// Whether a timeline item is waiting for the user to confirm or dismiss it.
+enum ReviewState: String, Codable, CaseIterable {
+    case none
+    case pending
+    case confirmed
+    case dismissed
+}
+
+/// How a move's path should be drawn and matched.
+enum RouteMatchPolicy: String, Codable, CaseIterable {
+    case auto
+    case recorded
+    case roads
+    case manual
+}
+
+/// Honesty of the displayed path, independent of how the user asked to draw it.
+enum RouteMatchConfidence: String, Codable, CaseIterable {
+    case recorded
+    case high
+    case medium
+    case estimated
+    case unknown
+}
+
+/// Who chose the transport mode on a move.
+enum TransportModeSource: String, Codable, CaseIterable {
+    case auto
+    case user
+    case imported
+}
+
+/// Failures from timeline edits that the UI can present without exposing store details.
+enum TimelineEditingError: Error, Equatable {
+    case missingNeighbors
+    case invalidSplitTime
+    case invalidTimeRange
+    case cannotMergeSameVisit
+    case visitNotFound
+    case moveNotFound
+}
+
+/// Models in the CloudKit-backed (or local fallback) timeline store.
+enum MovesTimelineSchema {
+    static let models: [any PersistentModel.Type] = [
+        DayTimeline.self,
+        VisitPlace.self,
+        MoveSegment.self,
+        LocationSample.self,
+        KnownPlace.self,
+        PhotoAttachment.self,
+        PlaceCorrectionEvent.self,
+        VisitedCell.self,
+    ]
 }
 
 extension Array where Element == LocationSample {
@@ -116,6 +194,9 @@ final class DayTimeline {
     @Relationship(deleteRule: .cascade, originalName: "samples", inverse: \LocationSample.dayTimeline)
     var samplesStorage: [LocationSample]? = nil
 
+    @Relationship(deleteRule: .cascade, inverse: \PhotoAttachment.dayTimeline)
+    var photosStorage: [PhotoAttachment]? = nil
+
     var places: [VisitPlace] {
         get { placesStorage ?? [] }
         set { placesStorage = newValue }
@@ -129,6 +210,11 @@ final class DayTimeline {
     var samples: [LocationSample] {
         get { samplesStorage ?? [] }
         set { samplesStorage = newValue }
+    }
+
+    var photos: [PhotoAttachment] {
+        get { photosStorage ?? [] }
+        set { photosStorage = newValue }
     }
 
     var uniqueLocationCount: Int {
@@ -196,8 +282,20 @@ final class VisitPlace {
     var autoLabel: String? = nil
     var comment: String? = nil
     var createdAt: Date = Date.now
+    var assignmentSourceRaw: String = PlaceAssignmentSource.none.rawValue
+    var assignmentConfidence: Double = 0
+    var originRaw: String = TimelineItemOrigin.sensor.rawValue
+    var isHiddenAsShortStop: Bool = false
+    var countryCode: String? = nil
+    var locality: String? = nil
+    var administrativeArea: String? = nil
+    var reviewStateRaw: String = ReviewState.none.rawValue
 
     var dayTimeline: DayTimeline?
+    var knownPlace: KnownPlace?
+
+    @Relationship(deleteRule: .cascade, inverse: \PhotoAttachment.visitPlace)
+    var photoAttachmentsStorage: [PhotoAttachment]? = nil
 
     @Relationship(originalName: "outgoingMoves", inverse: \MoveSegment.startPlace)
     var outgoingMovesStorage: [MoveSegment]? = nil
@@ -213,6 +311,26 @@ final class VisitPlace {
     var incomingMoves: [MoveSegment] {
         get { incomingMovesStorage ?? [] }
         set { incomingMovesStorage = newValue }
+    }
+
+    var photoAttachments: [PhotoAttachment] {
+        get { photoAttachmentsStorage ?? [] }
+        set { photoAttachmentsStorage = newValue }
+    }
+
+    var assignmentSource: PlaceAssignmentSource {
+        get { PlaceAssignmentSource(rawValue: assignmentSourceRaw) ?? .none }
+        set { assignmentSourceRaw = newValue.rawValue }
+    }
+
+    var origin: TimelineItemOrigin {
+        get { TimelineItemOrigin(rawValue: originRaw) ?? .sensor }
+        set { originRaw = newValue.rawValue }
+    }
+
+    var reviewState: ReviewState {
+        get { ReviewState(rawValue: reviewStateRaw) ?? .none }
+        set { reviewStateRaw = newValue.rawValue }
     }
 
     init(
@@ -253,6 +371,45 @@ final class VisitPlace {
         let lon = String(format: "%.5f", longitude)
         return "\(lat), \(lon)"
     }
+
+    /// Inclusive stay interval used by time-of-day lookup. Open-ended visits
+    /// cover from arrival until the next outgoing move (or indefinitely).
+    func covers(_ date: Date) -> Bool {
+        guard date >= arrivalDate else { return false }
+        if let departureDate {
+            if departureDate <= arrivalDate {
+                return abs(date.timeIntervalSince(arrivalDate)) < 0.5
+            }
+            return date <= departureDate
+        }
+        if let outgoingStart = outgoingMoves.map(\.startDate).min(), date >= outgoingStart {
+            return false
+        }
+        return true
+    }
+
+    /// The current storyline short-stop heuristic, copied so upgrades and the
+    /// day list stay aligned until WS1 reads `isHiddenAsShortStop` directly.
+    func matchesShortStopHeuristic(in dayTimeline: DayTimeline) -> Bool {
+        let trimmedLabel = userLabel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmedLabel.isEmpty {
+            return false
+        }
+
+        let hasIncomingMove = dayTimeline.moves.contains { $0.endPlace?.id == id }
+        let hasOutgoingMove = dayTimeline.moves.contains { $0.startPlace?.id == id }
+
+        if departureDate == nil {
+            return hasOutgoingMove
+        }
+
+        guard let departureDate else { return false }
+        let duration = departureDate.timeIntervalSince(arrivalDate)
+        let isShortTransitStop = duration < VisitPlace.transientStopMaximumDuration
+        return isShortTransitStop && hasIncomingMove && hasOutgoingMove
+    }
+
+    static let transientStopMaximumDuration: TimeInterval = 5 * 60
 }
 
 fileprivate extension VisitPlace {
@@ -275,6 +432,13 @@ final class MoveSegment {
     var stepCount: Int? = nil
     var comment: String? = nil
     var createdAt: Date = Date.now
+    var routeMatchPolicyRaw: String = RouteMatchPolicy.auto.rawValue
+    var routeMatchConfidenceRaw: String = RouteMatchConfidence.unknown.rawValue
+    var routeMatchSummary: String? = nil
+    var transportModeSourceRaw: String = TransportModeSource.auto.rawValue
+    var originRaw: String = TimelineItemOrigin.sensor.rawValue
+    var speedProfileData: Data? = nil
+    var reviewStateRaw: String = ReviewState.none.rawValue
 
     var startPlace: VisitPlace?
     var endPlace: VisitPlace?
@@ -314,6 +478,38 @@ final class MoveSegment {
     var transportMode: TransportMode {
         get { TransportMode(rawValue: transportModeRawValue) ?? .unknown }
         set { transportModeRawValue = newValue.rawValue }
+    }
+
+    var routeMatchPolicy: RouteMatchPolicy {
+        get { RouteMatchPolicy(rawValue: routeMatchPolicyRaw) ?? .auto }
+        set { routeMatchPolicyRaw = newValue.rawValue }
+    }
+
+    var routeMatchConfidence: RouteMatchConfidence {
+        get { RouteMatchConfidence(rawValue: routeMatchConfidenceRaw) ?? .unknown }
+        set { routeMatchConfidenceRaw = newValue.rawValue }
+    }
+
+    var transportModeSource: TransportModeSource {
+        get { TransportModeSource(rawValue: transportModeSourceRaw) ?? .auto }
+        set { transportModeSourceRaw = newValue.rawValue }
+    }
+
+    var origin: TimelineItemOrigin {
+        get { TimelineItemOrigin(rawValue: originRaw) ?? .sensor }
+        set { originRaw = newValue.rawValue }
+    }
+
+    var reviewState: ReviewState {
+        get { ReviewState(rawValue: reviewStateRaw) ?? .none }
+        set { reviewStateRaw = newValue.rawValue }
+    }
+
+    func covers(_ date: Date) -> Bool {
+        if endDate <= startDate {
+            return abs(date.timeIntervalSince(startDate)) < 0.5
+        }
+        return date >= startDate && date <= endDate
     }
 
     var timelineStartDate: Date {
@@ -402,6 +598,138 @@ final class LocationSample {
     }
 }
 
+/// A real-world place the user has confirmed at least once. Visits point at it.
+@Model
+final class KnownPlace {
+    var id: UUID = UUID()
+    var name: String = ""
+    var centerLatitude: Double = 0
+    var centerLongitude: Double = 0
+    /// Learned radius in meters; grows only from confirmed visits. 25…150.
+    var footprintRadius: Double = 40
+    var confirmedVisitCount: Int = 0
+    var category: String? = nil
+    var countryCode: String? = nil
+    var locality: String? = nil
+    var administrativeArea: String? = nil
+    /// Reverse-geocoded names the user has explicitly rejected here.
+    var rejectedAutoLabels: [String] = []
+    /// 24-bin histogram of confirmed arrival hours.
+    var arrivalHourHistogram: [Int] = Array(repeating: 0, count: 24)
+    /// 7-bin weekday histogram of confirmed visits.
+    var weekdayHistogram: [Int] = Array(repeating: 0, count: 7)
+    /// Stay durations in seconds; keep the last 50.
+    var stayDurationSamples: [Double] = []
+    var createdAt: Date = Date.now
+    var lastVisitAt: Date? = nil
+    @Relationship(inverse: \VisitPlace.knownPlace) var visitsStorage: [VisitPlace]? = nil
+
+    var visits: [VisitPlace] {
+        get { visitsStorage ?? [] }
+        set { visitsStorage = newValue }
+    }
+
+    var coordinate: CLLocationCoordinate2D {
+        CLLocationCoordinate2D(latitude: centerLatitude, longitude: centerLongitude)
+    }
+
+    init(
+        name: String,
+        latitude: Double,
+        longitude: Double,
+        footprintRadius: Double = 40
+    ) {
+        self.id = UUID()
+        self.name = name
+        self.centerLatitude = latitude
+        self.centerLongitude = longitude
+        self.footprintRadius = footprintRadius
+        self.createdAt = .now
+    }
+}
+
+/// A photo from the user's library associated with a visit (thumbnail shown inline).
+@Model
+final class PhotoAttachment {
+    var assetLocalIdentifier: String = ""
+    var capturedAt: Date = Date.now
+    var latitude: Double? = nil
+    var longitude: Double? = nil
+    var visitPlace: VisitPlace? = nil
+    var dayTimeline: DayTimeline? = nil
+    var createdAt: Date = Date.now
+
+    init(
+        assetLocalIdentifier: String,
+        capturedAt: Date,
+        latitude: Double? = nil,
+        longitude: Double? = nil
+    ) {
+        self.assetLocalIdentifier = assetLocalIdentifier
+        self.capturedAt = capturedAt
+        self.latitude = latitude
+        self.longitude = longitude
+        self.createdAt = .now
+    }
+}
+
+/// Immutable log of user corrections; the learning input. Never edited, only appended.
+@Model
+final class PlaceCorrectionEvent {
+    var id: UUID = UUID()
+    var timestamp: Date = Date.now
+    var visitPlaceID: UUID = UUID()
+    var fromKnownPlaceID: UUID? = nil
+    var fromAutoLabel: String? = nil
+    var toKnownPlaceID: UUID? = nil
+    var latitude: Double = 0
+    var longitude: Double = 0
+    var arrivalHour: Int = 0
+    var weekday: Int = 0
+    var stayDuration: Double = 0
+
+    init(
+        visitPlaceID: UUID,
+        fromKnownPlaceID: UUID? = nil,
+        fromAutoLabel: String? = nil,
+        toKnownPlaceID: UUID? = nil,
+        latitude: Double,
+        longitude: Double,
+        arrivalHour: Int,
+        weekday: Int,
+        stayDuration: Double,
+        timestamp: Date = .now
+    ) {
+        self.id = UUID()
+        self.timestamp = timestamp
+        self.visitPlaceID = visitPlaceID
+        self.fromKnownPlaceID = fromKnownPlaceID
+        self.fromAutoLabel = fromAutoLabel
+        self.toKnownPlaceID = toKnownPlaceID
+        self.latitude = latitude
+        self.longitude = longitude
+        self.arrivalHour = arrivalHour
+        self.weekday = weekday
+        self.stayDuration = stayDuration
+    }
+}
+
+/// Cache of visited 100 m grid cells for the fog / heat layers. Rebuilt incrementally.
+@Model
+final class VisitedCell {
+    var cellKey: String = ""
+    var firstVisitedAt: Date = Date.now
+    var lastVisitedAt: Date = Date.now
+    var sampleCount: Int = 0
+
+    init(cellKey: String, visitedAt: Date, sampleCount: Int = 1) {
+        self.cellKey = cellKey
+        self.firstVisitedAt = visitedAt
+        self.lastVisitedAt = visitedAt
+        self.sampleCount = sampleCount
+    }
+}
+
 protocol TimelineRepository {
     func addOrUpdateVisit(from visit: CLVisit) throws -> VisitPlace
     func appendSamples(from locations: [CLLocation], source: LocationSampleSource) throws -> [LocationSample]
@@ -419,6 +747,21 @@ protocol TimelineRepository {
     ) throws -> MoveSegment
     func setAutomaticLabel(_ label: String, for placeID: UUID) throws
     func saveIfNeeded() throws
+
+    func dissolveVisit(_ visit: VisitPlace) throws -> MoveSegment
+    func mergeVisits(_ a: VisitPlace, _ b: VisitPlace) throws -> VisitPlace
+    func splitMove(_ move: MoveSegment, at date: Date) throws -> (MoveSegment, VisitPlace, MoveSegment)
+    func splitVisit(_ visit: VisitPlace, at date: Date) throws -> (VisitPlace, VisitPlace)
+    func updateTimes(of visit: VisitPlace, arrival: Date, departure: Date?) throws
+    func setTransportMode(_ mode: TransportMode, for move: MoveSegment, source: TransportModeSource) throws
+    func setRouteMatchPolicy(_ policy: RouteMatchPolicy, for move: MoveSegment) throws
+    func assign(_ visit: VisitPlace, to place: KnownPlace, source: PlaceAssignmentSource, confidence: Double) throws
+    func createKnownPlace(from visit: VisitPlace, name: String) throws -> KnownPlace
+    func knownPlaces(near coordinate: CLLocationCoordinate2D, within meters: CLLocationDistance) throws -> [KnownPlace]
+    func recordCorrection(_ event: PlaceCorrectionEvent) throws
+    func timelineItem(at date: Date) throws -> TimelineLocator.Result
+    func moves(in range: DateInterval, modes: Set<TransportMode>?) throws -> [MoveSegment]
+    func visits(in range: DateInterval) throws -> [VisitPlace]
 }
 
 struct HistoricalDeduplicationReport {
@@ -1441,6 +1784,492 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         try modelContext.save()
     }
 
+    func dissolveVisit(_ visit: VisitPlace) throws -> MoveSegment {
+        try performingUndoableChange(named: "Not a Stop") {
+            let incoming = visit.incomingMoves.sorted { $0.endDate < $1.endDate }.last
+            let outgoing = visit.outgoingMoves.sorted { $0.startDate < $1.startDate }.first
+            guard let incoming, let outgoing, incoming.id != outgoing.id else {
+                throw TimelineEditingError.missingNeighbors
+            }
+
+            let firstCoordinates = TimelineLocator.displayedCoordinates(for: incoming)
+            let secondCoordinates = TimelineLocator.displayedCoordinates(for: outgoing)
+
+            incoming.endPlace = outgoing.endPlace
+            incoming.endDate = max(outgoing.endDate, incoming.endDate)
+            if incoming.endDate <= incoming.startDate {
+                incoming.endDate = incoming.startDate.addingTimeInterval(1)
+            }
+
+            let incomingSamples = incoming.samples
+            let outgoingSamples = outgoing.samples
+            for sample in outgoingSamples where sample.moveSegment?.id != incoming.id {
+                sample.moveSegment = incoming
+            }
+
+            let combinedLocations = (incomingSamples + outgoingSamples)
+                .sorted { $0.timestamp < $1.timestamp }
+                .map(\.asLocation)
+            if combinedLocations.count > 1 {
+                incoming.distanceMeters = Self.totalDistance(for: combinedLocations)
+            } else {
+                incoming.distanceMeters += outgoing.distanceMeters
+            }
+
+            if incoming.transportMode != outgoing.transportMode {
+                incoming.transportMode = outgoing.distanceMeters > incoming.distanceMeters
+                    ? outgoing.transportMode
+                    : incoming.transportMode
+            }
+
+            let mergedCoordinates = TimelineLocator.concatenating(firstCoordinates, secondCoordinates)
+            incoming.clearCachedRouteCoordinates()
+            if incoming.manualRouteCoordinatesData != nil || outgoing.manualRouteCoordinatesData != nil {
+                incoming.storeManualRouteCoordinates(mergedCoordinates)
+                incoming.routeMatchPolicy = .manual
+            } else if mergedCoordinates.count > 1 {
+                incoming.storeCachedRouteCoordinates(
+                    mergedCoordinates,
+                    signature: "dissolved-\(incoming.id.uuidString)"
+                )
+            }
+            if incoming.usesHighAccuracyRouteTracking || outgoing.usesHighAccuracyRouteTracking {
+                if incoming.routeMatchPolicy == .auto {
+                    incoming.routeMatchPolicy = .recorded
+                }
+                if incoming.routeMatchConfidence == .unknown {
+                    incoming.routeMatchConfidence = .recorded
+                }
+            }
+
+            incoming.comment = [incoming.comment, outgoing.comment]
+                .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n")
+
+            modelContext.delete(outgoing)
+            modelContext.delete(visit)
+            return incoming
+        }
+    }
+
+    func mergeVisits(_ a: VisitPlace, _ b: VisitPlace) throws -> VisitPlace {
+        try performingUndoableChange(named: "Merge Places") {
+            guard a.id != b.id else { throw TimelineEditingError.cannotMergeSameVisit }
+
+            let first = a.arrivalDate <= b.arrivalDate ? a : b
+            let second = first.id == a.id ? b : a
+
+            first.departureDate = maxDeparture(first.departureDate, second.departureDate)
+            if first.horizontalAccuracy <= 0 || (second.horizontalAccuracy > 0 && second.horizontalAccuracy < first.horizontalAccuracy) {
+                first.latitude = second.latitude
+                first.longitude = second.longitude
+                first.horizontalAccuracy = second.horizontalAccuracy
+            } else {
+                first.latitude = (first.latitude + second.latitude) / 2
+                first.longitude = (first.longitude + second.longitude) / 2
+            }
+
+            if (first.userLabel?.isEmpty ?? true), let label = second.userLabel, !label.isEmpty {
+                first.userLabel = label
+            }
+            if (first.autoLabel?.isEmpty ?? true), let label = second.autoLabel, !label.isEmpty {
+                first.autoLabel = label
+            }
+            if (first.comment?.isEmpty ?? true) {
+                first.comment = second.comment
+            }
+            if first.knownPlace == nil {
+                first.knownPlace = second.knownPlace
+                first.assignmentSource = second.assignmentSource
+                first.assignmentConfidence = second.assignmentConfidence
+            }
+
+            let connecting = (first.outgoingMoves + second.incomingMoves).filter { move in
+                (move.startPlace?.id == first.id && move.endPlace?.id == second.id)
+                    || (move.startPlace?.id == second.id && move.endPlace?.id == first.id)
+            }
+            for move in connecting {
+                for sample in move.samples {
+                    sample.moveSegment = nil
+                }
+                modelContext.delete(move)
+            }
+
+            for move in second.incomingMoves where move.endPlace?.id == second.id {
+                move.endPlace = first
+            }
+            for move in second.outgoingMoves where move.startPlace?.id == second.id {
+                move.startPlace = first
+            }
+
+            for photo in second.photoAttachments {
+                photo.visitPlace = first
+            }
+
+            modelContext.delete(second)
+            return first
+        }
+    }
+
+    func splitMove(_ move: MoveSegment, at date: Date) throws -> (MoveSegment, VisitPlace, MoveSegment) {
+        try performingUndoableChange(named: "Split Move") {
+            guard date > move.startDate, date < move.endDate else {
+                throw TimelineEditingError.invalidSplitTime
+            }
+            guard let startPlace = move.startPlace, let endPlace = move.endPlace else {
+                throw TimelineEditingError.missingNeighbors
+            }
+
+            let originalEndDate = move.endDate
+            let originalDistance = move.distanceMeters
+            let hadManualRoute = move.manualRouteCoordinatesData != nil
+            let progress = TimelineLocator.progress(of: date, on: move)
+            let coordinates = TimelineLocator.displayedCoordinates(for: move)
+            let splitCoordinate = TimelineLocator.interpolate(along: coordinates, progress: progress)
+                ?? startPlace.coordinate
+            let (firstCoordinates, secondCoordinates) = TimelineLocator.split(coordinates, at: progress)
+
+            let visit = VisitPlace(
+                arrivalDate: date,
+                departureDate: date,
+                latitude: splitCoordinate.latitude,
+                longitude: splitCoordinate.longitude,
+                horizontalAccuracy: max(startPlace.horizontalAccuracy, 15)
+            )
+            visit.origin = .manual
+            visit.dayTimeline = try timeline(for: date)
+            modelContext.insert(visit)
+
+            let lateSamples = move.samples.filter { $0.timestamp > date }
+
+            move.endPlace = visit
+            move.endDate = date
+            move.distanceMeters = distanceMeters(
+                along: firstCoordinates,
+                fallback: originalDistance * progress
+            )
+            applySplitCoordinates(
+                firstCoordinates,
+                to: move,
+                tag: "split-a-\(move.id.uuidString)",
+                preferManual: hadManualRoute
+            )
+
+            let secondEnd = max(originalEndDate, date.addingTimeInterval(1))
+            let second = MoveSegment(
+                dedupeKey: Self.makeMoveDedupeKey(
+                    startPlaceID: visit.id,
+                    endPlaceID: endPlace.id,
+                    startDate: date,
+                    endDate: secondEnd
+                ),
+                startDate: date,
+                endDate: secondEnd,
+                transportMode: move.transportMode,
+                distanceMeters: distanceMeters(
+                    along: secondCoordinates,
+                    fallback: originalDistance * (1 - progress)
+                ),
+                stepCount: nil,
+                comment: move.comment
+            )
+            second.startPlace = visit
+            second.endPlace = endPlace
+            second.dayTimeline = try timeline(for: date)
+            second.origin = move.origin
+            second.transportModeSource = move.transportModeSource
+            second.routeMatchPolicy = move.routeMatchPolicy
+            second.routeMatchConfidence = move.routeMatchConfidence
+            second.routeMatchSummary = move.routeMatchSummary
+            modelContext.insert(second)
+
+            for sample in lateSamples {
+                sample.moveSegment = second
+            }
+            applySplitCoordinates(
+                secondCoordinates,
+                to: second,
+                tag: "split-b-\(second.id.uuidString)",
+                preferManual: hadManualRoute
+            )
+
+            return (move, visit, second)
+        }
+    }
+
+    func splitVisit(_ visit: VisitPlace, at date: Date) throws -> (VisitPlace, VisitPlace) {
+        try performingUndoableChange(named: "Split Place") {
+            let originalDeparture = visit.departureDate
+            let latest: Date
+            if let originalDeparture, originalDeparture > visit.arrivalDate {
+                latest = originalDeparture
+            } else {
+                latest = visit.outgoingMoves.map(\.startDate).min() ?? date.addingTimeInterval(1)
+            }
+            guard date > visit.arrivalDate, date < latest else {
+                throw TimelineEditingError.invalidSplitTime
+            }
+
+            visit.departureDate = date
+
+            let second = VisitPlace(
+                arrivalDate: date,
+                departureDate: originalDeparture,
+                latitude: visit.latitude,
+                longitude: visit.longitude,
+                horizontalAccuracy: visit.horizontalAccuracy,
+                userLabel: visit.userLabel,
+                autoLabel: visit.autoLabel,
+                comment: visit.comment
+            )
+            second.origin = .manual
+            second.knownPlace = visit.knownPlace
+            second.assignmentSource = visit.assignmentSource
+            second.assignmentConfidence = visit.assignmentConfidence
+            second.countryCode = visit.countryCode
+            second.locality = visit.locality
+            second.administrativeArea = visit.administrativeArea
+            second.dayTimeline = try timeline(for: date)
+            modelContext.insert(second)
+
+            for move in visit.outgoingMoves {
+                move.startPlace = second
+            }
+
+            return (visit, second)
+        }
+    }
+
+    func updateTimes(of visit: VisitPlace, arrival: Date, departure: Date?) throws {
+        try performingUndoableChange(named: "Edit Times") {
+            if let departure, arrival > departure {
+                throw TimelineEditingError.invalidTimeRange
+            }
+
+            let previousArrivalDay = Calendar.current.startOfDay(for: visit.arrivalDate)
+            visit.arrivalDate = arrival
+            visit.departureDate = departure
+
+            if Calendar.current.startOfDay(for: arrival) != previousArrivalDay {
+                visit.dayTimeline = try timeline(for: arrival)
+            }
+
+            for move in visit.incomingMoves {
+                move.endDate = arrival
+                if move.endDate < move.startDate {
+                    move.startDate = arrival.addingTimeInterval(-max(move.timelineDuration, 1))
+                }
+            }
+
+            if let departure {
+                for move in visit.outgoingMoves {
+                    move.startDate = departure
+                    if move.endDate < move.startDate {
+                        move.endDate = departure.addingTimeInterval(max(move.timelineDuration, 1))
+                    }
+                }
+            }
+        }
+    }
+
+    func setTransportMode(_ mode: TransportMode, for move: MoveSegment, source: TransportModeSource) throws {
+        try performingUndoableChange(named: "Change Mode") {
+            move.transportMode = mode
+            move.transportModeSource = source
+            move.clearCachedRouteCoordinates()
+        }
+    }
+
+    func setRouteMatchPolicy(_ policy: RouteMatchPolicy, for move: MoveSegment) throws {
+        try performingUndoableChange(named: "Change Path") {
+            move.routeMatchPolicy = policy
+            if policy != .manual {
+                move.clearCachedRouteCoordinates()
+            }
+        }
+    }
+
+    func assign(
+        _ visit: VisitPlace,
+        to place: KnownPlace,
+        source: PlaceAssignmentSource,
+        confidence: Double
+    ) throws {
+        try performingUndoableChange(named: "Name Place") {
+            visit.knownPlace = place
+            visit.assignmentSource = source
+            visit.assignmentConfidence = min(max(confidence, 0), 1)
+            if source == .user {
+                let trimmed = place.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    visit.userLabel = trimmed
+                }
+                place.confirmedVisitCount = max(place.confirmedVisitCount, place.visits.count)
+                if place.lastVisitAt == nil || visit.arrivalDate > (place.lastVisitAt ?? .distantPast) {
+                    place.lastVisitAt = visit.arrivalDate
+                }
+            }
+        }
+    }
+
+    func createKnownPlace(from visit: VisitPlace, name: String) throws -> KnownPlace {
+        try performingUndoableChange(named: "Add Place") {
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let place = KnownPlace(
+                name: trimmed.isEmpty ? visit.displayTitle : trimmed,
+                latitude: visit.latitude,
+                longitude: visit.longitude,
+                footprintRadius: 40
+            )
+            place.countryCode = visit.countryCode
+            place.locality = visit.locality
+            place.administrativeArea = visit.administrativeArea
+            place.confirmedVisitCount = 1
+            place.lastVisitAt = visit.arrivalDate
+            modelContext.insert(place)
+            visit.knownPlace = place
+            visit.assignmentSource = .user
+            visit.assignmentConfidence = 1
+            if !trimmed.isEmpty {
+                visit.userLabel = trimmed
+            }
+            return place
+        }
+    }
+
+    func knownPlaces(
+        near coordinate: CLLocationCoordinate2D,
+        within meters: CLLocationDistance
+    ) throws -> [KnownPlace] {
+        let places = try modelContext.fetch(FetchDescriptor<KnownPlace>())
+        let origin = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+        return places
+            .map { place -> (KnownPlace, CLLocationDistance) in
+                let distance = origin.distance(
+                    from: CLLocation(latitude: place.centerLatitude, longitude: place.centerLongitude)
+                )
+                return (place, distance)
+            }
+            .filter { $0.1 <= meters }
+            .sorted { $0.1 < $1.1 }
+            .map(\.0)
+    }
+
+    func recordCorrection(_ event: PlaceCorrectionEvent) throws {
+        try performingUndoableChange(named: "Remember Correction") {
+            modelContext.insert(event)
+        }
+    }
+
+    func timelineItem(at date: Date) throws -> TimelineLocator.Result {
+        let visits = try visitsPossiblyCovering(date)
+        let moves = try movesPossiblyCovering(date)
+        return TimelineLocator.locate(at: date, visits: visits, moves: moves)
+    }
+
+    func moves(in range: DateInterval, modes: Set<TransportMode>?) throws -> [MoveSegment] {
+        let rangeStart = range.start
+        let rangeEnd = range.end
+        let descriptor = FetchDescriptor<MoveSegment>(
+            predicate: #Predicate { move in
+                move.startDate < rangeEnd && move.endDate > rangeStart
+            },
+            sortBy: [SortDescriptor(\MoveSegment.startDate, order: .forward)]
+        )
+        let fetched = try modelContext.fetch(descriptor)
+        guard let modes, !modes.isEmpty else { return fetched }
+        return fetched.filter { modes.contains($0.transportMode) }
+    }
+
+    func visits(in range: DateInterval) throws -> [VisitPlace] {
+        let rangeStart = range.start
+        let rangeEnd = range.end
+        let descriptor = FetchDescriptor<VisitPlace>(
+            predicate: #Predicate { place in
+                place.arrivalDate < rangeEnd
+            },
+            sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .forward)]
+        )
+        return try modelContext.fetch(descriptor).filter { place in
+            let end = place.departureDate ?? place.arrivalDate
+            return end > rangeStart || place.covers(rangeStart)
+        }
+    }
+
+    private func performingUndoableChange<T>(named name: String, _ body: () throws -> T) throws -> T {
+        let undoManager = modelContext.undoManager
+        undoManager?.beginUndoGrouping()
+        undoManager?.setActionName(name)
+        defer { undoManager?.endUndoGrouping() }
+        let result = try body()
+        try saveIfNeeded()
+        return result
+    }
+
+    private func visitsPossiblyCovering(_ date: Date) throws -> [VisitPlace] {
+        let lookback = date.addingTimeInterval(-8 * 24 * 60 * 60)
+        let nearby = FetchDescriptor<VisitPlace>(
+            predicate: #Predicate { place in
+                place.arrivalDate <= date && place.arrivalDate >= lookback
+            }
+        )
+        var results = try modelContext.fetch(nearby)
+        var older = FetchDescriptor<VisitPlace>(
+            predicate: #Predicate { place in
+                place.arrivalDate < lookback
+            },
+            sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .reverse)]
+        )
+        older.fetchLimit = 4
+        results.append(contentsOf: try modelContext.fetch(older))
+        return results
+    }
+
+    private func movesPossiblyCovering(_ date: Date) throws -> [MoveSegment] {
+        let windowStart = date.addingTimeInterval(-36 * 60 * 60)
+        let windowEnd = date.addingTimeInterval(36 * 60 * 60)
+        let descriptor = FetchDescriptor<MoveSegment>(
+            predicate: #Predicate { move in
+                move.startDate <= windowEnd && move.endDate >= windowStart
+            }
+        )
+        return try modelContext.fetch(descriptor)
+    }
+
+    private func maxDeparture(_ lhs: Date?, _ rhs: Date?) -> Date? {
+        switch (lhs, rhs) {
+        case let (a?, b?): return max(a, b)
+        case let (a?, nil): return a
+        case let (nil, b?): return b
+        case (nil, nil): return nil
+        }
+    }
+
+    private func distanceMeters(
+        along coordinates: [CLLocationCoordinate2D],
+        fallback: CLLocationDistance
+    ) -> CLLocationDistance {
+        guard coordinates.count > 1 else { return max(fallback, 0) }
+        let locations = coordinates.map { CLLocation(latitude: $0.latitude, longitude: $0.longitude) }
+        return max(Self.totalDistance(for: locations), 0)
+    }
+
+    private func applySplitCoordinates(
+        _ coordinates: [CLLocationCoordinate2D],
+        to move: MoveSegment,
+        tag: String,
+        preferManual: Bool
+    ) {
+        move.clearCachedRouteCoordinates()
+        if preferManual {
+            move.storeManualRouteCoordinates(coordinates)
+            move.routeMatchPolicy = .manual
+        } else if coordinates.count > 1 {
+            move.storeCachedRouteCoordinates(coordinates, signature: tag)
+        }
+    }
+
     private func timeline(for date: Date, exportedDayKey: String?) throws -> DayTimeline {
         let trimmed = exportedDayKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !trimmed.isEmpty {
@@ -1872,8 +2701,20 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         let allMoves = try modelContext.fetch(FetchDescriptor<MoveSegment>())
         allMoves.forEach(modelContext.delete)
 
+        let allPhotos = try modelContext.fetch(FetchDescriptor<PhotoAttachment>())
+        allPhotos.forEach(modelContext.delete)
+
         let allPlaces = try modelContext.fetch(FetchDescriptor<VisitPlace>())
         allPlaces.forEach(modelContext.delete)
+
+        let allKnownPlaces = try modelContext.fetch(FetchDescriptor<KnownPlace>())
+        allKnownPlaces.forEach(modelContext.delete)
+
+        let allCorrections = try modelContext.fetch(FetchDescriptor<PlaceCorrectionEvent>())
+        allCorrections.forEach(modelContext.delete)
+
+        let allCells = try modelContext.fetch(FetchDescriptor<VisitedCell>())
+        allCells.forEach(modelContext.delete)
 
         let allTimelines = try modelContext.fetch(FetchDescriptor<DayTimeline>())
         allTimelines.forEach(modelContext.delete)

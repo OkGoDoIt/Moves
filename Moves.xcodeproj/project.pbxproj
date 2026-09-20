@@ -113,6 +113,11 @@
 		E10000013020000100000001 /* MovesStatisticsSearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10000013020000100000000 /* MovesStatisticsSearchView.swift */; };
 		E20000013020000100000001 /* MovesStatisticsSearchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000013020000100000000 /* MovesStatisticsSearchTests.swift */; };
 		F10000013030000100000001 /* TimelineArchiveImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000013030000100000000 /* TimelineArchiveImport.swift */; };
+		F20000013040000100000001 /* MovesRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000013040000100000000 /* MovesRootView.swift */; };
+		F20000013040000100000003 /* TimelineSchemaUpgrader.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000013040000100000002 /* TimelineSchemaUpgrader.swift */; };
+		F20000013040000100000005 /* TimelineLocator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000013040000100000004 /* TimelineLocator.swift */; };
+		F20000013040000100000007 /* TimelineEditingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000013040000100000006 /* TimelineEditingTests.swift */; };
+		F20000013040000100000009 /* TimelineLocatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000013040000100000008 /* TimelineLocatorTests.swift */; };
 		F10000013030000100000003 /* TimelineArchiveImportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000013030000100000002 /* TimelineArchiveImportTests.swift */; };
 		F10000013030000100000005 /* LocationLogImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000013030000100000004 /* LocationLogImport.swift */; };
 		F10000013030000100000007 /* LocationLogImportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000013030000100000006 /* LocationLogImportTests.swift */; };
@@ -291,6 +296,11 @@
 		F10000013030000100000002 /* TimelineArchiveImportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineArchiveImportTests.swift; sourceTree = "<group>"; };
 		F10000013030000100000004 /* LocationLogImport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationLogImport.swift; sourceTree = "<group>"; };
 		F10000013030000100000006 /* LocationLogImportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationLogImportTests.swift; sourceTree = "<group>"; };
+		F20000013040000100000000 /* MovesRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesRootView.swift; sourceTree = "<group>"; };
+		F20000013040000100000002 /* TimelineSchemaUpgrader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineSchemaUpgrader.swift; sourceTree = "<group>"; };
+		F20000013040000100000004 /* TimelineLocator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineLocator.swift; sourceTree = "<group>"; };
+		F20000013040000100000006 /* TimelineEditingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineEditingTests.swift; sourceTree = "<group>"; };
+		F20000013040000100000008 /* TimelineLocatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineLocatorTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -384,6 +394,9 @@
 				A50000012FD0000100000000 /* CloudDataPresencePublisher.swift */,
 				A60000012FE0000100000000 /* DailyTimelineBackup.swift */,
 				489A76362C4FC6F300F43B69 /* ContentView.swift */,
+				F20000013040000100000000 /* MovesRootView.swift */,
+				F20000013040000100000002 /* TimelineSchemaUpgrader.swift */,
+				F20000013040000100000004 /* TimelineLocator.swift */,
 				A70000012FF0000100000000 /* MovesShareViews.swift */,
 				A80000012FF0000100000000 /* MovesJumpToDateView.swift */,
 				A90000012FF0000100000000 /* ShareMapAggregate.swift */,
@@ -486,6 +499,8 @@
 				F10000013030000100000002 /* TimelineArchiveImportTests.swift */,
 				F10000013030000100000006 /* LocationLogImportTests.swift */,
 				9A1B00012F00000100000002 /* TimelineAssemblerTests.swift */,
+				F20000013040000100000006 /* TimelineEditingTests.swift */,
+				F20000013040000100000008 /* TimelineLocatorTests.swift */,
 			);
 			path = MovesTests;
 			sourceTree = "<group>";
@@ -800,6 +815,9 @@
 				A20000012FA0000100000003 /* WatchRouteInbox.swift in Sources */,
 				A30000012FB0000100000001 /* TimelineWidgetSnapshot.swift in Sources */,
 				489A76372C4FC6F300F43B69 /* ContentView.swift in Sources */,
+				F20000013040000100000001 /* MovesRootView.swift in Sources */,
+				F20000013040000100000003 /* TimelineSchemaUpgrader.swift in Sources */,
+				F20000013040000100000005 /* TimelineLocator.swift in Sources */,
 				A70000012FF0000100000001 /* MovesShareViews.swift in Sources */,
 				A80000012FF0000100000001 /* MovesJumpToDateView.swift in Sources */,
 				A90000012FF0000100000001 /* ShareMapAggregate.swift in Sources */,
@@ -831,6 +849,8 @@
 				F10000013030000100000003 /* TimelineArchiveImportTests.swift in Sources */,
 				F10000013030000100000007 /* LocationLogImportTests.swift in Sources */,
 				9A1B00012F00000100000004 /* TimelineAssemblerTests.swift in Sources */,
+				F20000013040000100000007 /* TimelineEditingTests.swift in Sources */,
+				F20000013040000100000009 /* TimelineLocatorTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
