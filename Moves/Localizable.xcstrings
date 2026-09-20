@@ -392,6 +392,9 @@
     "Last successful upload %@." : {
 
     },
+    "Lighter where you were faster. The compact timeline map stays a solid colour." : {
+
+    },
     "Listen for location changes" : {
 
     },
@@ -583,6 +586,9 @@
 
     },
     "Settings" : {
+
+    },
+    "Shade routes by speed" : {
 
     },
     "Share %@" : {

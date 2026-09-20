@@ -1880,17 +1880,7 @@ private enum MovesShareMapRenderer {
     }
 
     private static func trackColor(for mode: TransportMode) -> UIColor {
-        switch mode {
-        case .stationary, .unknown: return .systemGray
-        case .walking: return .systemGreen
-        case .running: return .systemOrange
-        case .swimming: return .systemCyan
-        case .cycling: return .systemTeal
-        case .automotive: return .systemBlue
-        case .train: return .systemPurple
-        case .plane: return .systemIndigo
-        case .boat: return .systemMint
-        }
+        UIColor(MovesPalette.transport(mode))
     }
 }
 

@@ -124,6 +124,8 @@ struct MovesSettingsView: View {
                             Text("Places, moves, and edit controls can be swapped to the left for comfortable one-handed use.")
                                 .font(.system(size: 12, weight: .medium, design: .rounded))
                                 .foregroundStyle(.secondary)
+
+                            MapAppearanceSpeedShadeToggle()
                         }
                     }
 
@@ -671,6 +673,24 @@ private struct HealthWorkoutRouteImportSettingsView: View {
         } else if let message = healthRouteImportManager.lastHistoricalImportErrorMessage {
             importMessage = message
             isShowingImportMessage = true
+        }
+    }
+}
+
+// MARK: - MapAppearance+SpeedShade
+
+private struct MapAppearanceSpeedShadeToggle: View {
+    @AppStorage(MapRouteShadingSettings.shadeRoutesBySpeedKey) private var shadeRoutesBySpeed = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Divider()
+
+            Toggle("Shade routes by speed", isOn: $shadeRoutesBySpeed)
+
+            Text("Lighter where you were faster. The compact timeline map stays a solid colour.")
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+                .foregroundStyle(.secondary)
         }
     }
 }
