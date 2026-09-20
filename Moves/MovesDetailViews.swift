@@ -264,6 +264,7 @@ struct MoveMapDetailView: View {
     @Environment(\.openURL) private var openURL
     @Bindable var segment: MoveSegment
     @AppStorage(MapMarkerDisplaySettings.showsBigMarkersKey) private var showsBigMarkers = false
+    @AppStorage(MapRouteShadingSettings.shadeRoutesBySpeedKey) private var shadeRoutesBySpeed = true
 
     @State private var camera: MapCameraPosition
     @State private var routeCoordinates: [CLLocationCoordinate2D]
@@ -286,13 +287,7 @@ struct MoveMapDetailView: View {
     @State private var isShowingHealthOpenError = false
 
     private var activeRenderedRoute: RenderedRoute {
-        RenderedRoute(
-            id: segment.id.uuidString,
-            coordinates: routeCoordinates,
-            usesHighAccuracyRouteTracking: segment.usesHighAccuracyRouteTracking,
-            usesHealthWorkoutRoute: segment.usesHealthWorkoutRoute,
-            transportMode: segment.transportMode
-        )
+        RenderedRoute.make(from: segment, coordinates: routeCoordinates)
     }
 
     private var routeRefreshKey: String {
@@ -457,7 +452,20 @@ struct MoveMapDetailView: View {
 
                 if activeRenderedRoute.coordinates.count > 1 {
                     MapPolyline(coordinates: activeRenderedRoute.coordinates)
-                        .stroke(activeRenderedRoute.tint, lineWidth: activeRenderedRoute.lineWidth)
+                        .stroke(
+                            activeRenderedRoute.strokeGradient(shadeBySpeed: shadeRoutesBySpeed),
+                            style: RouteStrokeStyle.make(for: activeRenderedRoute)
+                        )
+                    if let overlayTint = activeRenderedRoute.recordedOverlayTint {
+                        MapPolyline(coordinates: activeRenderedRoute.coordinates)
+                            .stroke(
+                                overlayTint,
+                                style: RouteStrokeStyle.make(
+                                    for: activeRenderedRoute,
+                                    lineWidth: activeRenderedRoute.overlayLineWidth
+                                )
+                            )
+                    }
                 }
 
                 if let end = segment.endPlace?.coordinate {
@@ -722,6 +730,7 @@ struct MoveMapDetailView: View {
     @MainActor
     private func refreshRouteCoordinates() async {
         routeCoordinates = await RoadRouteMatcher.matchedCoordinates(for: segment)
+        _ = await SpeedProfileBuilder.buildAndCache(for: segment, coordinates: routeCoordinates)
         refreshMoveGPXShareFile()
         if isEditingManualRoute, manualRouteDrag == nil {
             manualRouteWaypointCoordinates = ManualRouteGeometry.waypoints(

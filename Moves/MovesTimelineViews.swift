@@ -778,6 +778,7 @@ struct DayMapStrip: View {
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var captureManager: MovesLocationCaptureManager
     @AppStorage(MapMarkerDisplaySettings.showsBigMarkersKey) private var showsBigMarkers = false
+    @AppStorage(MapRouteShadingSettings.shadeRoutesBySpeedKey) private var shadeRoutesBySpeed = true
     let dayTimeline: DayTimeline
     let isActive: Bool
     @Binding var selection: TimelineMapSelection?
@@ -936,17 +937,29 @@ struct DayMapStrip: View {
             if route.shadowCoordinates.count > 1 {
                 MapPolyline(coordinates: route.shadowCoordinates)
                     .stroke(
-                        route.shadowTint.opacity(dimsForOtherSelection ? 0.2 : 1),
+                        route.shadowTint,
                         lineWidth: isSelected ? route.shadowLineWidth + 4 : route.shadowLineWidth
                     )
             }
 
             if route.coordinates.count > 1 {
+                let emphasis = dimsForOtherSelection ? 0.28 : 1.0
+                let width = isSelected ? route.lineWidth + 4 : route.lineWidth
                 MapPolyline(coordinates: route.coordinates)
                     .stroke(
-                        route.tint.opacity(dimsForOtherSelection ? 0.28 : 0.95),
-                        lineWidth: isSelected ? route.lineWidth + 4 : route.lineWidth
+                        route.strokeGradient(shadeBySpeed: shadeRoutesBySpeed, emphasis: emphasis),
+                        style: RouteStrokeStyle.make(for: route, lineWidth: width)
                     )
+                if let overlayTint = route.recordedOverlayTint {
+                    MapPolyline(coordinates: route.coordinates)
+                        .stroke(
+                            MovesPalette.opaqueRouteColor(overlayTint, opacity: emphasis),
+                            style: RouteStrokeStyle.make(
+                                for: route,
+                                lineWidth: max(width - 2.25, 1.25)
+                            )
+                        )
+                }
             }
         }
 
@@ -954,7 +967,10 @@ struct DayMapStrip: View {
            liveRouteSnapshot.coordinates.count > 1 {
             MapPolyline(coordinates: liveRouteSnapshot.coordinates)
                 .stroke(
-                    MovesPalette.routeTracking.opacity(selection != nil && !isLiveRouteSelected ? 0.28 : 0.95),
+                    MovesPalette.opaqueRouteColor(
+                        MovesPalette.routeTracking,
+                        opacity: selection != nil && !isLiveRouteSelected ? 0.28 : 1
+                    ),
                     lineWidth: isLiveRouteSelected ? 9 : 5
                 )
         }
@@ -1135,26 +1151,21 @@ struct DayMapStrip: View {
             snapshot.image.draw(at: .zero)
 
             for route in routes {
-                strokeRoute(
-                    route.shadowCoordinates,
+                RouteSnapshotStroke.draw(
+                    route,
                     in: snapshot,
-                    color: UIColor(route.shadowTint),
-                    lineWidth: route.shadowLineWidth
-                )
-                strokeRoute(
-                    route.coordinates,
-                    in: snapshot,
-                    color: UIColor(route.tint).withAlphaComponent(0.95),
-                    lineWidth: route.lineWidth
+                    shadeBySpeed: false,
+                    emphasis: 1
                 )
             }
 
             if let liveRouteSnapshot {
-                strokeRoute(
-                    liveRouteSnapshot.coordinates,
+                RouteSnapshotStroke.strokePath(
+                    coordinates: liveRouteSnapshot.coordinates,
                     in: snapshot,
-                    color: UIColor(MovesPalette.routeTracking).withAlphaComponent(0.95),
-                    lineWidth: 5
+                    color: UIColor(MovesPalette.routeTracking),
+                    lineWidth: 5,
+                    dash: []
                 )
             }
 
@@ -1179,32 +1190,6 @@ struct DayMapStrip: View {
                 )
             }
         }
-    }
-
-    private static func strokeRoute(
-        _ coordinates: [CLLocationCoordinate2D],
-        in snapshot: MKMapSnapshotter.Snapshot,
-        color: UIColor,
-        lineWidth: CGFloat
-    ) {
-        guard coordinates.count > 1 else { return }
-
-        let path = UIBezierPath()
-        path.lineCapStyle = .round
-        path.lineJoinStyle = .round
-        path.lineWidth = lineWidth
-
-        for (index, coordinate) in coordinates.enumerated() {
-            let point = snapshot.point(for: coordinate)
-            if index == 0 {
-                path.move(to: point)
-            } else {
-                path.addLine(to: point)
-            }
-        }
-
-        color.setStroke()
-        path.stroke()
     }
 
     private static func drawMarker(
@@ -1272,14 +1257,9 @@ struct DayMapStrip: View {
 
         for move in sortedMoves {
             let matched = await RoadRouteMatcher.matchedCoordinates(for: move)
+            let fractions = await SpeedProfileBuilder.buildAndCache(for: move, coordinates: matched)
             renderedRoutes.append(
-                RenderedRoute(
-                    id: move.id.uuidString,
-                    coordinates: matched,
-                    usesHighAccuracyRouteTracking: move.usesHighAccuracyRouteTracking,
-                    usesHealthWorkoutRoute: move.usesHealthWorkoutRoute,
-                    transportMode: move.transportMode
-                )
+                RenderedRoute.make(from: move, coordinates: matched, speedFractions: fractions)
             )
         }
 
@@ -1345,12 +1325,9 @@ struct DayMapStrip: View {
                 let fallback = MoveRouteGeometry.rawCoordinates(for: move)
                 let signature = MoveRouteGeometry.cacheSignature(for: move, fallback: fallback)
 
-                return RenderedRoute(
-                    id: move.id.uuidString,
-                    coordinates: move.manualRouteCoordinates ?? move.cachedRouteCoordinates(for: signature) ?? fallback,
-                    usesHighAccuracyRouteTracking: move.usesHighAccuracyRouteTracking,
-                    usesHealthWorkoutRoute: move.usesHealthWorkoutRoute,
-                    transportMode: move.transportMode
+                return RenderedRoute.make(
+                    from: move,
+                    coordinates: move.manualRouteCoordinates ?? move.cachedRouteCoordinates(for: signature) ?? fallback
                 )
             }
         DayMapRouteCache.store(

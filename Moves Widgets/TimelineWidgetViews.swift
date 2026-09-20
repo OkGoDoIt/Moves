@@ -78,7 +78,7 @@ struct MovesSmallWidget: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Image("M")
-                    .foregroundStyle(Color("MovesRouteTracking"))
+                    .foregroundStyle(Color(snapshot.primaryTransportMetric?.colorAssetName ?? "MovesTransportWalking"))
                 Spacer()
                 Text("\(snapshot.visitedLocationCount)")
                     .font(.caption.weight(.bold))

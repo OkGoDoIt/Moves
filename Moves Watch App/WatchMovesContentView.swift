@@ -52,7 +52,7 @@ struct WatchMovesContentView: View {
             Map(position: $camera, interactionModes: [.pan, .zoom]) {
                 if tracker.todayRouteCoordinates.count > 1 {
                     MapPolyline(coordinates: tracker.todayRouteCoordinates)
-                        .stroke(Color("MovesRouteTracking"), lineWidth: 4)
+                        .stroke(Color("MovesTransportWalking"), lineWidth: 4)
                 }
                 if let liveCoordinate {
                     Annotation("Current location", coordinate: liveCoordinate) {
@@ -61,7 +61,7 @@ struct WatchMovesContentView: View {
                                 .fill(.white.opacity(0.28))
                                 .frame(width: 20, height: 20)
                             Circle()
-                                .fill(Color("MovesRouteTracking"))
+                                .fill(Color("MovesTransportWalking"))
                                 .frame(width: 10, height: 10)
                         }
                     }

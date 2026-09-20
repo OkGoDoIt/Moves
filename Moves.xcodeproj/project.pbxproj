@@ -118,6 +118,9 @@
 		F20000013040000100000005 /* TimelineLocator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000013040000100000004 /* TimelineLocator.swift */; };
 		F20000013040000100000007 /* TimelineEditingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000013040000100000006 /* TimelineEditingTests.swift */; };
 		F20000013040000100000009 /* TimelineLocatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000013040000100000008 /* TimelineLocatorTests.swift */; };
+		F30000013050000100000001 /* RouteRendering.swift in Sources */ = {isa = PBXBuildFile; fileRef = F30000013050000100000000 /* RouteRendering.swift */; };
+		F30000013050000100000003 /* SpeedProfileBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = F30000013050000100000002 /* SpeedProfileBuilder.swift */; };
+		F30000013050000100000005 /* SpeedProfileBuilderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F30000013050000100000004 /* SpeedProfileBuilderTests.swift */; };
 		F10000013030000100000003 /* TimelineArchiveImportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000013030000100000002 /* TimelineArchiveImportTests.swift */; };
 		F10000013030000100000005 /* LocationLogImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000013030000100000004 /* LocationLogImport.swift */; };
 		F10000013030000100000007 /* LocationLogImportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000013030000100000006 /* LocationLogImportTests.swift */; };
@@ -301,6 +304,9 @@
 		F20000013040000100000004 /* TimelineLocator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineLocator.swift; sourceTree = "<group>"; };
 		F20000013040000100000006 /* TimelineEditingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineEditingTests.swift; sourceTree = "<group>"; };
 		F20000013040000100000008 /* TimelineLocatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineLocatorTests.swift; sourceTree = "<group>"; };
+		F30000013050000100000000 /* RouteRendering.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteRendering.swift; sourceTree = "<group>"; };
+		F30000013050000100000002 /* SpeedProfileBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeedProfileBuilder.swift; sourceTree = "<group>"; };
+		F30000013050000100000004 /* SpeedProfileBuilderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeedProfileBuilderTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -397,6 +403,8 @@
 				F20000013040000100000000 /* MovesRootView.swift */,
 				F20000013040000100000002 /* TimelineSchemaUpgrader.swift */,
 				F20000013040000100000004 /* TimelineLocator.swift */,
+				F30000013050000100000000 /* RouteRendering.swift */,
+				F30000013050000100000002 /* SpeedProfileBuilder.swift */,
 				A70000012FF0000100000000 /* MovesShareViews.swift */,
 				A80000012FF0000100000000 /* MovesJumpToDateView.swift */,
 				A90000012FF0000100000000 /* ShareMapAggregate.swift */,
@@ -501,6 +509,7 @@
 				9A1B00012F00000100000002 /* TimelineAssemblerTests.swift */,
 				F20000013040000100000006 /* TimelineEditingTests.swift */,
 				F20000013040000100000008 /* TimelineLocatorTests.swift */,
+				F30000013050000100000004 /* SpeedProfileBuilderTests.swift */,
 			);
 			path = MovesTests;
 			sourceTree = "<group>";
@@ -818,6 +827,8 @@
 				F20000013040000100000001 /* MovesRootView.swift in Sources */,
 				F20000013040000100000003 /* TimelineSchemaUpgrader.swift in Sources */,
 				F20000013040000100000005 /* TimelineLocator.swift in Sources */,
+				F30000013050000100000001 /* RouteRendering.swift in Sources */,
+				F30000013050000100000003 /* SpeedProfileBuilder.swift in Sources */,
 				A70000012FF0000100000001 /* MovesShareViews.swift in Sources */,
 				A80000012FF0000100000001 /* MovesJumpToDateView.swift in Sources */,
 				A90000012FF0000100000001 /* ShareMapAggregate.swift in Sources */,
@@ -851,6 +862,7 @@
 				9A1B00012F00000100000004 /* TimelineAssemblerTests.swift in Sources */,
 				F20000013040000100000007 /* TimelineEditingTests.swift in Sources */,
 				F20000013040000100000009 /* TimelineLocatorTests.swift in Sources */,
+				F30000013050000100000005 /* SpeedProfileBuilderTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

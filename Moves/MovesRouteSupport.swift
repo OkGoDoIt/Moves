@@ -95,61 +95,6 @@ struct LiveRouteTrackingSnapshot {
     }
 }
 
-struct RenderedRoute: Identifiable {
-    let id: String
-    let coordinates: [CLLocationCoordinate2D]
-    let usesHighAccuracyRouteTracking: Bool
-    let usesHealthWorkoutRoute: Bool
-    let transportMode: TransportMode
-
-    var shadowCoordinates: [CLLocationCoordinate2D] {
-        guard transportMode == .plane,
-              let start = coordinates.first,
-              let end = coordinates.last else {
-            return []
-        }
-        return [start, end]
-    }
-
-    var tint: Color {
-        MovesPalette.transport(transportMode)
-    }
-
-    /// Thin overlay for recorded Health / route-tracking legs (inner stroke in WS3).
-    var recordedOverlayTint: Color? {
-        if usesHealthWorkoutRoute {
-            return MovesPalette.healthRoute
-        }
-        if usesHighAccuracyRouteTracking {
-            return MovesPalette.routeTracking
-        }
-        return nil
-    }
-
-    var shadowTint: Color {
-        tint.opacity(0.32)
-    }
-
-    var lineWidth: CGFloat {
-        if usesHighAccuracyRouteTracking {
-            return 5
-        }
-
-        switch transportMode {
-        case .plane:
-            return 4.5
-        case .train:
-            return 4.25
-        default:
-            return 4
-        }
-    }
-
-    var shadowLineWidth: CGFloat {
-        transportMode == .plane ? 2.5 : 0
-    }
-}
-
 struct RouteCoordinateStoragePoint: Codable, Hashable {
     let latitude: Double
     let longitude: Double
