@@ -227,12 +227,31 @@ func routeDistance(for coordinates: [CLLocationCoordinate2D]) -> CLLocationDista
 }
 
 enum MapRegionFactory {
+    /// Padding applied to the bounding box so markers are not clipped.
+    private static let boundingBoxPadding = 1.5
+    /// Floor used for a single point or identical start/end coordinates.
+    private static let minimumDelta = 0.01
+    /// MapKit rejects `latitudeDelta` above 180 in `MKMapSnapshotOptions.setRegion:`.
+    private static let maximumLatitudeDelta = 180.0
+    /// MapKit rejects `longitudeDelta` above 360 in `MKMapSnapshotOptions.setRegion:`.
+    private static let maximumLongitudeDelta = 360.0
+
+    /// Camera used when a day has no usable coordinates (Apple Park).
+    static let fallbackRegion = MKCoordinateRegion(
+        center: CLLocationCoordinate2D(latitude: 37.3349, longitude: -122.0090),
+        span: MKCoordinateSpan(latitudeDelta: 0.05, longitudeDelta: 0.05)
+    )
+
+    /// Region that fits `coordinates`, always safe to assign to MapKit snapshotters and cameras.
+    ///
+    /// Empty days, a single point, identical start/end, NaN/Inf, and latitudes
+    /// outside ±90 are filtered or clamped. `MKMapSnapshotOptions.setRegion:`
+    /// raises an uncaught `NSException` (SIGABRT) for those degenerate regions;
+    /// Swift `do/catch` cannot swallow it.
     static func region(for coordinates: [CLLocationCoordinate2D]) -> MKCoordinateRegion {
-        guard let first = coordinates.first else {
-            return MKCoordinateRegion(
-                center: CLLocationCoordinate2D(latitude: 37.3349, longitude: -122.0090),
-                span: MKCoordinateSpan(latitudeDelta: 0.05, longitudeDelta: 0.05)
-            )
+        let usable = coordinates.filter(isUsableCoordinate)
+        guard let first = usable.first else {
+            return fallbackRegion
         }
 
         var minLat = first.latitude
@@ -240,7 +259,7 @@ enum MapRegionFactory {
         var minLon = first.longitude
         var maxLon = first.longitude
 
-        for coordinate in coordinates.dropFirst() {
+        for coordinate in usable.dropFirst() {
             minLat = min(minLat, coordinate.latitude)
             maxLat = max(maxLat, coordinate.latitude)
             minLon = min(minLon, coordinate.longitude)
@@ -251,14 +270,95 @@ enum MapRegionFactory {
             latitude: (minLat + maxLat) / 2,
             longitude: (minLon + maxLon) / 2
         )
+        let latitudeDelta = (maxLat - minLat) * boundingBoxPadding
+        let longitudeDelta = (maxLon - minLon) * boundingBoxPadding
 
-        let latitudeDelta = max((maxLat - minLat) * 1.5, 0.01)
-        let longitudeDelta = max((maxLon - minLon) * 1.5, 0.01)
+        return snapshotSafe(
+            MKCoordinateRegion(
+                center: center,
+                span: MKCoordinateSpan(latitudeDelta: latitudeDelta, longitudeDelta: longitudeDelta)
+            )
+        )
+    }
 
-        return MKCoordinateRegion(
-            center: center,
+    /// Clamps a region so MapKit will accept it for `setRegion:` / `MapCameraPosition.region`.
+    static func snapshotSafe(_ region: MKCoordinateRegion) -> MKCoordinateRegion {
+        var centerLatitude = region.center.latitude
+        var centerLongitude = region.center.longitude
+        var latitudeDelta = region.span.latitudeDelta
+        var longitudeDelta = region.span.longitudeDelta
+
+        guard centerLatitude.isFinite, centerLongitude.isFinite else {
+            return fallbackRegion
+        }
+
+        centerLatitude = min(max(centerLatitude, -90), 90)
+        centerLongitude = wrappedLongitude(centerLongitude)
+
+        if !latitudeDelta.isFinite || latitudeDelta <= 0 {
+            latitudeDelta = minimumDelta
+        }
+        if !longitudeDelta.isFinite || longitudeDelta <= 0 {
+            longitudeDelta = minimumDelta
+        }
+
+        latitudeDelta = min(max(latitudeDelta, minimumDelta), maximumLatitudeDelta)
+        longitudeDelta = min(max(longitudeDelta, minimumDelta), maximumLongitudeDelta)
+
+        // Keep the region from extending past the poles; some MapKit builds
+        // still reject an otherwise finite span that crosses ±90.
+        if abs(centerLatitude) + latitudeDelta / 2 > 90 {
+            let allowedHalf = max(90 - abs(centerLatitude), minimumDelta / 2)
+            latitudeDelta = min(latitudeDelta, allowedHalf * 2)
+            let sign: Double = centerLatitude >= 0 ? 1 : -1
+            centerLatitude = sign * (90 - latitudeDelta / 2)
+        }
+
+        let sanitized = MKCoordinateRegion(
+            center: CLLocationCoordinate2D(latitude: centerLatitude, longitude: centerLongitude),
             span: MKCoordinateSpan(latitudeDelta: latitudeDelta, longitudeDelta: longitudeDelta)
         )
+        return isSnapshotSafe(sanitized) ? sanitized : fallbackRegion
+    }
+
+    /// Whether MapKit will accept this region without throwing from `setRegion:`.
+    static func isSnapshotSafe(_ region: MKCoordinateRegion) -> Bool {
+        let latitude = region.center.latitude
+        let longitude = region.center.longitude
+        let latitudeDelta = region.span.latitudeDelta
+        let longitudeDelta = region.span.longitudeDelta
+
+        guard latitude.isFinite, longitude.isFinite, latitudeDelta.isFinite, longitudeDelta.isFinite else {
+            return false
+        }
+        guard abs(latitude) <= 90, abs(longitude) <= 180 else {
+            return false
+        }
+        guard latitudeDelta > 0, latitudeDelta <= maximumLatitudeDelta else {
+            return false
+        }
+        guard longitudeDelta > 0, longitudeDelta <= maximumLongitudeDelta else {
+            return false
+        }
+        return true
+    }
+
+    /// Coordinates MapKit can project: finite, latitude in ±90, longitude in ±180.
+    static func isUsableCoordinate(_ coordinate: CLLocationCoordinate2D) -> Bool {
+        CLLocationCoordinate2DIsValid(coordinate)
+            && coordinate.latitude.isFinite
+            && coordinate.longitude.isFinite
+    }
+
+    /// Wraps an arbitrary longitude into (−180, 180].
+    private static func wrappedLongitude(_ longitude: Double) -> Double {
+        var wrapped = longitude.truncatingRemainder(dividingBy: 360)
+        if wrapped > 180 {
+            wrapped -= 360
+        } else if wrapped <= -180 {
+            wrapped += 360
+        }
+        return wrapped
     }
 }
 
