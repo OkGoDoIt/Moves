@@ -6,6 +6,7 @@
 	<array>
 		<string>$(PRODUCT_BUNDLE_IDENTIFIER).dailyTimelineBackup</string>
 		<string>$(PRODUCT_BUNDLE_IDENTIFIER).shareMapAggregates</string>
+		<string>$(PRODUCT_BUNDLE_IDENTIFIER).routeMatching</string>
 	</array>
 	<key>CFBundleIcons</key>
 	<dict>

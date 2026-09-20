@@ -516,7 +516,7 @@ final class TimelineAssemblerTests: XCTestCase {
         ]
         let matched = [
             CLLocationCoordinate2D(latitude: 48.1000, longitude: 11.5000),
-            CLLocationCoordinate2D(latitude: 48.1105, longitude: 11.5105),
+            CLLocationCoordinate2D(latitude: 48.1101, longitude: 11.5101),
             CLLocationCoordinate2D(latitude: 48.1200, longitude: 11.5200),
         ]
 

@@ -603,6 +603,12 @@
     "Share Selected Images" : {
 
     },
+    "Path" : {
+
+    },
+    "Conservative only fits dense recordings onto roads. Off keeps the recorded line." : {
+
+    },
     "Show big map markers" : {
 
     },
