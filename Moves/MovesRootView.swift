@@ -34,7 +34,7 @@ enum MovesTab: String, Hashable, CaseIterable, Identifiable {
 final class MovesRootController: ObservableObject {
     @Published var selectedTab: MovesTab = MovesRootController.initialTab()
     @Published var isShowingSettings = false
-    @Published var isShowingStatisticsSearch = false
+    @Published var isShowingStatisticsSearch = ProcessInfo.processInfo.environment["MOVES_OPEN_SEARCH"] == "1"
     @Published var isShowingRouteTrackingSettings = false
     @Published var isShowingDatePicker = false
     @Published var selectedDayKey = ""
@@ -48,6 +48,10 @@ final class MovesRootController: ObservableObject {
     @Published var isShowingReviewInbox = false
     /// Applied once from `moves://map?from=&to=`, then cleared.
     @Published var requestedMapInterval: DateInterval?
+    /// Opens a named trip (`moves://trip/{uuid}`) on Insights.
+    @Published var requestedTripID: UUID?
+    /// Opens the trip list (`moves://trips`) on Insights. Screenshot agents can also set `MOVES_OPEN_TRIPS=1`.
+    @Published var shouldOpenTripsList = ProcessInfo.processInfo.environment["MOVES_OPEN_TRIPS"] == "1"
 
     /// Honors `MOVES_START_TAB` so agents can screenshot a destination without tapping.
     private static func initialTab() -> MovesTab {
@@ -97,15 +101,20 @@ struct MovesRootView: View {
 
             Tab("Places", systemImage: "mappin.and.ellipse", value: MovesTab.places) {
                 PlacesTabView()
+                    .toolbar {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button {
+                                controller.isShowingStatisticsSearch = true
+                            } label: {
+                                Image(systemName: "magnifyingglass")
+                            }
+                            .accessibilityLabel(String(localized: "Search"))
+                        }
+                    }
             }
 
             Tab("Insights", systemImage: "chart.xyaxis.line", value: MovesTab.insights) {
-                MovesPlaceholderTabView(
-                    title: MovesTab.insights.title,
-                    symbolName: "chart.xyaxis.line",
-                    summary: String(localized: "Your year at a glance."),
-                    detail: String(localized: "Distance, countries, streaks, and time-of-day patterns — compared with last year when there’s enough history.")
-                )
+                InsightsTabView()
             }
         }
         .environmentObject(controller)
@@ -130,10 +139,7 @@ struct MovesRootView: View {
         }
         .sheet(isPresented: $controller.isShowingStatisticsSearch) {
             NavigationStack {
-                MovesStatisticsSearchView(
-                    dayTimelines: dayTimelines,
-                    initialDate: selectedDay?.dayStart ?? .now
-                )
+                MovesSearchView(dayTimelines: dayTimelines)
             }
         }
         .sheet(isPresented: $controller.isShowingRouteTrackingSettings) {
@@ -197,7 +203,7 @@ struct MovesRootView: View {
         }
     }
 
-    /// Screenshot-agent launch flags (`MOVES_JUMP_DATE`, `MOVES_OPEN_SETTINGS`, `MOVES_OPEN_REVIEW`, `MOVES_START_TAB`, `MOVES_OPEN_FIRST_PLACE`).
+    /// Screenshot-agent launch flags (`MOVES_JUMP_DATE`, `MOVES_OPEN_SETTINGS`, `MOVES_OPEN_REVIEW`, `MOVES_OPEN_SEARCH`, `MOVES_OPEN_TRIPS`, `MOVES_START_TAB`, `MOVES_OPEN_FIRST_PLACE`).
     private func applyLaunchJumpIfNeeded() {
         let env = ProcessInfo.processInfo.environment
         if env["MOVES_OPEN_SETTINGS"] == "1" {
@@ -205,6 +211,9 @@ struct MovesRootView: View {
         }
         if env["MOVES_OPEN_REVIEW"] == "1" {
             controller.isShowingReviewInbox = true
+        }
+        if env["MOVES_OPEN_SEARCH"] == "1" {
+            controller.isShowingStatisticsSearch = true
         }
         guard let raw = env["MOVES_JUMP_DATE"],
               let date = TimelineDeepLink.parseTimestamp(raw) else { return }
@@ -288,6 +297,13 @@ struct MovesRootView: View {
             controller.selectedTab = .places
         case "insights":
             controller.selectedTab = .insights
+        case "trips":
+            controller.selectedTab = .insights
+            controller.shouldOpenTripsList = true
+        case "trip":
+            guard let tripID = TripDeepLink.tripID(from: url) else { return }
+            controller.selectedTab = .insights
+            controller.requestedTripID = tripID
         case "review":
             controller.selectedTab = .timeline
             controller.isShowingReviewInbox = true
@@ -310,53 +326,5 @@ struct MovesRootView: View {
     private func handleShakeToUndo() {
         undoToast.dismiss()
         editController.undoLastChange()
-    }
-}
-
-/// Polished empty destination used until Insights ships.
-struct MovesPlaceholderTabView: View {
-    let title: String
-    let symbolName: String
-    let summary: String
-    let detail: String
-
-    var body: some View {
-        NavigationStack {
-            ZStack {
-                LinearGradient(
-                    colors: [MovesPalette.backgroundTop, MovesPalette.backgroundBottom],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .ignoresSafeArea()
-
-                VStack(spacing: 22) {
-                    Image(systemName: symbolName)
-                        .font(.system(size: 44, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .symbolRenderingMode(.hierarchical)
-                        .frame(width: 96, height: 96)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
-
-                    VStack(spacing: 10) {
-                        Text(summary)
-                            .font(.system(.title2, design: .rounded).weight(.semibold))
-                            .multilineTextAlignment(.center)
-
-                        Text(detail)
-                            .font(.system(.body, design: .default))
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                    }
-                    .padding(.horizontal, 8)
-                }
-                .padding(24)
-                .frame(maxWidth: 520)
-                .panelSurface()
-                .padding(.horizontal, 20)
-            }
-            .navigationTitle(title)
-            .navigationBarTitleDisplayMode(.large)
-        }
     }
 }

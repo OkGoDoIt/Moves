@@ -169,6 +169,7 @@ enum MovesTimelineSchema {
         PhotoAttachment.self,
         PlaceCorrectionEvent.self,
         VisitedCell.self,
+        NamedTrip.self,
     ]
 }
 
@@ -727,6 +728,45 @@ final class VisitedCell {
         self.firstVisitedAt = visitedAt
         self.lastVisitedAt = visitedAt
         self.sampleCount = sampleCount
+    }
+}
+
+/// A named date range that lenses existing visits, moves, and photos.
+///
+/// Trips do not copy timeline points. Deleting a trip leaves days intact.
+@Model
+final class NamedTrip {
+    var id: UUID = UUID()
+    var name: String = ""
+    var startDate: Date = Date.now
+    var endDate: Date = Date.now
+    var notes: String = ""
+    var createdAt: Date = Date.now
+
+    /// Exclusive-ended interval used for range queries.
+    var interval: DateInterval {
+        DateInterval(start: startDate, end: max(endDate, startDate.addingTimeInterval(60)))
+    }
+
+    init(
+        name: String,
+        startDate: Date,
+        endDate: Date,
+        notes: String = "",
+        id: UUID = UUID(),
+        createdAt: Date = .now
+    ) {
+        self.id = id
+        self.name = name
+        let orderedStart = min(startDate, endDate)
+        var orderedEnd = max(startDate, endDate)
+        if orderedEnd.timeIntervalSince(orderedStart) < 60 {
+            orderedEnd = orderedStart.addingTimeInterval(60)
+        }
+        self.startDate = orderedStart
+        self.endDate = orderedEnd
+        self.notes = notes
+        self.createdAt = createdAt
     }
 }
 

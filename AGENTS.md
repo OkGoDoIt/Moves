@@ -90,9 +90,11 @@ Optional: `DEVICE_UDID=... ./Scripts/install-iphone.sh`.
 | Timeline UI, maps, day paging | `Moves/ContentView.swift`, `Moves/MovesRootView.swift`, `Moves/TimelineTabView.swift`, `Moves/MovesTimelineViews.swift`, `Moves/MovesJumpToDateView.swift`, `Moves/MovesDetailViews.swift` |
 | Map tab | `Moves/MapTab/` (`MapTabView`, range pill/sheet/scrubber, layer chips, `MapWindowLoader`, `VisitedCellStore`); `ShareMapAggregate.swift` per-day buckets |
 | Places tab | `Moves/PlacesTab/` (`PlacesTabView`, `PlaceDetailView`, `OccupancyChartView`, `PlacesIndex`); geocode backfill is `Moves/PlaceGeocodeBackfill.swift` |
+| Insights tab & search | `Moves/InsightsTab/` (`InsightsTabView`, `InsightsSnapshot`, Connections); `Moves/MovesSearchView.swift`, `Moves/SearchQueryParser.swift`. Visit/journey aggregates remain in `Moves/MovesStatisticsSearchView.swift`. |
+| Named trips | `Moves/Trips/` (`TripListView`, `TripDetailView`, `SaveTripSheet`, `TripRangeStats`); `NamedTrip` in `VisitedLocation.swift`. Insights has a Trips row; Map range-pill Save as trip is WS9b. |
 | Corrections, Review inbox, undo pill | `Moves/TimelineItemActions.swift`, `Moves/TimelineEditController.swift`, `Moves/PlaceRenameSheet.swift`, `Moves/EditTimesSheet.swift`, `Moves/SplitSheet.swift`, `Moves/ReviewInboxView.swift`, `Moves/UndoToast.swift`, `Moves/NearbyPlaceSuggester.swift` |
 | Route matching / path policy | `Moves/RoadRouteMatcher.swift` (`RoadRouteMatcher`, `RouteMatchPlausibility`, `DirectionsProvider`); Path control in `MovesDetailViews.swift`; Settings → Map Appearance Path level |
-| Models + repository | `Moves/VisitedLocation.swift` (`DayTimeline`, `VisitPlace`, `MoveSegment`, `LocationSample`, `KnownPlace`, `PhotoAttachment`, `PlaceCorrectionEvent`, `VisitedCell`) |
+| Models + repository | `Moves/VisitedLocation.swift` (`DayTimeline`, `VisitPlace`, `MoveSegment`, `LocationSample`, `KnownPlace`, `PhotoAttachment`, `PlaceCorrectionEvent`, `VisitedCell`, `NamedTrip`) |
 | Place learning | `Moves/PlaceLearningEngine.swift` (resolve / learn / negatives / merge / clampRadius); hooked from `DefaultTimelineAssembler.ingestVisit` and `SwiftDataTimelineRepository`. Places tab occupancy, merge, and shrink consume these APIs. |
 | Timeline lookup / schema upgrade | `Moves/TimelineLocator.swift`, `Moves/TimelineSchemaUpgrader.swift` |
 | Route rendering / speed shading | `Moves/RouteRendering.swift`, `Moves/SpeedProfileBuilder.swift` |
