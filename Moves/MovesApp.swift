@@ -21,6 +21,7 @@ final class MovesAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
         DailyTimelineBackup.registerBackgroundTask()
         ShareMapAggregateBackgroundTask.register()
         RouteMatchBackgroundTask.register()
+        PlaceGeocodeBackfill.register()
         return true
     }
 
@@ -198,6 +199,7 @@ struct MovesApp: App {
             if newPhase == .active {
                 DailyTimelineBackup.scheduleNextRun()
                 ShareMapAggregateBackgroundTask.scheduleNextRun()
+                PlaceGeocodeBackfill.scheduleNextRun()
                 Task {
                     await captureManager.start()
                     await captureManager.refreshHistoricalBackfill()
@@ -208,6 +210,9 @@ struct MovesApp: App {
                 }
                 Task(priority: .utility) {
                     await ShareMapAggregateBuilder.refreshAll(in: sharedModelContainer)
+                }
+                Task(priority: .utility) {
+                    await PlaceGeocodeBackfill.runForegroundTrickle(in: sharedModelContainer)
                 }
             }
         }

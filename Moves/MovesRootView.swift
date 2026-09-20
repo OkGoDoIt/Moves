@@ -40,6 +40,8 @@ final class MovesRootController: ObservableObject {
     @Published var selectedDayKey = ""
     @Published var shouldOpenToday = false
     @Published var requestedPlaceID: UUID?
+    /// Opens a learned place in the Places tab (`moves://place/{knownPlaceID}`).
+    @Published var requestedKnownPlaceID: UUID?
     @Published var requestedJumpDate: Date?
     /// When set, the Timeline tab locates this instant and highlights the row.
     @Published var requestedJumpMoment: Date?
@@ -97,12 +99,7 @@ struct MovesRootView: View {
             }
 
             Tab("Places", systemImage: "mappin.and.ellipse", value: MovesTab.places) {
-                MovesPlaceholderTabView(
-                    title: MovesTab.places.title,
-                    symbolName: "mappin.and.ellipse",
-                    summary: String(localized: "Places you actually go."),
-                    detail: String(localized: "Home, work, and the café downstairs will be grouped by country and city, with how often you visit and how long you stay.")
-                )
+                PlacesTabView()
             }
 
             Tab("Insights", systemImage: "chart.xyaxis.line", value: MovesTab.insights) {
@@ -203,7 +200,7 @@ struct MovesRootView: View {
         }
     }
 
-    /// Screenshot-agent launch flags (`MOVES_JUMP_DATE`, `MOVES_OPEN_SETTINGS`, `MOVES_OPEN_REVIEW`).
+    /// Screenshot-agent launch flags (`MOVES_JUMP_DATE`, `MOVES_OPEN_SETTINGS`, `MOVES_OPEN_REVIEW`, `MOVES_START_TAB`, `MOVES_OPEN_FIRST_PLACE`).
     private func applyLaunchJumpIfNeeded() {
         let env = ProcessInfo.processInfo.environment
         if env["MOVES_OPEN_SETTINGS"] == "1" {
@@ -273,8 +270,18 @@ struct MovesRootView: View {
         case "place":
             guard let identifier = url.pathComponents.dropFirst().first,
                   let placeID = UUID(uuidString: identifier) else { return }
+            if knownPlaceExists(placeID) {
+                controller.selectedTab = .places
+                controller.requestedKnownPlaceID = placeID
+            } else {
+                controller.selectedTab = .timeline
+                controller.requestedPlaceID = placeID
+            }
+        case "day":
+            guard let raw = url.pathComponents.dropFirst().first,
+                  let date = TimelineDeepLink.parseTimestamp(raw) else { return }
             controller.selectedTab = .timeline
-            controller.requestedPlaceID = placeID
+            controller.requestedJumpDate = date
         case "map":
             controller.selectedTab = .map
         case "places":
@@ -291,13 +298,22 @@ struct MovesRootView: View {
         }
     }
 
+    private func knownPlaceExists(_ placeID: UUID) -> Bool {
+        let identifier = placeID
+        var descriptor = FetchDescriptor<KnownPlace>(
+            predicate: #Predicate { $0.id == identifier }
+        )
+        descriptor.fetchLimit = 1
+        return ((try? modelContext.fetch(descriptor))?.isEmpty == false)
+    }
+
     private func handleShakeToUndo() {
         undoToast.dismiss()
         editController.undoLastChange()
     }
 }
 
-/// Polished empty destination used until Map, Places, and Insights ship.
+/// Polished empty destination used until Map and Insights ship.
 struct MovesPlaceholderTabView: View {
     let title: String
     let symbolName: String
