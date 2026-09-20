@@ -282,6 +282,8 @@
 			<string>Any</string>
 		</dict>
 	</dict>
+	<key>PHPhotoLibraryPreventAutomaticLimitedAccessAlert</key>
+	<true/>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>location</string>

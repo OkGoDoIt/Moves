@@ -152,6 +152,12 @@
 		F70000013070000100000007 /* PlacesIndex.swift in Sources */ = {isa = PBXBuildFile; fileRef = F70000013070000100000006 /* PlacesIndex.swift */; };
 		F70000013070000100000009 /* PlaceGeocodeBackfill.swift in Sources */ = {isa = PBXBuildFile; fileRef = F70000013070000100000008 /* PlaceGeocodeBackfill.swift */; };
 		F7000001307000010000000B /* PlacesIndexTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F7000001307000010000000A /* PlacesIndexTests.swift */; };
+		F90000013090000100000001 /* PhotoAsset.swift in Sources */ = {isa = PBXBuildFile; fileRef = F90000013090000100000000 /* PhotoAsset.swift */; };
+		F90000013090000100000003 /* PhotoLibraryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = F90000013090000100000002 /* PhotoLibraryService.swift */; };
+		F90000013090000100000005 /* PhotoHistoryImporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = F90000013090000100000004 /* PhotoHistoryImporter.swift */; };
+		F90000013090000100000007 /* VisitPhotoThumbnailStrip.swift in Sources */ = {isa = PBXBuildFile; fileRef = F90000013090000100000006 /* VisitPhotoThumbnailStrip.swift */; };
+		F90000013090000100000009 /* PhotosSettingsCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = F90000013090000100000008 /* PhotosSettingsCard.swift */; };
+		F9000001309000010000000B /* PhotoHistoryImporterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9000001309000010000000A /* PhotoHistoryImporterTests.swift */; };
 		F10000013030000100000003 /* TimelineArchiveImportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000013030000100000002 /* TimelineArchiveImportTests.swift */; };
 		F10000013030000100000005 /* LocationLogImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000013030000100000004 /* LocationLogImport.swift */; };
 		F10000013030000100000007 /* LocationLogImportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000013030000100000006 /* LocationLogImportTests.swift */; };
@@ -369,6 +375,12 @@
 		F70000013070000100000006 /* PlacesIndex.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlacesIndex.swift; sourceTree = "<group>"; };
 		F70000013070000100000008 /* PlaceGeocodeBackfill.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaceGeocodeBackfill.swift; sourceTree = "<group>"; };
 		F7000001307000010000000A /* PlacesIndexTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlacesIndexTests.swift; sourceTree = "<group>"; };
+		F90000013090000100000000 /* PhotoAsset.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoAsset.swift; sourceTree = "<group>"; };
+		F90000013090000100000002 /* PhotoLibraryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoLibraryService.swift; sourceTree = "<group>"; };
+		F90000013090000100000004 /* PhotoHistoryImporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoHistoryImporter.swift; sourceTree = "<group>"; };
+		F90000013090000100000006 /* VisitPhotoThumbnailStrip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisitPhotoThumbnailStrip.swift; sourceTree = "<group>"; };
+		F90000013090000100000008 /* PhotosSettingsCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotosSettingsCard.swift; sourceTree = "<group>"; };
+		F9000001309000010000000A /* PhotoHistoryImporterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoHistoryImporterTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -466,6 +478,7 @@
 				F6100001306000010000001F /* MapTab */,
 				F21100013051000100000000 /* TimelineTabView.swift */,
 				F70000013070000100000020 /* PlacesTab */,
+				F90000013090000100000020 /* Photos */,
 				F70000013070000100000008 /* PlaceGeocodeBackfill.swift */,
 				F21000013050000100000000 /* TimelineItemActions.swift */,
 				F30000013050000100000000 /* RouteRendering.swift */,
@@ -601,6 +614,18 @@
 			path = PlacesTab;
 			sourceTree = "<group>";
 		};
+		F90000013090000100000020 /* Photos */ = {
+			isa = PBXGroup;
+			children = (
+				F90000013090000100000000 /* PhotoAsset.swift */,
+				F90000013090000100000002 /* PhotoLibraryService.swift */,
+				F90000013090000100000004 /* PhotoHistoryImporter.swift */,
+				F90000013090000100000006 /* VisitPhotoThumbnailStrip.swift */,
+				F90000013090000100000008 /* PhotosSettingsCard.swift */,
+			);
+			path = Photos;
+			sourceTree = "<group>";
+		};
 		9A1B00012F00000100000003 /* MovesTests */ = {
 			isa = PBXGroup;
 			children = (
@@ -619,6 +644,7 @@
 				F61000013060000100000010 /* MapRangeSelectionTests.swift */,
 				F61000013060000100000012 /* VisitedCellStoreTests.swift */,
 				F7000001307000010000000A /* PlacesIndexTests.swift */,
+				F9000001309000010000000A /* PhotoHistoryImporterTests.swift */,
 			);
 			path = MovesTests;
 			sourceTree = "<group>";
@@ -948,6 +974,11 @@
 				F70000013070000100000005 /* OccupancyChartView.swift in Sources */,
 				F70000013070000100000007 /* PlacesIndex.swift in Sources */,
 				F70000013070000100000009 /* PlaceGeocodeBackfill.swift in Sources */,
+				F90000013090000100000001 /* PhotoAsset.swift in Sources */,
+				F90000013090000100000003 /* PhotoLibraryService.swift in Sources */,
+				F90000013090000100000005 /* PhotoHistoryImporter.swift in Sources */,
+				F90000013090000100000007 /* VisitPhotoThumbnailStrip.swift in Sources */,
+				F90000013090000100000009 /* PhotosSettingsCard.swift in Sources */,
 				F21000013050000100000001 /* TimelineItemActions.swift in Sources */,
 				F30000013050000100000001 /* RouteRendering.swift in Sources */,
 				F30000013050000100000003 /* SpeedProfileBuilder.swift in Sources */,
@@ -1003,6 +1034,7 @@
 				F61000013060000100000011 /* MapRangeSelectionTests.swift in Sources */,
 				F61000013060000100000013 /* VisitedCellStoreTests.swift in Sources */,
 				F7000001307000010000000B /* PlacesIndexTests.swift in Sources */,
+				F9000001309000010000000B /* PhotoHistoryImporterTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1217,6 +1249,7 @@
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Moves records your visits and routes on this device only to build your private daily timeline.";
 				INFOPLIST_KEY_NSMotionUsageDescription = "Moves uses motion activity to infer transport modes on-device.";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "To save images to the library";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Moves shows photos you took on the visit where you took them, and can rebuild earlier days from photo locations. Photos stay on this device. Moves never changes your library.";
 				INFOPLIST_KEY_NSSiriUsageDescription = "Use Siri to start or stop route tracking, hear timeline summaries, and export your private Moves data.";
 				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -1265,6 +1298,7 @@
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Moves records your visits and routes on this device only to build your private daily timeline.";
 				INFOPLIST_KEY_NSMotionUsageDescription = "Moves uses motion activity to infer transport modes on-device.";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "To save images to the library";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Moves shows photos you took on the visit where you took them, and can rebuild earlier days from photo locations. Photos stay on this device. Moves never changes your library.";
 				INFOPLIST_KEY_NSSiriUsageDescription = "Use Siri to start or stop route tracking, hear timeline summaries, and export your private Moves data.";
 				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;

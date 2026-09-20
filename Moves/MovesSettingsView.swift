@@ -60,6 +60,14 @@ struct MovesSettingsView: View {
         dayTimelines.first(where: { $0.dayKey == selectedDayKey })
     }
 
+    /// Earliest day that already has GPS, imported, or manual timeline items.
+    private var firstProtectedDayStart: Date? {
+        dayTimelines
+            .filter(\.isProtectedFromPhotoBackfill)
+            .map(\.dayStart)
+            .min()
+    }
+
     private var dailyICloudBackupSettings: some View {
         SettingsCard(title: "Daily iCloud Drive Backup") {
             Toggle("Back up yesterday every night", isOn: $dailyBackupIsEnabled)
@@ -255,7 +263,7 @@ struct MovesSettingsView: View {
                             .foregroundStyle(.secondary)
                     }
 
-
+                    PhotosSettingsCard(firstRecordedDayStart: firstProtectedDayStart)
 
                     SettingsCard(title: "Data Maintenance") {
                         SettingsActionRow(
