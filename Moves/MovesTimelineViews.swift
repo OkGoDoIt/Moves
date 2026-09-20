@@ -405,7 +405,7 @@ struct DayTimelinePageContent: View {
                     }
                 }
             }
-            .padding(.bottom, 52)
+            .padding(.bottom, MovesChromeMetrics.timelineTabBarBreathingRoom)
 
             if isMapExpanded {
                 DayMapStrip(
@@ -488,8 +488,8 @@ struct DayTimelinePageContent: View {
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
             .scrollIndicators(.hidden)
-            .scrollEdgeEffectStyle(.soft, for: .top)
-            .contentMargins(.bottom, 12, for: .scrollContent)
+            .scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
+            .contentMargins(.bottom, 20, for: .scrollContent)
             .onChange(of: highlightedEntryID) { _, entryID in
                 guard let entryID else { return }
                 withAnimation(.easeInOut(duration: 0.28)) {
@@ -1755,7 +1755,7 @@ struct StorylineRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
-            StorylineTimeColumn(text: entry.clockText)
+            StorylineTimeColumn(date: entry.startDate)
             StorylineRail(
                 tint: entry.iconTint,
                 iconName: entry.iconName,
@@ -1779,15 +1779,32 @@ struct StorylineRow: View {
 }
 
 private struct StorylineTimeColumn: View {
-    let text: String
+    let date: Date
 
     var body: some View {
-        Text(text)
-            .font(.system(size: 12, weight: .semibold, design: .rounded))
-            .foregroundStyle(.secondary)
-            .monospacedDigit()
-            .frame(width: 48, alignment: .leading)
-            .padding(.top, 8)
+        let period = StorylineClock.periodText(from: date)
+
+        VStack(alignment: .trailing, spacing: 1) {
+            Text(StorylineClock.hourMinuteText(from: date))
+                .font(.system(size: 12, weight: .semibold, design: .rounded).width(.condensed))
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+
+            if let period {
+                Text(period)
+                    .font(.system(size: 10, weight: .bold, design: .rounded).width(.condensed))
+                    .textCase(.uppercase)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+        }
+        .foregroundStyle(.secondary)
+        .frame(width: 38, alignment: .trailing)
+        .padding(.trailing, 4)
+        .padding(.top, 6)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text(date, format: .dateTime.hour().minute()))
     }
 }
 
