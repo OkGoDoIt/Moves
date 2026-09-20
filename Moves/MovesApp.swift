@@ -41,7 +41,7 @@ final class AppUndoController: ObservableObject {
 struct MovesApp: App {
     @UIApplicationDelegateAdaptor(MovesAppDelegate.self) private var appDelegate
     @Environment(\.scenePhase) private var scenePhase
-    private static let cloudKitContainerIdentifier = "iCloud.de.holgerkrupp.Moves"
+    private static let cloudKitContainerIdentifier = MovesAppIdentity.cloudKitContainerIdentifier
 
     private let sharedModelContainer: ModelContainer
     @StateObject private var undoController = AppUndoController()
@@ -97,10 +97,9 @@ struct MovesApp: App {
             ShareMapAggregate.self,
         ])
 
-        let modelConfiguration: ModelConfiguration
         let cacheConfiguration: ModelConfiguration
         #if targetEnvironment(simulator)
-        modelConfiguration = ModelConfiguration(
+        let modelConfiguration = ModelConfiguration(
             schema: timelineSchema,
             isStoredInMemoryOnly: true,
             cloudKitDatabase: .none
@@ -111,28 +110,85 @@ struct MovesApp: App {
             isStoredInMemoryOnly: true,
             cloudKitDatabase: .none
         )
-        #else
-        modelConfiguration = ModelConfiguration(
-            schema: timelineSchema,
-            cloudKitDatabase: .private(Self.cloudKitContainerIdentifier)
-        )
-        cacheConfiguration = ModelConfiguration(
-            "ShareMapCache",
-            schema: cacheSchema,
-            cloudKitDatabase: .none
-        )
-        #endif
-
         let container = try ModelContainer(
             for: schema,
             configurations: [modelConfiguration, cacheConfiguration]
         )
-
-        #if targetEnvironment(simulator)
         SimulatorDemoDataSeeder.seedIfNeeded(in: container)
-        #endif
-
         return container
+        #else
+        cacheConfiguration = ModelConfiguration(
+            "ShareMapCache",
+            schema: cacheSchema,
+            cloudKitDatabase: .none
+        )
+        let cloudKitDatabase: ModelConfiguration.CloudKitDatabase =
+            allowsCloudKitContainer() ? .private(Self.cloudKitContainerIdentifier) : .none
+        do {
+            return try ModelContainer(
+                for: schema,
+                configurations: [
+                    ModelConfiguration(schema: timelineSchema, cloudKitDatabase: cloudKitDatabase),
+                    cacheConfiguration,
+                ]
+            )
+        } catch {
+            // A local-only store still records today's timeline, which beats refusing
+            // to launch.
+            return try ModelContainer(
+                for: schema,
+                configurations: [
+                    ModelConfiguration(schema: timelineSchema, cloudKitDatabase: .none),
+                    cacheConfiguration,
+                ]
+            )
+        }
+        #endif
+    }
+
+    /// Whether this process may mirror the timeline to its private CloudKit container.
+    ///
+    /// Core Data aborts the process (`SIGTRAP` on `com.apple.coredata.cloudkit.queue`)
+    /// rather than throwing when SwiftData enables CloudKit without the iCloud
+    /// container entitlement, so the decision has to be made up front. The `SecTask`
+    /// entitlement APIs are not imported into Swift on iOS, which leaves reading the
+    /// embedded provisioning profile.
+    ///
+    /// Locally signed builds embed a profile that can be inspected — a wildcard
+    /// development profile, for instance, carries no iCloud identifiers. App Store
+    /// builds embed no profile at all and are signed by Apple straight from the
+    /// project's entitlements, so a missing profile means "trust the entitlements".
+    private static func allowsCloudKitContainer() -> Bool {
+        guard let entitlements = embeddedProvisioningEntitlements() else { return true }
+        let containers = entitlements["com.apple.developer.icloud-container-identifiers"] as? [String]
+        return containers?.contains(cloudKitContainerIdentifier) ?? false
+    }
+
+    /// Entitlements from the bundle's `embedded.mobileprovision`.
+    ///
+    /// - Returns: The entitlements dictionary, or `nil` when the bundle carries no
+    ///   provisioning profile or it cannot be read.
+    private static func embeddedProvisioningEntitlements() -> [String: Any]? {
+        guard let url = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
+              let data = try? Data(contentsOf: url),
+              let xml = provisioningProfilePlistData(in: data),
+              let plist = try? PropertyListSerialization.propertyList(from: xml, format: nil) as? [String: Any]
+        else {
+            return nil
+        }
+        return plist["Entitlements"] as? [String: Any]
+    }
+
+    /// Extracts the XML plist payload from a CMS-wrapped `.mobileprovision` file.
+    private static func provisioningProfilePlistData(in data: Data) -> Data? {
+        let startMarker = Data("<plist".utf8)
+        let endMarker = Data("</plist>".utf8)
+        guard let start = data.range(of: startMarker),
+              let end = data.range(of: endMarker, in: start.lowerBound..<data.endIndex)
+        else {
+            return nil
+        }
+        return Data(data[start.lowerBound..<end.upperBound])
     }
 
     var body: some Scene {

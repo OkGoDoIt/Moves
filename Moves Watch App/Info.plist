@@ -20,6 +20,8 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>MovesAppGroupIdentifier</key>
+	<string>$(MOVES_APP_GROUP_ID)</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
 	<string>Moves records GPS points directly on Apple Watch so your day can be tracked without the phone nearby.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
@@ -27,7 +29,7 @@
 	<key>WKApplication</key>
 	<true/>
 	<key>WKCompanionAppBundleIdentifier</key>
-	<string>de.holgerkrupp.Moves</string>
+	<string>$(MOVES_APP_BUNDLE_ID)</string>
 	<key>WKRunsIndependentlyOfCompanionApp</key>
 	<true/>
 </dict>

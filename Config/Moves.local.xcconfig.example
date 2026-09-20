@@ -1,0 +1,16 @@
+// Template for per-developer signing overrides.
+//
+// Copy this file to Moves.local.xcconfig (same directory) and fill in your own
+// values. Moves.xcconfig includes it automatically and it is gitignored, so your
+// identifiers never end up in a commit.
+//
+//   cp Config/Moves.local.xcconfig.example Config/Moves.local.xcconfig
+//
+// Both identifiers below must be registered in your Apple Developer account. The
+// App ID, the App Group (group.<prefix>.Moves), and the iCloud container
+// (iCloud.<prefix>.Moves) are created for you by Xcode's automatic signing the
+// first time you build to a device with an Apple ID added under
+// Settings > Accounts.
+
+MOVES_BUNDLE_ID_PREFIX = com.example
+DEVELOPMENT_TEAM = ABCDE12345

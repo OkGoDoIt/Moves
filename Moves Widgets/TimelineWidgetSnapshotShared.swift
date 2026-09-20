@@ -1,7 +1,7 @@
 import Foundation
 
 enum MovesWidgetSharedStore {
-    static let appGroupIdentifier = "group.de.holgerkrupp.Moves"
+    static let appGroupIdentifier = MovesAppIdentity.appGroupIdentifier
     static let snapshotKey = "Moves.widgetSnapshot.v1"
 
     static var userDefaults: UserDefaults {

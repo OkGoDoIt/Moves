@@ -54,13 +54,15 @@ enum DailyTimelineBackupError: LocalizedError {
 }
 
 enum DailyTimelineBackup {
-    static let taskIdentifier = "de.holgerkrupp.Moves.dailyTimelineBackup"
+    /// Must stay in sync with `BGTaskSchedulerPermittedIdentifiers` in `Info.plist`,
+    /// which declares it as `$(PRODUCT_BUNDLE_IDENTIFIER).dailyTimelineBackup`.
+    static let taskIdentifier = "\(MovesAppIdentity.bundleIdentifier).dailyTimelineBackup"
     static let isEnabledKey = "Moves.dailyTimelineBackup.isEnabled"
     static let formatKey = "Moves.dailyTimelineBackup.format"
     static let usesMonthlyFoldersKey = "Moves.dailyTimelineBackup.usesMonthlyFolders"
-    static let cloudContainerIdentifier = "iCloud.de.holgerkrupp.Moves"
+    static let cloudContainerIdentifier = MovesAppIdentity.cloudKitContainerIdentifier
 
-    static let log = Logger(subsystem: "de.holgerkrupp.Moves", category: "DailyTimelineBackup")
+    static let log = Logger(subsystem: MovesAppIdentity.bundleIdentifier, category: "DailyTimelineBackup")
 
     static func isEnabled(userDefaults: UserDefaults = .standard) -> Bool {
         userDefaults.bool(forKey: isEnabledKey)

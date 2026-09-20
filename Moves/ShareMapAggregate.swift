@@ -152,7 +152,7 @@ enum ShareMapAggregateStore {
 }
 
 enum ShareMapAggregateBuilder {
-    private static let log = Logger(subsystem: "de.holgerkrupp.Moves", category: "ShareMapAggregate")
+    private static let log = Logger(subsystem: MovesAppIdentity.bundleIdentifier, category: "ShareMapAggregate")
 
     static func refreshAll(in modelContainer: ModelContainer) async {
         let work = Task.detached(priority: .utility) {
@@ -311,7 +311,9 @@ enum ShareMapAggregateBuilder {
 }
 
 enum ShareMapAggregateBackgroundTask {
-    static let taskIdentifier = "de.holgerkrupp.Moves.shareMapAggregates"
+    /// Must stay in sync with `BGTaskSchedulerPermittedIdentifiers` in `Info.plist`,
+    /// which declares it as `$(PRODUCT_BUNDLE_IDENTIFIER).shareMapAggregates`.
+    static let taskIdentifier = "\(MovesAppIdentity.bundleIdentifier).shareMapAggregates"
 
     static func register() {
         BGTaskScheduler.shared.register(forTaskWithIdentifier: taskIdentifier, using: nil) { task in

@@ -4,8 +4,8 @@
 <dict>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
-		<string>de.holgerkrupp.Moves.dailyTimelineBackup</string>
-		<string>de.holgerkrupp.Moves.shareMapAggregates</string>
+		<string>$(PRODUCT_BUNDLE_IDENTIFIER).dailyTimelineBackup</string>
+		<string>$(PRODUCT_BUNDLE_IDENTIFIER).shareMapAggregates</string>
 	</array>
 	<key>CFBundleIcons</key>
 	<dict>
@@ -252,13 +252,17 @@
 	<array>
 		<dict>
 			<key>CFBundleURLName</key>
-			<string>de.holgerkrupp.Moves</string>
+			<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>moves</string>
 			</array>
 		</dict>
 	</array>
+	<key>MovesAppGroupIdentifier</key>
+	<string>$(MOVES_APP_GROUP_ID)</string>
+	<key>MovesCloudKitContainerIdentifier</key>
+	<string>$(MOVES_ICLOUD_CONTAINER_ID)</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
@@ -266,7 +270,7 @@
 	</dict>
 	<key>NSUbiquitousContainers</key>
 	<dict>
-		<key>iCloud.de.holgerkrupp.Moves</key>
+		<key>MOVES_ICLOUD_CONTAINER_KEY</key>
 		<dict>
 			<key>NSUbiquitousContainerIsDocumentScopePublic</key>
 			<true/>

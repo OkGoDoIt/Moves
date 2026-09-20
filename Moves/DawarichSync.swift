@@ -232,8 +232,10 @@ struct LocationServiceConnectionInput: Equatable {
 }
 
 private enum LocationServiceKeychain {
-    static let serviceName = "de.holgerkrupp.Moves.location-services"
-    static let legacyDawarichServiceName = "de.holgerkrupp.Moves.dawarich"
+    // Keychain items live in the app's access group, which is itself derived from the
+    // app identifier, so these service names follow the bundle identifier too.
+    static let serviceName = "\(MovesAppIdentity.bundleIdentifier).location-services"
+    static let legacyDawarichServiceName = "\(MovesAppIdentity.bundleIdentifier).dawarich"
 
     static func load(for service: LocationService) throws -> LocationServiceCredentials? {
         if let data = try loadData(serviceName: serviceName, account: service.rawValue) {

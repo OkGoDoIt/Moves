@@ -7,6 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		C0F16000000000000000005A /* MovesAppIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0F16000000000000000004A /* MovesAppIdentity.swift */; };
+		C0F16000000000000000006A /* MovesAppIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0F16000000000000000004A /* MovesAppIdentity.swift */; };
+		C0F16000000000000000007A /* MovesAppIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0F16000000000000000004A /* MovesAppIdentity.swift */; };
+		C0F16000000000000000008A /* MovesAppIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0F16000000000000000004A /* MovesAppIdentity.swift */; };
 		489A76352C4FC6F300F43B69 /* MovesApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 489A76342C4FC6F300F43B69 /* MovesApp.swift */; };
 		489A76372C4FC6F300F43B69 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 489A76362C4FC6F300F43B69 /* ContentView.swift */; };
 		489A763B2C4FC6F500F43B69 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 489A763A2C4FC6F500F43B69 /* Assets.xcassets */; };
@@ -178,6 +182,9 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		C0F16000000000000000001A /* Moves.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Moves.xcconfig; sourceTree = "<group>"; };
+		C0F16000000000000000004A /* MovesAppIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesAppIdentity.swift; sourceTree = "<group>"; };
+		C0F16000000000000000003A /* Moves.local.xcconfig.example */ = {isa = PBXFileReference; lastKnownFileType = text; path = Moves.local.xcconfig.example; sourceTree = "<group>"; };
 		489A76312C4FC6F300F43B69 /* Moves.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Moves.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		489A76342C4FC6F300F43B69 /* MovesApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesApp.swift; sourceTree = "<group>"; };
 		489A76362C4FC6F300F43B69 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -318,9 +325,19 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		C0F16000000000000000002A /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				C0F16000000000000000001A /* Moves.xcconfig */,
+				C0F16000000000000000003A /* Moves.local.xcconfig.example */,
+			);
+			path = Config;
+			sourceTree = "<group>";
+		};
 		489A76282C4FC6F300F43B69 = {
 			isa = PBXGroup;
 			children = (
+				C0F16000000000000000002A /* Config */,
 				489A76332C4FC6F300F43B69 /* Moves */,
 				A20000012FA000010000001D /* Moves Watch App */,
 				A30000012FB000010000002D /* Moves Widgets */,
@@ -346,6 +363,7 @@
 			isa = PBXGroup;
 			children = (
 				48F91DF0305A5FD70011EEA3 /* Icons */,
+				C0F16000000000000000004A /* MovesAppIdentity.swift */,
 				D10000013010000100000000 /* DawarichSync.swift */,
 				48A8FC0E2F8CCC7E000EAECA /* CreatedByView.swift */,
 				48A8FC102F8CCD27000EAECA /* VersionNumberView.swift */,
@@ -760,6 +778,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C0F16000000000000000005A /* MovesAppIdentity.swift in Sources */,
 				D10000013010000100000001 /* DawarichSync.swift in Sources */,
 				489A76492C4FDE1E00F43B69 /* VisitedLocation.swift in Sources */,
 				A20000012FA0000100000001 /* HealthWorkoutRouteImporter.swift in Sources */,
@@ -803,6 +822,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C0F16000000000000000008A /* MovesAppIdentity.swift in Sources */,
 				A20000012FA0000100000011 /* WatchMovesApp.swift in Sources */,
 				A20000012FA0000100000013 /* WatchMovesContentView.swift in Sources */,
 				A20000012FA0000100000015 /* WatchLocationTracker.swift in Sources */,
@@ -813,6 +833,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C0F16000000000000000006A /* MovesAppIdentity.swift in Sources */,
 				A30000012FB0000100000011 /* MovesWidgets.swift in Sources */,
 				A30000012FB0000100000015 /* TimelineWidgetViews.swift in Sources */,
 				A30000012FB0000100000018 /* TimelineWidgetSnapshotShared.swift in Sources */,
@@ -825,6 +846,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C0F16000000000000000007A /* MovesAppIdentity.swift in Sources */,
 				A30000012FB0000100000013 /* MovesWatchComplications.swift in Sources */,
 				A30000012FB0000100000016 /* TimelineWidgetViews.swift in Sources */,
 				A30000012FB0000100000019 /* TimelineWidgetSnapshotShared.swift in Sources */,
@@ -859,6 +881,7 @@
 /* Begin XCBuildConfiguration section */
 		489A763F2C4FC6F500F43B69 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = C0F16000000000000000001A /* Moves.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
@@ -892,7 +915,6 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = dwarf;
-				DEVELOPMENT_TEAM = 46D3VYP253;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -925,6 +947,7 @@
 		};
 		489A76402C4FC6F500F43B69 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = C0F16000000000000000001A /* Moves.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
@@ -958,7 +981,6 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
-				DEVELOPMENT_TEAM = 46D3VYP253;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -1018,7 +1040,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 2026.17;
-				PRODUCT_BUNDLE_IDENTIFIER = de.holgerkrupp.Moves;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(MOVES_APP_BUNDLE_ID)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
@@ -1066,7 +1088,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 2026.17;
-				PRODUCT_BUNDLE_IDENTIFIER = de.holgerkrupp.Moves;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(MOVES_APP_BUNDLE_ID)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
@@ -1092,7 +1114,7 @@
 					"@loader_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = de.holgerkrupp.MovesTests;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(MOVES_BUNDLE_ID_PREFIX).MovesTests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
@@ -1118,7 +1140,7 @@
 					"@loader_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = de.holgerkrupp.MovesTests;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(MOVES_BUNDLE_ID_PREFIX).MovesTests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
@@ -1143,7 +1165,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 2026.17;
-				PRODUCT_BUNDLE_IDENTIFIER = de.holgerkrupp.Moves.watchkitapp;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(MOVES_APP_BUNDLE_ID).watchkitapp";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = watchos;
 				SKIP_INSTALL = YES;
@@ -1169,7 +1191,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 2026.17;
-				PRODUCT_BUNDLE_IDENTIFIER = de.holgerkrupp.Moves.watchkitapp;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(MOVES_APP_BUNDLE_ID).watchkitapp";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = watchos;
 				SKIP_INSTALL = YES;
@@ -1196,7 +1218,7 @@
 					"@executable_path/../../Frameworks",
 				);
 				MARKETING_VERSION = 2026.17;
-				PRODUCT_BUNDLE_IDENTIFIER = de.holgerkrupp.Moves.widgets;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(MOVES_APP_BUNDLE_ID).widgets";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
@@ -1222,7 +1244,7 @@
 					"@executable_path/../../Frameworks",
 				);
 				MARKETING_VERSION = 2026.17;
-				PRODUCT_BUNDLE_IDENTIFIER = de.holgerkrupp.Moves.widgets;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(MOVES_APP_BUNDLE_ID).widgets";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
@@ -1248,7 +1270,7 @@
 					"@executable_path/../../Frameworks",
 				);
 				MARKETING_VERSION = 2026.17;
-				PRODUCT_BUNDLE_IDENTIFIER = de.holgerkrupp.Moves.watchkitapp.widgets;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(MOVES_APP_BUNDLE_ID).watchkitapp.widgets";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = watchos;
 				SKIP_INSTALL = YES;
@@ -1275,7 +1297,7 @@
 					"@executable_path/../../Frameworks",
 				);
 				MARKETING_VERSION = 2026.17;
-				PRODUCT_BUNDLE_IDENTIFIER = de.holgerkrupp.Moves.watchkitapp.widgets;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(MOVES_APP_BUNDLE_ID).watchkitapp.widgets";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = watchos;
 				SKIP_INSTALL = YES;
