@@ -100,7 +100,7 @@ Optional: `DEVICE_UDID=... ./Scripts/install-iphone.sh`.
 | Timeline lookup / schema upgrade | `Moves/TimelineLocator.swift`, `Moves/TimelineSchemaUpgrader.swift` |
 | Route rendering / speed shading | `Moves/RouteRendering.swift`, `Moves/SpeedProfileBuilder.swift` |
 | Settings, export, integrations | `Moves/MovesSettingsView.swift`, `Moves/DawarichSync.swift` |
-| Imports | `Moves/TimelineArchiveImport.swift` (Moves GPX+GeoJSON+CSV), `Moves/LocationLogImport.swift` + `Moves/RouteFileImport.swift` (any timestamped GPX/TCX/KML log → stays, moves, speed-based modes, geocoded names; bulk writer is `importLocationLog` in `VisitedLocation.swift`). Real-file fixtures live in gitignored `import-staging/` and `MovesTests/Fixtures/`; tests skip when absent. |
+| Imports | `Moves/Import/` (Google Timeline: `GoogleTimelineImporter`, `GoogleTimelineDocument`, streaming `Records.json` scanner, zip reader); `Moves/OnboardingFlow.swift`; `Moves/TimelineArchiveImport.swift` (Moves GPX+GeoJSON+CSV); `Moves/LocationLogImport.swift` + `Moves/RouteFileImport.swift` (any timestamped GPX/TCX/KML log → stays, moves, speed-based modes, geocoded names; bulk writer is `importLocationLog` in `VisitedLocation.swift`). Real-file fixtures live in gitignored `import-staging/` and `MovesTests/Fixtures/`; Google Timeline unit fixtures are `MovesTests/Fixtures/GoogleTimeline/`. |
 | Location capture, motion, route tracking | `Moves/LocationChange.swift` (`MovesLocationCaptureManager`) |
 | Timeline assembly / transport inference | `DefaultTimelineAssembler` in the location/timeline sources; tests in `MovesTests/TimelineAssemblerTests.swift` |
 | App Intents / Siri / Action button | `Moves/MovesAppIntents.swift` |

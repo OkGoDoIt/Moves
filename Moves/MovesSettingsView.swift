@@ -226,6 +226,17 @@ struct MovesSettingsView: View {
 
                     SettingsCard(title: "Import") {
                         NavigationLink {
+                            GoogleTimelineImportSettingsView(modelContext: modelContext)
+                        } label: {
+                            SettingsNavigationRow(
+                                title: "Google Timeline",
+                                systemImage: "globe",
+                                status: nil
+                            )
+                        }
+                        .buttonStyle(.plain)
+
+                        NavigationLink {
                             TimelineArchiveImportSettingsView(modelContext: modelContext)
                         } label: {
                             SettingsNavigationRow(
@@ -258,7 +269,7 @@ struct MovesSettingsView: View {
                         }
                         .buttonStyle(.plain)
 
-                        Text("Use Moves timeline export to restore another Moves install from its GPX, GeoJSON, and CSV files. Files import rebuilds places and trips from any timestamped GPS log, such as an export from another tracking app. Health import adds workout routes.")
+                        Text("Google Timeline imports a Takeout Location History folder (semantic months first, then Records.json). Use Moves timeline export to restore another Moves install. Files import rebuilds places and trips from any timestamped GPS log. Health import adds workout routes.")
                             .font(.system(size: 12, weight: .medium, design: .rounded))
                             .foregroundStyle(.secondary)
                     }

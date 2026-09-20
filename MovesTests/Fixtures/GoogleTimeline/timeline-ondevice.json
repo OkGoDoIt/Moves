@@ -1,0 +1,65 @@
+{
+  "semanticSegments": [
+    {
+      "startTime": "2024-06-01T08:00:00Z",
+      "endTime": "2024-06-01T09:00:00Z",
+      "visit": {
+        "topCandidate": {
+          "placeLocation": {
+            "latLng": "52.52°, 13.40°"
+          },
+          "semanticType": "TYPE_HOME"
+        }
+      }
+    },
+    {
+      "startTime": "2024-06-01T09:00:00Z",
+      "endTime": "2024-06-01T09:20:00Z",
+      "activity": {
+        "start": {
+          "latLng": "52.52°, 13.40°"
+        },
+        "end": {
+          "latLng": "52.53°, 13.41°"
+        },
+        "topCandidate": {
+          "type": "WALKING"
+        },
+        "distanceMeters": 1200
+      },
+      "timelinePath": [
+        {
+          "point": "geo:52.52,13.40",
+          "time": "2024-06-01T09:00:00Z"
+        },
+        {
+          "point": "52.525°, 13.405°",
+          "time": "2024-06-01T09:10:00Z"
+        },
+        {
+          "point": "geo:52.53,13.41",
+          "time": "2024-06-01T09:20:00Z"
+        }
+      ]
+    }
+  ],
+  "rawSignals": [
+    {
+      "position": {
+        "LatLng": {
+          "latitude": 52.521,
+          "longitude": 13.401
+        },
+        "timestamp": "2024-06-01T08:10:00Z",
+        "accuracyMeters": 12
+      }
+    },
+    {
+      "position": {
+        "latLng": "52.522, 13.402",
+        "timestamp": "2024-06-01T08:40:00Z",
+        "accuracyMeters": 15
+      }
+    }
+  ]
+}

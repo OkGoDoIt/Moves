@@ -73,6 +73,10 @@ struct MovesRootView: View {
     @StateObject private var controller = MovesRootController()
     @State private var editController = TimelineEditController()
     @State private var undoToast = UndoToastPresenter()
+    @AppStorage(OnboardingStorage.hasSeenKey) private var hasSeenOnboarding = false
+    @State private var isShowingOnboarding = false
+    @State private var isShowingGoogleImport = false
+    @State private var isShowingFileImport = false
 
     @Query(sort: \DayTimeline.dayStart, order: .forward)
     private var dayTimelines: [DayTimeline]
@@ -129,6 +133,14 @@ struct MovesRootView: View {
                 toast: undoToast
             )
             applyLaunchJumpIfNeeded()
+            presentOnboardingIfNeeded()
+        }
+        .onChange(of: dayTimelines.isEmpty) { _, isEmpty in
+            if isEmpty {
+                presentOnboardingIfNeeded()
+            } else if !hasSeenOnboarding {
+                hasSeenOnboarding = true
+            }
         }
         .sheet(isPresented: $controller.isShowingSettings) {
             MovesSettingsView(
@@ -193,6 +205,36 @@ struct MovesRootView: View {
             Text(editController.errorMessage ?? "")
         }
         .undoToast(undoToast)
+        .fullScreenCover(isPresented: $isShowingOnboarding) {
+            OnboardingFlow(
+                onRequestLocation: {
+                    captureManager.requestTrackingAuthorization()
+                },
+                onImportGoogle: {
+                    finishOnboarding()
+                    DispatchQueue.main.async {
+                        isShowingGoogleImport = true
+                    }
+                },
+                onImportFiles: {
+                    finishOnboarding()
+                    DispatchQueue.main.async {
+                        isShowingFileImport = true
+                    }
+                },
+                onSkip: finishOnboarding
+            )
+        }
+        .sheet(isPresented: $isShowingGoogleImport) {
+            NavigationStack {
+                GoogleTimelineImportSettingsView(modelContext: modelContext)
+            }
+        }
+        .sheet(isPresented: $isShowingFileImport) {
+            NavigationStack {
+                RouteFileImportSettingsView(modelContext: modelContext)
+            }
+        }
         .overlay {
             ShakeToUndoDetector(undoManager: undoController.manager) {
                 handleShakeToUndo()
@@ -201,6 +243,35 @@ struct MovesRootView: View {
             .opacity(0.01)
             .accessibilityHidden(true)
         }
+    }
+
+    /// First-launch onboarding stays off while demo data seeds or screenshot flags are set.
+    private var shouldPresentOnboarding: Bool {
+        if ProcessInfo.processInfo.isRunningUnitTests { return false }
+        if captureManager.isDemoMode { return false }
+        let env = ProcessInfo.processInfo.environment
+        if env["MOVES_START_TAB"] != nil
+            || env["MOVES_OPEN_SETTINGS"] == "1"
+            || env["MOVES_OPEN_SEARCH"] == "1"
+            || env["MOVES_OPEN_TRIPS"] == "1"
+            || env["MOVES_OPEN_SAVE_TRIP"] == "1"
+            || env["MOVES_OPEN_TRIP"] == "1"
+            || env["MOVES_JUMP_DATE"] != nil
+            || env["MOVES_OPEN_FIRST_PLACE"] == "1"
+            || env["MOVES_OPEN_REVIEW"] == "1" {
+            return false
+        }
+        return dayTimelines.isEmpty && !hasSeenOnboarding
+    }
+
+    private func presentOnboardingIfNeeded() {
+        guard shouldPresentOnboarding else { return }
+        isShowingOnboarding = true
+    }
+
+    private func finishOnboarding() {
+        hasSeenOnboarding = true
+        isShowingOnboarding = false
     }
 
     /// Screenshot-agent launch flags (`MOVES_JUMP_DATE`, `MOVES_OPEN_SETTINGS`, `MOVES_OPEN_REVIEW`, `MOVES_OPEN_SEARCH`, `MOVES_OPEN_TRIPS`, `MOVES_START_TAB`, `MOVES_OPEN_FIRST_PLACE`).
