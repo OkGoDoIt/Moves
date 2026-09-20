@@ -128,6 +128,7 @@
 		F21000013050000100000001 /* TimelineItemActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = F21000013050000100000000 /* TimelineItemActions.swift */; };
 		F21100013051000100000001 /* TimelineTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F21100013051000100000000 /* TimelineTabView.swift */; };
 		F21100013051000100000003 /* TimelineTabTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F21100013051000100000002 /* TimelineTabTests.swift */; };
+		F220000130E0000100000003 /* MapRegionFactoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F220000130E0000100000002 /* MapRegionFactoryTests.swift */; };
 		F30000013050000100000001 /* RouteRendering.swift in Sources */ = {isa = PBXBuildFile; fileRef = F30000013050000100000000 /* RouteRendering.swift */; };
 		F30000013050000100000003 /* SpeedProfileBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = F30000013050000100000002 /* SpeedProfileBuilder.swift */; };
 		F30000013050000100000005 /* SpeedProfileBuilderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F30000013050000100000004 /* SpeedProfileBuilderTests.swift */; };
@@ -374,6 +375,7 @@
 		F21000013050000100000000 /* TimelineItemActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineItemActions.swift; sourceTree = "<group>"; };
 		F21100013051000100000000 /* TimelineTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineTabView.swift; sourceTree = "<group>"; };
 		F21100013051000100000002 /* TimelineTabTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineTabTests.swift; sourceTree = "<group>"; };
+		F220000130E0000100000002 /* MapRegionFactoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapRegionFactoryTests.swift; sourceTree = "<group>"; };
 		F30000013050000100000000 /* RouteRendering.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteRendering.swift; sourceTree = "<group>"; };
 		F30000013050000100000002 /* SpeedProfileBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeedProfileBuilder.swift; sourceTree = "<group>"; };
 		F30000013050000100000004 /* SpeedProfileBuilderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeedProfileBuilderTests.swift; sourceTree = "<group>"; };
@@ -726,6 +728,7 @@
 				F20000013040000100000006 /* TimelineEditingTests.swift */,
 				F20000013040000100000008 /* TimelineLocatorTests.swift */,
 				F21100013051000100000002 /* TimelineTabTests.swift */,
+				F220000130E0000100000002 /* MapRegionFactoryTests.swift */,
 				F30000013050000100000004 /* SpeedProfileBuilderTests.swift */,
 				F21000013050000100000010 /* NearbyPlaceSuggesterTests.swift */,
 				F40000013050000100000002 /* RouteMatchPolicyTests.swift */,
@@ -1140,6 +1143,7 @@
 				F20000013040000100000007 /* TimelineEditingTests.swift in Sources */,
 				F20000013040000100000009 /* TimelineLocatorTests.swift in Sources */,
 				F21100013051000100000003 /* TimelineTabTests.swift in Sources */,
+				F220000130E0000100000003 /* MapRegionFactoryTests.swift in Sources */,
 				F30000013050000100000005 /* SpeedProfileBuilderTests.swift in Sources */,
 				F21000013050000100000011 /* NearbyPlaceSuggesterTests.swift in Sources */,
 				F40000013050000100000003 /* RouteMatchPolicyTests.swift in Sources */,

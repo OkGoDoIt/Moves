@@ -1488,6 +1488,7 @@ private enum MovesShareMapRenderer {
         var region = MapRegionFactory.region(for: coordinates)
         region.span.latitudeDelta = min(region.span.latitudeDelta * 1.25, 180)
         region.span.longitudeDelta = min(region.span.longitudeDelta * 1.25, 360)
+        region = MapRegionFactory.snapshotSafe(region)
 
         let options = MKMapSnapshotter.Options()
         options.region = region
@@ -1571,6 +1572,7 @@ private enum MovesShareMapRenderer {
         var region = MapRegionFactory.region(for: coordinates)
         region.span.latitudeDelta = min(region.span.latitudeDelta * 1.4, 180)
         region.span.longitudeDelta = min(region.span.longitudeDelta * 1.4, 360)
+        region = MapRegionFactory.snapshotSafe(region)
 
         let options = MKMapSnapshotter.Options()
         options.region = region
