@@ -155,6 +155,10 @@ struct PlacesVisitRecord: Equatable, Sendable, Identifiable {
     var isHiddenAsShortStop: Bool
     var dayKey: String?
     var assignmentSource: PlaceAssignmentSource
+    var userLabel: String?
+    var autoLabel: String?
+    var thoroughfare: String?
+    var formattedAddress: String?
 
     var coordinate: CLLocationCoordinate2D {
         CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
@@ -179,7 +183,11 @@ struct PlacesVisitRecord: Equatable, Sendable, Identifiable {
         administrativeArea: String? = nil,
         isHiddenAsShortStop: Bool = false,
         dayKey: String? = nil,
-        assignmentSource: PlaceAssignmentSource = .none
+        assignmentSource: PlaceAssignmentSource = .none,
+        userLabel: String? = nil,
+        autoLabel: String? = nil,
+        thoroughfare: String? = nil,
+        formattedAddress: String? = nil
     ) {
         self.id = id
         self.knownPlaceID = knownPlaceID
@@ -194,6 +202,10 @@ struct PlacesVisitRecord: Equatable, Sendable, Identifiable {
         self.isHiddenAsShortStop = isHiddenAsShortStop
         self.dayKey = dayKey
         self.assignmentSource = assignmentSource
+        self.userLabel = userLabel
+        self.autoLabel = autoLabel
+        self.thoroughfare = thoroughfare
+        self.formattedAddress = formattedAddress
     }
 
     init(_ visit: VisitPlace) {
@@ -210,6 +222,10 @@ struct PlacesVisitRecord: Equatable, Sendable, Identifiable {
         isHiddenAsShortStop = visit.isHiddenAsShortStop
         dayKey = visit.dayTimeline?.dayKey
         assignmentSource = visit.assignmentSource
+        userLabel = visit.userLabel
+        autoLabel = visit.autoLabel
+        thoroughfare = visit.thoroughfare
+        formattedAddress = visit.formattedAddress
     }
 }
 
@@ -229,6 +245,8 @@ struct PlacesKnownRecord: Equatable, Sendable, Identifiable {
     var arrivalHourHistogram: [Int]
     var weekdayHistogram: [Int]
     var stayDurationSamples: [Double]
+    var thoroughfare: String?
+    var formattedAddress: String?
 
     var coordinate: CLLocationCoordinate2D {
         CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
@@ -252,7 +270,9 @@ struct PlacesKnownRecord: Equatable, Sendable, Identifiable {
         lastVisitAt: Date? = nil,
         arrivalHourHistogram: [Int] = Array(repeating: 0, count: 24),
         weekdayHistogram: [Int] = Array(repeating: 0, count: 7),
-        stayDurationSamples: [Double] = []
+        stayDurationSamples: [Double] = [],
+        thoroughfare: String? = nil,
+        formattedAddress: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -268,6 +288,8 @@ struct PlacesKnownRecord: Equatable, Sendable, Identifiable {
         self.arrivalHourHistogram = arrivalHourHistogram
         self.weekdayHistogram = weekdayHistogram
         self.stayDurationSamples = stayDurationSamples
+        self.thoroughfare = thoroughfare
+        self.formattedAddress = formattedAddress
     }
 
     init(_ place: KnownPlace) {
@@ -285,6 +307,8 @@ struct PlacesKnownRecord: Equatable, Sendable, Identifiable {
         arrivalHourHistogram = place.arrivalHourHistogram
         weekdayHistogram = place.weekdayHistogram
         stayDurationSamples = place.stayDurationSamples
+        thoroughfare = place.thoroughfare
+        formattedAddress = place.formattedAddress
     }
 }
 
@@ -326,7 +350,13 @@ struct PlacesPlaceSummary: Equatable, Sendable, Identifiable {
 /// Nearby unassigned visits that can become a `KnownPlace` with Confirm.
 struct PlacesSuggestedCluster: Equatable, Sendable, Identifiable {
     var id: String
+    /// List title: POI, street, "Naming…", or a compact coordinate — never "Untitled place".
     var name: String
+    /// Street or formatted address when it differs from `name`.
+    var address: String?
+    var isNaming: Bool
+    /// Mini map in the list when several suggestions share the same title.
+    var showsMapThumbnail: Bool
     var visitIDs: [UUID]
     var visitCount: Int
     var totalStay: TimeInterval
@@ -335,21 +365,18 @@ struct PlacesSuggestedCluster: Equatable, Sendable, Identifiable {
     var longitude: Double
     var countryCode: String?
     var locality: String?
+    var thoroughfare: String?
+    var formattedAddress: String?
+    var subtitle: String
 
     var coordinate: CLLocationCoordinate2D {
         CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
     }
 
-    var subtitle: String {
-        let visits = visitCount == 1
-            ? String(localized: "1 visit")
-            : String(localized: "\(visitCount) visits")
-        if let lastVisitAt {
-            return "\(visits) · \(lastVisitAt.formatted(.relative(presentation: .named)))"
-        }
-        return visits
-    }
+    var displayName: String { name }
 }
+
+extension PlacesSuggestedCluster: Hashable {}
 
 /// City bucket inside a country.
 struct PlacesCitySection: Equatable, Sendable, Identifiable {
@@ -407,7 +434,8 @@ enum PlacesIndexBuilder {
         sort: PlacesSort,
         query: String,
         now: Date,
-        calendar: Calendar
+        calendar: Calendar,
+        userCoordinate: CLLocationCoordinate2D? = nil
     ) -> PlacesIndexSnapshot {
         let visitsByKnownID = Dictionary(grouping: visits.filter { $0.knownPlaceID != nil }) { record in
             record.knownPlaceID ?? UUID()
@@ -431,7 +459,8 @@ enum PlacesIndexBuilder {
         let suggested = suggestedClusters(
             from: visits.filter { $0.knownPlaceID == nil && !$0.isHiddenAsShortStop },
             query: needle,
-            now: now
+            now: now,
+            userCoordinate: userCoordinate
         )
 
         return PlacesIndexSnapshot(
@@ -529,22 +558,23 @@ enum PlacesIndexBuilder {
     static func suggestedClusters(
         from visits: [PlacesVisitRecord],
         query: String,
-        now: Date
+        now: Date,
+        userCoordinate: CLLocationCoordinate2D? = nil
     ) -> [PlacesSuggestedCluster] {
         var remaining = visits
         var clusters: [PlacesSuggestedCluster] = []
 
         while let seed = remaining.first {
             remaining.removeFirst()
-            let seedName = normalizedName(seed.name)
+            let seedKey = clusteringKey(seed)
             var members = [seed]
             remaining.removeAll { candidate in
                 let belongs: Bool
-                if seedName != nil {
-                    belongs = normalizedName(candidate.name) == seedName
+                if let seedKey {
+                    belongs = clusteringKey(candidate) == seedKey
                         && distance(from: seed.coordinate, to: candidate.coordinate) <= namedClusterRadius
                 } else {
-                    belongs = normalizedName(candidate.name) == nil
+                    belongs = clusteringKey(candidate) == nil
                         && unnamedBucket(candidate) == unnamedBucket(seed)
                 }
                 if belongs {
@@ -552,35 +582,132 @@ enum PlacesIndexBuilder {
                 }
                 return belongs
             }
-
-            let name = members.compactMap { normalizedDisplayName($0.name) }.first
-                ?? String(localized: "Untitled place")
-            let latitude = members.map(\.latitude).reduce(0, +) / Double(members.count)
-            let longitude = members.map(\.longitude).reduce(0, +) / Double(members.count)
-            let cluster = PlacesSuggestedCluster(
-                id: members.map(\.id.uuidString).sorted().joined(separator: "|"),
-                name: name,
-                visitIDs: members.map(\.id),
-                visitCount: members.count,
-                totalStay: members.reduce(0) { $0 + $1.stayDuration(now: now) },
-                lastVisitAt: members.map(\.arrivalDate).max(),
-                latitude: latitude,
-                longitude: longitude,
-                countryCode: majority(members.map(\.countryCode)),
-                locality: majority(members.map(\.locality))
-            )
-            clusters.append(cluster)
+            clusters.append(makeCluster(from: members, now: now))
         }
 
+        let disambiguated = disambiguate(clusters, userCoordinate: userCoordinate)
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let visible = needle.isEmpty
-            ? clusters
-            : clusters.filter { $0.name.localizedCaseInsensitiveContains(needle) }
+            ? disambiguated
+            : disambiguated.filter { cluster in
+                cluster.name.localizedCaseInsensitiveContains(needle)
+                    || (cluster.address?.localizedCaseInsensitiveContains(needle) == true)
+                    || (cluster.locality?.localizedCaseInsensitiveContains(needle) == true)
+            }
 
         return visible.sorted {
             if $0.visitCount != $1.visitCount { return $0.visitCount > $1.visitCount }
             return $0.name.localizedStandardCompare($1.name) == .orderedAscending
         }
+    }
+
+    private static func makeCluster(from members: [PlacesVisitRecord], now: Date) -> PlacesSuggestedCluster {
+        let latitude = members.map(\.latitude).reduce(0, +) / Double(members.count)
+        let longitude = members.map(\.longitude).reduce(0, +) / Double(members.count)
+        let coordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+        let pending = members.allSatisfy {
+            PlaceDisplayNamer.meaningful($0.userLabel) == nil
+                && PlaceDisplayNamer.meaningful($0.autoLabel) == nil
+                && PlaceDisplayNamer.meaningful($0.thoroughfare) == nil
+                && PlaceDisplayNamer.meaningful($0.name) == nil
+        }
+        let resolved = PlaceDisplayNamer.resolve(
+            userLabel: firstMeaningful(members.map(\.userLabel)),
+            autoLabel: firstMeaningful(members.map(\.autoLabel)),
+            thoroughfare: firstMeaningful(members.map(\.thoroughfare)),
+            formattedAddress: firstMeaningful(members.map(\.formattedAddress)),
+            locality: firstMeaningful(members.map(\.locality)) ?? majority(members.map(\.locality)),
+            coordinate: coordinate,
+            isPending: pending,
+            fallbackName: firstMeaningful(members.map(\.name))
+        )
+        let lastVisitAt = members.map(\.arrivalDate).max()
+        let visitCount = members.count
+        return PlacesSuggestedCluster(
+            id: members.map(\.id.uuidString).sorted().joined(separator: "|"),
+            name: resolved.primary,
+            address: resolved.address,
+            isNaming: resolved.isPending,
+            showsMapThumbnail: false,
+            visitIDs: members.map(\.id),
+            visitCount: visitCount,
+            totalStay: members.reduce(0) { $0 + $1.stayDuration(now: now) },
+            lastVisitAt: lastVisitAt,
+            latitude: latitude,
+            longitude: longitude,
+            countryCode: majority(members.map(\.countryCode)),
+            locality: majority(members.map(\.locality)),
+            thoroughfare: firstMeaningful(members.map(\.thoroughfare)),
+            formattedAddress: firstMeaningful(members.map(\.formattedAddress)),
+            subtitle: defaultSubtitle(
+                address: resolved.isPending ? String(localized: "Naming…") : resolved.address,
+                visitCount: visitCount,
+                lastVisitAt: lastVisitAt,
+                preciseTime: false
+            )
+        )
+    }
+
+    /// Same-street clusters keep visit time, distance, and a map thumbnail so Confirm isn't random.
+    private static func disambiguate(
+        _ clusters: [PlacesSuggestedCluster],
+        userCoordinate: CLLocationCoordinate2D?
+    ) -> [PlacesSuggestedCluster] {
+        let groups = Dictionary(grouping: clusters) {
+            $0.name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+        }
+        return clusters.map { cluster in
+            let key = cluster.name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            let peers = groups[key] ?? [cluster]
+            guard peers.count > 1 else { return cluster }
+            var copy = cluster
+            copy.showsMapThumbnail = true
+            copy.subtitle = defaultSubtitle(
+                address: cluster.address,
+                visitCount: cluster.visitCount,
+                lastVisitAt: cluster.lastVisitAt,
+                preciseTime: true,
+                distanceMeters: userCoordinate.map { distance(from: cluster.coordinate, to: $0) }
+            )
+            return copy
+        }
+    }
+
+    private static func defaultSubtitle(
+        address: String?,
+        visitCount: Int,
+        lastVisitAt: Date?,
+        preciseTime: Bool,
+        distanceMeters: CLLocationDistance? = nil
+    ) -> String {
+        let visits = visitCount == 1
+            ? String(localized: "1 visit")
+            : String(localized: "\(visitCount) visits")
+        var parts: [String] = []
+        if let address, !address.isEmpty {
+            parts.append(address)
+        }
+        parts.append(visits)
+        if let lastVisitAt {
+            if preciseTime {
+                parts.append(lastVisitAt.formatted(date: .abbreviated, time: .shortened))
+            } else {
+                parts.append(lastVisitAt.formatted(.relative(presentation: .named)))
+            }
+        }
+        if let distanceMeters {
+            parts.append(String(localized: "\(MovesStatisticsFormatting.distance(distanceMeters)) away"))
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private static func clusteringKey(_ visit: PlacesVisitRecord) -> String? {
+        PlaceDisplayNamer.clusteringName(
+            userLabel: visit.userLabel,
+            autoLabel: visit.autoLabel,
+            thoroughfare: visit.thoroughfare,
+            fallbackName: visit.name
+        )
     }
 
     private static func matches(_ place: PlacesPlaceSummary, query: String) -> Bool {
@@ -611,6 +738,10 @@ enum PlacesIndexBuilder {
         }
     }
 
+    private static func firstMeaningful(_ values: [String?]) -> String? {
+        values.compactMap { PlaceDisplayNamer.meaningful($0) }.first
+    }
+
     private static func firstNonEmpty(_ values: String?...) -> String? {
         values.compactMap { value -> String? in
             guard let value else { return nil }
@@ -631,20 +762,6 @@ enum PlacesIndexBuilder {
             if lhs.value != rhs.value { return lhs.value < rhs.value }
             return lhs.key < rhs.key
         }?.key
-    }
-
-    private static func normalizedName(_ name: String) -> String? {
-        guard let display = normalizedDisplayName(name) else { return nil }
-        return display.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-    }
-
-    private static func normalizedDisplayName(_ name: String) -> String? {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        if trimmed.range(of: #"^-?\d+\.\d+,\s*-?\d+\.\d+$"#, options: .regularExpression) != nil {
-            return nil
-        }
-        return trimmed
     }
 
     private static func unnamedBucket(_ visit: PlacesVisitRecord) -> String {
@@ -727,18 +844,26 @@ final class PlacesIndex {
         knownPlaces: [KnownPlace],
         visits: [VisitPlace],
         now: Date = .now,
-        calendar: Calendar = .autoupdatingCurrent
+        calendar: Calendar = .autoupdatingCurrent,
+        userCoordinate: CLLocationCoordinate2D? = nil
     ) {
         let knownRecords = knownPlaces.map(PlacesKnownRecord.init)
         let visitRecords = visits.map(PlacesVisitRecord.init)
-        rebuild(knownRecords: knownRecords, visitRecords: visitRecords, now: now, calendar: calendar)
+        rebuild(
+            knownRecords: knownRecords,
+            visitRecords: visitRecords,
+            now: now,
+            calendar: calendar,
+            userCoordinate: userCoordinate
+        )
     }
 
     func rebuild(
         knownRecords: [PlacesKnownRecord],
         visitRecords: [PlacesVisitRecord],
         now: Date = .now,
-        calendar: Calendar = .autoupdatingCurrent
+        calendar: Calendar = .autoupdatingCurrent,
+        userCoordinate: CLLocationCoordinate2D? = nil
     ) {
         generation += 1
         let generation = generation
@@ -751,7 +876,8 @@ final class PlacesIndex {
                 sort: sort,
                 query: query,
                 now: now,
-                calendar: calendar
+                calendar: calendar,
+                userCoordinate: userCoordinate
             )
             await MainActor.run {
                 guard generation == self.generation else { return }
@@ -764,22 +890,62 @@ final class PlacesIndex {
 /// Place mutations for the Places tab. Learning (footprints, occupancy,
 /// merge, shrink) is `PlaceLearningEngine`; Confirm uses `createKnownPlace`.
 enum PlacesLibrary {
-    /// Creates a `KnownPlace` from the cluster’s first visit and assigns the rest.
+    /// Creates or assigns a `KnownPlace` from the cluster’s visits.
     /// `createKnownPlace` / `.user` assign already call `PlaceLearningEngine.learn`.
     @discardableResult
     static func confirmSuggested(
         visitIDs: [UUID],
         name: String,
-        in context: ModelContext
+        in context: ModelContext,
+        formattedAddress: String? = nil,
+        thoroughfare: String? = nil,
+        category: String? = nil,
+        existingPlaceID: UUID? = nil,
+        center: CLLocationCoordinate2D? = nil
     ) throws -> KnownPlace {
         let visits = try fetchVisits(ids: visitIDs, in: context)
         guard let first = visits.first else {
             throw PlacesLibraryError.missingVisit
         }
         let repository = SwiftDataTimelineRepository(modelContext: context)
-        let place = try repository.createKnownPlace(from: first, name: name)
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedName = trimmedName.isEmpty ? first.placesDisplayName : trimmedName
+
+        let place: KnownPlace
+        if let existingPlaceID,
+           let existing = try context.fetch(FetchDescriptor<KnownPlace>()).first(where: { $0.id == existingPlaceID }) {
+            place = existing
+            try repository.assign(first, to: place, source: .user, confidence: 1)
+        } else {
+            place = try repository.createKnownPlace(from: first, name: resolvedName)
+        }
+
+        if let center, CLLocationCoordinate2DIsValid(center) {
+            place.centerLatitude = center.latitude
+            place.centerLongitude = center.longitude
+        }
+        if let formattedAddress, !formattedAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            place.formattedAddress = formattedAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if let thoroughfare, !thoroughfare.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            place.thoroughfare = thoroughfare.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if let category {
+            let trimmedCategory = category.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmedCategory.isEmpty {
+                place.category = nil
+            } else if let parsed = KnownPlaceCategory(stored: trimmedCategory), parsed != .other {
+                place.category = parsed.rawValue
+            } else {
+                place.category = trimmedCategory
+            }
+        }
+
         for visit in visits.dropFirst() {
             try repository.assign(visit, to: place, source: .user, confidence: 1)
+        }
+        if context.hasChanges {
+            try context.save()
         }
         return place
     }

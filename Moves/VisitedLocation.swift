@@ -290,6 +290,10 @@ final class VisitPlace {
     var countryCode: String? = nil
     var locality: String? = nil
     var administrativeArea: String? = nil
+    /// Street name from reverse geocode, used by Places suggestions.
+    var thoroughfare: String? = nil
+    /// Formatted mailing address from reverse geocode.
+    var formattedAddress: String? = nil
     var reviewStateRaw: String = ReviewState.none.rawValue
 
     var dayTimeline: DayTimeline?
@@ -613,6 +617,10 @@ final class KnownPlace {
     var countryCode: String? = nil
     var locality: String? = nil
     var administrativeArea: String? = nil
+    /// Street name copied from a confirmed visit's reverse geocode.
+    var thoroughfare: String? = nil
+    /// Formatted mailing address shown on the place detail and confirm form.
+    var formattedAddress: String? = nil
     /// Reverse-geocoded names the user has explicitly rejected here.
     var rejectedAutoLabels: [String] = []
     /// 24-bin histogram of confirmed arrival hours.
@@ -2273,6 +2281,8 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             place.countryCode = visit.countryCode
             place.locality = visit.locality
             place.administrativeArea = visit.administrativeArea
+            place.thoroughfare = visit.thoroughfare
+            place.formattedAddress = visit.formattedAddress
             place.confirmedVisitCount = 1
             place.lastVisitAt = visit.arrivalDate
             modelContext.insert(place)
@@ -3622,7 +3632,78 @@ enum SimulatorDemoDataSeeder {
             try await seed(route: route, routeIndex: index, dayStart: dayStart, calendar: calendar, context: context)
         }
 
+        try await seedUnconfirmedSuggestions(dayStart: today, calendar: calendar, context: context)
         try context.save()
+    }
+
+    /// Unlabeled repeats so the Places tab can show Confirm with distinct street names.
+    /// Left off any `DayTimeline` so they do not clutter the storyline.
+    private static func seedUnconfirmedSuggestions(
+        dayStart: Date,
+        calendar: Calendar,
+        context: ModelContext
+    ) async throws {
+        func stay(
+            autoLabel: String?,
+            thoroughfare: String,
+            formattedAddress: String,
+            latitude: Double,
+            longitude: Double,
+            daysAgo: [Int],
+            hours: Int,
+            minutes: Int
+        ) {
+            for (index, day) in daysAgo.enumerated() {
+                guard let arrival = calendar.date(byAdding: .day, value: -day, to: dayStart)
+                    .flatMap({ calendar.date(byAdding: .hour, value: hours, to: $0) })
+                    .flatMap({ calendar.date(byAdding: .minute, value: minutes + index, to: $0) })
+                else { continue }
+                let visit = VisitPlace(
+                    arrivalDate: arrival,
+                    departureDate: arrival.addingTimeInterval(TimeInterval((3 + index) * 3600)),
+                    latitude: latitude,
+                    longitude: longitude,
+                    horizontalAccuracy: 18
+                )
+                visit.autoLabel = autoLabel
+                visit.thoroughfare = thoroughfare
+                visit.formattedAddress = formattedAddress
+                visit.locality = "Amsterdam"
+                visit.countryCode = "NL"
+                context.insert(visit)
+            }
+        }
+
+        stay(
+            autoLabel: "Rijksmuseum Garden",
+            thoroughfare: "Museumstraat",
+            formattedAddress: "Museumstraat, Amsterdam",
+            latitude: 52.35970,
+            longitude: 4.88540,
+            daysAgo: [2, 9, 16, 23],
+            hours: 16,
+            minutes: 10
+        )
+        stay(
+            autoLabel: nil,
+            thoroughfare: "Hobbemakade",
+            formattedAddress: "Hobbemakade 120, Amsterdam",
+            latitude: 52.35580,
+            longitude: 4.89120,
+            daysAgo: [3, 10, 18],
+            hours: 19,
+            minutes: 40
+        )
+        stay(
+            autoLabel: nil,
+            thoroughfare: "Hobbemakade",
+            formattedAddress: "Hobbemakade 40, Amsterdam",
+            latitude: 52.35390,
+            longitude: 4.89380,
+            daysAgo: [1, 8, 15, 22, 29],
+            hours: 8,
+            minutes: 5
+        )
     }
 
     private static func seed(

@@ -158,6 +158,8 @@
 		F70000013070000100000007 /* PlacesIndex.swift in Sources */ = {isa = PBXBuildFile; fileRef = F70000013070000100000006 /* PlacesIndex.swift */; };
 		F70000013070000100000009 /* PlaceGeocodeBackfill.swift in Sources */ = {isa = PBXBuildFile; fileRef = F70000013070000100000008 /* PlaceGeocodeBackfill.swift */; };
 		F7000001307000010000000B /* PlacesIndexTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F7000001307000010000000A /* PlacesIndexTests.swift */; };
+		F7000001307000010000000D /* PlaceDisplayName.swift in Sources */ = {isa = PBXBuildFile; fileRef = F7000001307000010000000C /* PlaceDisplayName.swift */; };
+		F7000001307000010000000F /* PlaceConfirmSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = F7000001307000010000000E /* PlaceConfirmSheet.swift */; };
 		F80000013080000100000001 /* InsightsTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F80000013080000100000000 /* InsightsTabView.swift */; };
 		F80000013080000100000003 /* InsightsSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = F80000013080000100000002 /* InsightsSnapshot.swift */; };
 		F80000013080000100000005 /* InsightsConnectionsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F80000013080000100000004 /* InsightsConnectionsView.swift */; };
@@ -404,6 +406,8 @@
 		F70000013070000100000006 /* PlacesIndex.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlacesIndex.swift; sourceTree = "<group>"; };
 		F70000013070000100000008 /* PlaceGeocodeBackfill.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaceGeocodeBackfill.swift; sourceTree = "<group>"; };
 		F7000001307000010000000A /* PlacesIndexTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlacesIndexTests.swift; sourceTree = "<group>"; };
+		F7000001307000010000000C /* PlaceDisplayName.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaceDisplayName.swift; sourceTree = "<group>"; };
+		F7000001307000010000000E /* PlaceConfirmSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaceConfirmSheet.swift; sourceTree = "<group>"; };
 		F80000013080000100000000 /* InsightsTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InsightsTabView.swift; sourceTree = "<group>"; };
 		F80000013080000100000002 /* InsightsSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InsightsSnapshot.swift; sourceTree = "<group>"; };
 		F80000013080000100000004 /* InsightsConnectionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InsightsConnectionsView.swift; sourceTree = "<group>"; };
@@ -666,6 +670,8 @@
 				F70000013070000100000002 /* PlaceDetailView.swift */,
 				F70000013070000100000004 /* OccupancyChartView.swift */,
 				F70000013070000100000006 /* PlacesIndex.swift */,
+				F7000001307000010000000C /* PlaceDisplayName.swift */,
+				F7000001307000010000000E /* PlaceConfirmSheet.swift */,
 			);
 			path = PlacesTab;
 			sourceTree = "<group>";
@@ -1076,6 +1082,8 @@
 				F70000013070000100000003 /* PlaceDetailView.swift in Sources */,
 				F70000013070000100000005 /* OccupancyChartView.swift in Sources */,
 				F70000013070000100000007 /* PlacesIndex.swift in Sources */,
+				F7000001307000010000000D /* PlaceDisplayName.swift in Sources */,
+				F7000001307000010000000F /* PlaceConfirmSheet.swift in Sources */,
 				F70000013070000100000009 /* PlaceGeocodeBackfill.swift in Sources */,
 				F80000013080000100000001 /* InsightsTabView.swift in Sources */,
 				F80000013080000100000003 /* InsightsSnapshot.swift in Sources */,

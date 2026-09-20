@@ -109,17 +109,28 @@ struct NearbyPlaceSuggester {
         knownPlaces: [KnownPlace],
         query: String?
     ) async -> [NearbyPlaceCandidate] {
+        await suggestions(near: visit.coordinate, knownPlaces: knownPlaces, query: query)
+    }
+
+    /// Coordinate-based lookup used by the confirm form when the pin moves.
+    func suggestions(
+        near coordinate: CLLocationCoordinate2D,
+        knownPlaces: [KnownPlace],
+        query: String?,
+        limit: Int = maximumCandidates
+    ) async -> [NearbyPlaceCandidate] {
         let hits: [NearbySearchHit]
         do {
-            hits = try await searcher.search(near: visit.coordinate, query: query)
+            hits = try await searcher.search(near: coordinate, query: query)
         } catch {
             hits = []
         }
         return Self.merge(
-            visitCoordinate: visit.coordinate,
+            visitCoordinate: coordinate,
             knownPlaces: knownPlaces,
             searchHits: hits,
-            query: query
+            query: query,
+            limit: limit
         )
     }
 
