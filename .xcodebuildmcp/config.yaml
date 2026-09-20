@@ -1,0 +1,12 @@
+schemaVersion: 1
+sessionDefaults:
+  projectPath: /Users/roger/Repos/Moves/Moves.xcodeproj
+  scheme: Moves
+  configuration: Debug
+  simulatorName: iPhone 18 Pro
+  simulatorId: 159ACCC1-78B1-4E1A-9BDE-F1315C3FE5B2
+  deviceId: 00008150-000534E2368A401C
+  useLatestOS: true
+  platform: iOS
+  bundleId: com.okgodoit.Moves
+  simulatorPlatform: iOS Simulator
