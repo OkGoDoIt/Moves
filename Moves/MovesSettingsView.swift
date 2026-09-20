@@ -19,6 +19,7 @@ struct MovesSettingsView: View {
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var locationServiceSyncManager: LocationServiceSyncManager
     @EnvironmentObject private var webhookSyncManager: WebhookSyncManager
+    @EnvironmentObject private var cloudDataPresencePublisher: MovesCloudDataPresencePublisher
     @AppStorage(MapMarkerDisplaySettings.showsBigMarkersKey) private var showsBigMarkers = false
     @AppStorage(RouteSnappingLevel.storageKey) private var snappingLevel = RouteSnappingLevel.normal.rawValue
     @AppStorage(LandscapeLayoutSettings.controlsOnLeftKey) private var landscapeControlsOnLeft = false
@@ -77,6 +78,10 @@ struct MovesSettingsView: View {
             anchor = SettingsScreenshotAnchor.importCard
         } else if env["MOVES_OPEN_WEBHOOK"] == "1" {
             anchor = SettingsScreenshotAnchor.webhookRow
+        } else if env["MOVES_OPEN_ICLOUD"] == "1" {
+            anchor = SettingsScreenshotAnchor.iCloudCard
+        } else if env["MOVES_OPEN_PRIVACY"] == "1" {
+            anchor = SettingsScreenshotAnchor.privacyCard
         } else {
             anchor = nil
         }
@@ -123,6 +128,7 @@ struct MovesSettingsView: View {
                 .font(.system(size: 12, weight: .medium, design: .rounded))
                 .foregroundStyle(.secondary)
         }
+        .id(SettingsScreenshotAnchor.dailyBackupCard)
     }
 
     private var dailyBackupDescription: String {
@@ -179,6 +185,16 @@ struct MovesSettingsView: View {
                     }
 
                     AppIconPickerSection()
+
+                    ICloudSettingsCard(publisher: cloudDataPresencePublisher) {
+                        withAnimation(.easeInOut(duration: 0.25)) {
+                            proxy.scrollTo(SettingsScreenshotAnchor.dailyBackupCard, anchor: .top)
+                        }
+                    }
+                    .id(SettingsScreenshotAnchor.iCloudCard)
+
+                    PrivacyZonesSettingsCard()
+                        .id(SettingsScreenshotAnchor.privacyCard)
 
                     SettingsCard(title: "Integrations") {
                         ForEach(LocationService.allCases) { service in
@@ -480,7 +496,8 @@ struct MovesSettingsView: View {
         guard let payload = TimelineExporter.makePayload(
             days: days,
             format: format,
-            fileStem: "moves-\(scopeName)"
+            fileStem: "moves-\(scopeName)",
+            privacyZones: currentExportPrivacyZones()
         ) else {
             exportMessage = "Could not build export file."
             isShowingExportMessage = true
@@ -491,6 +508,12 @@ struct MovesSettingsView: View {
         exportContentType = payload.contentType
         exportFilename = payload.filename
         isExporting = true
+    }
+
+    private func currentExportPrivacyZones(places: [KnownPlace]? = nil) -> [PrivacyZone] {
+        PrivacyZoneResolver.exportZones(
+            from: places ?? PrivacyZoneResolver.loadPlaces(from: modelContext)
+        )
     }
 
     /// Writes GPX, GeoJSON, CSV, KML, `places.json`, and `photos.csv` into one zip.
@@ -508,7 +531,8 @@ struct MovesSettingsView: View {
             days: dayTimelines,
             knownPlaces: knownPlaces,
             photos: photos,
-            fileStem: "moves-all-days"
+            fileStem: "moves-all-days",
+            privacyZones: currentExportPrivacyZones(places: knownPlaces)
         ) else {
             exportMessage = "Could not build export file."
             isShowingExportMessage = true
@@ -1315,4 +1339,7 @@ private struct RouteTrackingSettingsSection: View {
 private enum SettingsScreenshotAnchor {
     static let importCard = "settings.import"
     static let webhookRow = "settings.webhook"
+    static let iCloudCard = "settings.icloud"
+    static let privacyCard = "settings.privacy"
+    static let dailyBackupCard = "settings.dailyBackup"
 }

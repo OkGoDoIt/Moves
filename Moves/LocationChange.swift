@@ -119,7 +119,7 @@ final class CoreMotionTransportClassifier: MotionClassifier {
 
     func classifyTransport(start: Date, end: Date, locations: [CLLocation]) async -> (mode: TransportMode, confidence: Double) {
         guard end > start else { return (.stationary, 0.25) }
-        let fallback = inferFromSpeed(locations)
+        let fallback = Self.inferredMode(from: locations)
 
         if CMMotionActivityManager.isActivityAvailable(),
            let activities = await queryActivities(from: start, to: end),
@@ -230,7 +230,8 @@ final class CoreMotionTransportClassifier: MotionClassifier {
         }
     }
 
-    private func inferFromSpeed(_ locations: [CLLocation]) -> TransportMode {
+    /// Speed buckets shared with Live Activity tinting.
+    static func inferredMode(from locations: [CLLocation]) -> TransportMode {
         let validSpeeds = locations.map(\.speed).filter { $0 >= 0 }
 
         let averageSpeed: CLLocationSpeed

@@ -258,6 +258,8 @@ struct MovesRootView: View {
             || env["MOVES_OPEN_TRIP"] == "1"
             || env["MOVES_OPEN_GOOGLE_IMPORT"] == "1"
             || env["MOVES_OPEN_WEBHOOK"] == "1"
+            || env["MOVES_OPEN_ICLOUD"] == "1"
+            || env["MOVES_OPEN_PRIVACY"] == "1"
             || env["MOVES_JUMP_DATE"] != nil
             || env["MOVES_OPEN_FIRST_PLACE"] == "1"
             || env["MOVES_OPEN_REVIEW"] == "1" {
@@ -276,12 +278,14 @@ struct MovesRootView: View {
         isShowingOnboarding = false
     }
 
-    /// Screenshot-agent launch flags (`MOVES_JUMP_DATE`, `MOVES_OPEN_SETTINGS`, `MOVES_OPEN_GOOGLE_IMPORT`, `MOVES_OPEN_WEBHOOK`, `MOVES_OPEN_REVIEW`, `MOVES_OPEN_SEARCH`, `MOVES_OPEN_TRIPS`, `MOVES_START_TAB`, `MOVES_OPEN_FIRST_PLACE`).
+    /// Screenshot-agent launch flags (`MOVES_JUMP_DATE`, `MOVES_OPEN_SETTINGS`, `MOVES_OPEN_GOOGLE_IMPORT`, `MOVES_OPEN_WEBHOOK`, `MOVES_OPEN_ICLOUD`, `MOVES_OPEN_PRIVACY`, `MOVES_OPEN_REVIEW`, `MOVES_OPEN_SEARCH`, `MOVES_OPEN_TRIPS`, `MOVES_START_TAB`, `MOVES_OPEN_FIRST_PLACE`).
     private func applyLaunchJumpIfNeeded() {
         let env = ProcessInfo.processInfo.environment
         if env["MOVES_OPEN_SETTINGS"] == "1"
             || env["MOVES_OPEN_GOOGLE_IMPORT"] == "1"
-            || env["MOVES_OPEN_WEBHOOK"] == "1" {
+            || env["MOVES_OPEN_WEBHOOK"] == "1"
+            || env["MOVES_OPEN_ICLOUD"] == "1"
+            || env["MOVES_OPEN_PRIVACY"] == "1" {
             controller.isShowingSettings = true
         }
         if env["MOVES_OPEN_REVIEW"] == "1" {

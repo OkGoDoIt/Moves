@@ -85,7 +85,8 @@ struct MovesSmallWidget: View {
                     .foregroundStyle(.secondary)
             }
 
-            Spacer(minLength: 4)
+            WidgetRouteCanvas(points: snapshot.routePoints, lineWidth: 2.5)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             Text(distanceText(snapshot.totalDistanceMeters))
                 .font(.system(size: 28, weight: .bold, design: .rounded))
@@ -124,7 +125,8 @@ struct MovesMediumWidget: View {
                     .foregroundStyle(.secondary)
             }
 
-            Spacer()
+            WidgetRouteCanvas(points: snapshot.routePoints, lineWidth: 3)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             if showsTransportBreakdown {
                 VStack(alignment: .leading, spacing: 8) {
@@ -141,6 +143,7 @@ struct MovesMediumWidget: View {
                         .font(.caption.weight(.semibold))
                     }
                 }
+                .frame(maxWidth: 148)
             } else {
                 VStack(alignment: .leading, spacing: 10) {
                     Label("\(snapshot.visitedLocationCount) places", systemImage: "mappin.and.ellipse")
@@ -169,6 +172,10 @@ struct MovesLargeWidget: View {
                     .font(.headline)
             }
 
+            WidgetRouteCanvas(points: snapshot.routePoints, lineWidth: 4)
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: 96, maxHeight: 160)
+
             if showsTransportBreakdown {
                 VStack(spacing: 10) {
                     ForEach(snapshot.transportMetrics.prefix(6)) { metric in
@@ -195,6 +202,57 @@ struct MovesLargeWidget: View {
             Spacer(minLength: 0)
         }
         .movesWidgetBackground()
+    }
+}
+
+/// Mode-colored silhouette of today's route. No map tiles.
+struct WidgetRouteCanvas: View {
+    let points: [TimelineWidgetRoutePoint]
+    var lineWidth: CGFloat = 3
+
+    var body: some View {
+        Canvas { context, size in
+            let latitudes = points.map(\.latitude)
+            let longitudes = points.map(\.longitude)
+            let projected = WidgetRouteLayout.project(
+                latitudes: latitudes,
+                longitudes: longitudes,
+                in: size,
+                padding: max(lineWidth + 3, 8)
+            )
+            guard projected.count > 1 else { return }
+
+            var segmentStart = 0
+            while segmentStart < projected.count - 1 {
+                let colorName = points[segmentStart].colorAssetName
+                var segmentEnd = segmentStart + 1
+                while segmentEnd < points.count, points[segmentEnd].colorAssetName == colorName {
+                    segmentEnd += 1
+                }
+                let lastIndex = min(max(segmentEnd - 1, segmentStart + 1), projected.count - 1)
+                var path = Path()
+                path.move(to: projected[segmentStart])
+                for index in (segmentStart + 1)...lastIndex {
+                    path.addLine(to: projected[index])
+                }
+                context.stroke(
+                    path,
+                    with: .color(Color(colorName)),
+                    style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round)
+                )
+                segmentStart = max(lastIndex, segmentStart + 1)
+            }
+
+            if let start = projected.first, let end = projected.last {
+                let startDot = Path(ellipseIn: CGRect(x: start.x - 3, y: start.y - 3, width: 6, height: 6))
+                context.fill(startDot, with: .color(Color(points.first?.colorAssetName ?? "MovesTransportWalking")))
+                let endDot = Path(ellipseIn: CGRect(x: end.x - 3.5, y: end.y - 3.5, width: 7, height: 7))
+                context.fill(endDot, with: .color(.white))
+                context.stroke(endDot, with: .color(Color(points.last?.colorAssetName ?? "MovesTransportWalking")), lineWidth: 1.5)
+            }
+        }
+        .accessibilityLabel(String(localized: "Today's route"))
+        .accessibilityHidden(points.count < 2)
     }
 }
 

@@ -903,20 +903,21 @@ enum TimelineExporter {
     static func makePayload(
         days: [DayTimeline],
         format: TimelineExportFormat,
-        fileStem: String
+        fileStem: String,
+        privacyZones: [PrivacyZone] = []
     ) -> TimelineExportPayload? {
         let orderedDays = days.sorted(by: { $0.dayStart < $1.dayStart })
 
         let exportData: Data?
         switch format {
         case .gpx:
-            exportData = gpxData(for: orderedDays)
+            exportData = gpxData(for: orderedDays, privacyZones: privacyZones)
         case .geoJSON:
-            exportData = geoJSONData(for: orderedDays)
+            exportData = geoJSONData(for: orderedDays, privacyZones: privacyZones)
         case .csv:
             exportData = csvData(for: orderedDays)
         case .kml:
-            exportData = kmlData(for: orderedDays)
+            exportData = kmlData(for: orderedDays, privacyZones: privacyZones)
         }
 
         guard let exportData else { return nil }
@@ -932,22 +933,23 @@ enum TimelineExporter {
         days: [DayTimeline],
         knownPlaces: [KnownPlace],
         photos: [PhotoAttachment],
-        fileStem: String
+        fileStem: String,
+        privacyZones: [PrivacyZone] = []
     ) -> TimelineExportPayload? {
         let orderedDays = days.sorted(by: { $0.dayStart < $1.dayStart })
         guard !orderedDays.isEmpty else { return nil }
 
         var files: [MovesZipFile] = []
-        if let gpx = gpxData(for: orderedDays) {
+        if let gpx = gpxData(for: orderedDays, privacyZones: privacyZones) {
             files.append(MovesZipFile(path: "\(fileStem).gpx", data: gpx))
         }
-        if let geoJSON = geoJSONData(for: orderedDays) {
+        if let geoJSON = geoJSONData(for: orderedDays, privacyZones: privacyZones) {
             files.append(MovesZipFile(path: "\(fileStem).geojson", data: geoJSON))
         }
         if let csv = csvData(for: orderedDays) {
             files.append(MovesZipFile(path: "\(fileStem).csv", data: csv))
         }
-        if let kml = kmlData(for: orderedDays) {
+        if let kml = kmlData(for: orderedDays, privacyZones: privacyZones) {
             files.append(MovesZipFile(path: "\(fileStem).kml", data: kml))
         }
         if let places = placesJSONData(knownPlaces) {
@@ -968,10 +970,18 @@ enum TimelineExporter {
     static func makeMoveGPXPayload(
         move: MoveSegment,
         coordinates: [CLLocationCoordinate2D],
-        fileStem: String
+        fileStem: String,
+        privacyZones: [PrivacyZone] = []
     ) -> TimelineExportPayload? {
+        let filtered = coordinates.filter { coordinate in
+            !PrivacyZoneResolver.containsRawFix(
+                latitude: coordinate.latitude,
+                longitude: coordinate.longitude,
+                zones: privacyZones
+            )
+        }
         let points = routePoints(
-            for: coordinates,
+            for: filtered,
             startDate: move.timelineStartDate,
             endDate: move.endDate
         )
@@ -1054,7 +1064,7 @@ enum TimelineExporter {
         )
     }
 
-    private static func gpxData(for days: [DayTimeline]) -> Data? {
+    private static func gpxData(for days: [DayTimeline], privacyZones: [PrivacyZone]) -> Data? {
         var xml = """
         <?xml version="1.0" encoding="UTF-8"?>
         <gpx version="1.1" creator="Moves iOS Rebuild" xmlns="http://www.topografix.com/GPX/1/1">
@@ -1082,7 +1092,7 @@ enum TimelineExporter {
             """
 
             for move in sortedMoves {
-                let points = routePoints(for: move)
+                let points = routePoints(for: move, privacyZones: privacyZones)
                 guard points.count > 1 else { continue }
 
                 xml += """
@@ -1130,7 +1140,7 @@ enum TimelineExporter {
         return xml.data(using: .utf8)
     }
 
-    private static func kmlData(for days: [DayTimeline]) -> Data? {
+    private static func kmlData(for days: [DayTimeline], privacyZones: [PrivacyZone]) -> Data? {
         var xml = """
         <?xml version="1.0" encoding="UTF-8"?>
         <kml xmlns="http://www.opengis.net/kml/2.2">
@@ -1153,7 +1163,7 @@ enum TimelineExporter {
             }
 
             for move in day.moves.sorted(by: { $0.timelineStartDate < $1.timelineStartDate }) {
-                let points = routePoints(for: move)
+                let points = routePoints(for: move, privacyZones: privacyZones)
                 guard points.count > 1 else { continue }
                 let title = "\(move.startPlace?.displayTitle ?? "Unknown start") to \(move.endPlace?.displayTitle ?? "Unknown destination")"
                 let coordinates = points
@@ -1223,7 +1233,7 @@ enum TimelineExporter {
         return rows.joined(separator: "\n").data(using: .utf8)
     }
 
-    private static func geoJSONData(for days: [DayTimeline]) -> Data? {
+    private static func geoJSONData(for days: [DayTimeline], privacyZones: [PrivacyZone]) -> Data? {
         var features: [[String: Any]] = []
 
         for day in days {
@@ -1261,7 +1271,7 @@ enum TimelineExporter {
             }
 
             for move in day.moves.sorted(by: { $0.timelineStartDate < $1.timelineStartDate }) {
-                let points = routePoints(for: move)
+                let points = routePoints(for: move, privacyZones: privacyZones)
                 let coordinates = points.map { [$0.longitude, $0.latitude] }
                 guard coordinates.count > 1 else { continue }
 
@@ -1353,7 +1363,10 @@ enum TimelineExporter {
         return rows.joined(separator: "\n").data(using: .utf8)
     }
 
-    private static func routePoints(for move: MoveSegment) -> [TimelineTrackPoint] {
+    private static func routePoints(
+        for move: MoveSegment,
+        privacyZones: [PrivacyZone]
+    ) -> [TimelineTrackPoint] {
         var points: [TimelineTrackPoint] = []
         points.reserveCapacity(move.samples.count + 2)
 
@@ -1372,6 +1385,13 @@ enum TimelineExporter {
             .preferredRouteDisplaySamples
             .sorted(by: { $0.timestamp < $1.timestamp })
         for sample in sortedSamples {
+            if PrivacyZoneResolver.containsRawFix(
+                latitude: sample.latitude,
+                longitude: sample.longitude,
+                zones: privacyZones
+            ) {
+                continue
+            }
             points.append(
                 TimelineTrackPoint(
                     latitude: sample.latitude,

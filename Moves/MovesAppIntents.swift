@@ -259,10 +259,14 @@ final class MovesIntentRuntime {
     func export(period: MovesTimelinePeriod, format: TimelineExportFormat) throws -> IntentFile {
         let days = try timelines(for: period).filter(\.hasRecordedActivity)
         guard !days.isEmpty else { throw MovesIntentError.noTimelineData(period.title) }
+        guard let modelContainer else { throw MovesIntentError.runtimeUnavailable }
+        let context = ModelContext(modelContainer)
+        let places = (try? context.fetch(FetchDescriptor<KnownPlace>())) ?? []
         guard let payload = TimelineExporter.makePayload(
             days: days,
             format: format,
-            fileStem: "moves-\(period.fileStem)"
+            fileStem: "moves-\(period.fileStem)",
+            privacyZones: PrivacyZoneResolver.exportZones(from: places)
         ) else {
             throw MovesIntentError.exportFailed
         }

@@ -53,6 +53,7 @@ struct OccupancyChartView: View {
                 .chartLegend(.hidden)
                 .frame(height: 168)
                 .accessibilityLabel(grid.peakSummary)
+                .accessibilityChartDescriptor(OccupancyChartDescriptor(grid: grid, calendar: calendar))
             } else {
                 Text(String(localized: "Visit this place a few more times to see a weekly pattern."))
                     .font(.system(.footnote, design: .rounded))
@@ -116,5 +117,48 @@ struct OccupancyChartCell: Identifiable, Equatable {
             }
         }
         return result
+    }
+}
+
+/// VoiceOver data series for the 7×24 occupancy heatmap.
+private struct OccupancyChartDescriptor: AXChartDescriptorRepresentable {
+    let grid: OccupancyGrid
+    var calendar: Calendar
+
+    func makeChartDescriptor() -> AXChartDescriptor {
+        let labels = OccupancyChartCell.orderedWeekdaySymbols(calendar: calendar)
+        let cells = OccupancyChartCell.cells(from: grid, calendar: calendar)
+        return AXChartDescriptor(
+            title: String(localized: "When you’re usually there"),
+            summary: grid.peakSummary,
+            xAxis: AXNumericDataAxisDescriptor(
+                title: String(localized: "Hour"),
+                range: 0...23,
+                gridlinePositions: [0, 6, 12, 18]
+            ) { "\(Int($0))" },
+            yAxis: AXNumericDataAxisDescriptor(
+                title: String(localized: "Visits"),
+                range: 0...Double(max(grid.maximum, 1)),
+                gridlinePositions: []
+            ) { "\(Int($0))" },
+            additionalAxes: [
+                AXCategoricalDataAxisDescriptor(
+                    title: String(localized: "Day"),
+                    categoryOrder: labels
+                )
+            ],
+            series: [
+                AXDataSeriesDescriptor(
+                    name: String(localized: "Visits"),
+                    isContinuous: false,
+                    dataPoints: cells.map { cell in
+                        AXDataPoint(
+                            x: Double(cell.hour),
+                            y: Double(cell.count)
+                        )
+                    }
+                )
+            ]
+        )
     }
 }

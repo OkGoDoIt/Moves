@@ -8,6 +8,8 @@ final class RouteTrackingLiveActivityCoordinator {
     private var distanceMeters: CLLocationDistance = 0
     private var sampleCount = 0
     private var lastPublishedAt: Date?
+    private var colorAssetName = "MovesTransportWalking"
+    private var symbolName = "figure.walk"
 
     func synchronize(startedAt: Date?, endsAt: Date?) async {
         guard let startedAt, let endsAt, endsAt > .now else {
@@ -20,6 +22,8 @@ final class RouteTrackingLiveActivityCoordinator {
            abs(existing.attributes.startedAt.timeIntervalSince(startedAt)) < 1 {
             distanceMeters = existing.content.state.distanceMeters
             sampleCount = existing.content.state.sampleCount
+            colorAssetName = existing.content.state.colorAssetName
+            symbolName = existing.content.state.symbolName
             await publish(on: existing, endsAt: endsAt)
             return
         }
@@ -34,7 +38,9 @@ final class RouteTrackingLiveActivityCoordinator {
             endsAt: endsAt,
             distanceMeters: 0,
             sampleCount: 0,
-            lastUpdatedAt: .now
+            lastUpdatedAt: .now,
+            colorAssetName: colorAssetName,
+            symbolName: symbolName
         )
         let content = ActivityContent(state: state, staleDate: endsAt)
 
@@ -51,7 +57,7 @@ final class RouteTrackingLiveActivityCoordinator {
         }
     }
 
-    func record(_ locations: [CLLocation], endsAt: Date?) async {
+    func record(_ locations: [CLLocation], endsAt: Date?, mode: TransportMode? = nil) async {
         guard let endsAt, endsAt > .now, !locations.isEmpty else { return }
 
         for location in locations.sorted(by: { $0.timestamp < $1.timestamp }) {
@@ -63,6 +69,12 @@ final class RouteTrackingLiveActivityCoordinator {
             }
             lastLocation = location
             sampleCount += 1
+        }
+
+        if let mode {
+            apply(mode)
+        } else if !locations.isEmpty {
+            apply(CoreMotionTransportClassifier.inferredMode(from: locations))
         }
 
         let now = Date.now
@@ -77,7 +89,9 @@ final class RouteTrackingLiveActivityCoordinator {
                 endsAt: min($0.content.state.endsAt, .now),
                 distanceMeters: distanceMeters,
                 sampleCount: sampleCount,
-                lastUpdatedAt: .now
+                lastUpdatedAt: .now,
+                colorAssetName: colorAssetName,
+                symbolName: symbolName
             )
         }
         let finalContent = finalState.map { ActivityContent(state: $0, staleDate: nil) }
@@ -90,6 +104,20 @@ final class RouteTrackingLiveActivityCoordinator {
         distanceMeters = 0
         sampleCount = 0
         lastPublishedAt = nil
+        colorAssetName = "MovesTransportWalking"
+        symbolName = "figure.walk"
+    }
+
+    private func apply(_ mode: TransportMode) {
+        let displayMode: TransportMode
+        switch mode {
+        case .stationary, .unknown:
+            displayMode = .walking
+        default:
+            displayMode = mode
+        }
+        colorAssetName = MovesPalette.transportColorAssetName(for: displayMode)
+        symbolName = displayMode.symbolName
     }
 
     private func publish(
@@ -100,7 +128,9 @@ final class RouteTrackingLiveActivityCoordinator {
             endsAt: endsAt,
             distanceMeters: distanceMeters,
             sampleCount: sampleCount,
-            lastUpdatedAt: .now
+            lastUpdatedAt: .now,
+            colorAssetName: colorAssetName,
+            symbolName: symbolName
         )
         await activity.update(ActivityContent(state: state, staleDate: endsAt))
         lastPublishedAt = .now

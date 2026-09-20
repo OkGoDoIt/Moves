@@ -160,7 +160,7 @@ struct MovesApp: App {
     /// development profile, for instance, carries no iCloud identifiers. App Store
     /// builds embed no profile at all and are signed by Apple straight from the
     /// project's entitlements, so a missing profile means "trust the entitlements".
-    private static func allowsCloudKitContainer() -> Bool {
+    static func allowsCloudKitContainer() -> Bool {
         guard let entitlements = embeddedProvisioningEntitlements() else { return true }
         let containers = entitlements["com.apple.developer.icloud-container-identifiers"] as? [String]
         return containers?.contains(cloudKitContainerIdentifier) ?? false
