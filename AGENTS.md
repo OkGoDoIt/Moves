@@ -96,6 +96,7 @@ Optional: `DEVICE_UDID=... ./Scripts/install-iphone.sh`.
 | Route matching / path policy | `Moves/RoadRouteMatcher.swift` (`RoadRouteMatcher`, `RouteMatchPlausibility`, `DirectionsProvider`); Path control in `MovesDetailViews.swift`; Settings → Map Appearance Path level |
 | Models + repository | `Moves/VisitedLocation.swift` (`DayTimeline`, `VisitPlace`, `MoveSegment`, `LocationSample`, `KnownPlace`, `PhotoAttachment`, `PlaceCorrectionEvent`, `VisitedCell`, `NamedTrip`) |
 | Place learning | `Moves/PlaceLearningEngine.swift` (resolve / learn / negatives / merge / clampRadius); hooked from `DefaultTimelineAssembler.ingestVisit` and `SwiftDataTimelineRepository`. Places tab occupancy, merge, and shrink consume these APIs. |
+| Photos | `Moves/Photos/` (`PhotoLibraryService`, `PhotoHistoryImporter`, `PhotoAttachmentQuery`, storyline + range thumbnail strips, Settings → Photos). Read-only PhotoKit; Limited Library explained in Settings. Never modifies the library. Named trips (WS9b) lens `PhotoAttachment` rows in a date range — they do not copy photos. |
 | Timeline lookup / schema upgrade | `Moves/TimelineLocator.swift`, `Moves/TimelineSchemaUpgrader.swift` |
 | Route rendering / speed shading | `Moves/RouteRendering.swift`, `Moves/SpeedProfileBuilder.swift` |
 | Settings, export, integrations | `Moves/MovesSettingsView.swift`, `Moves/DawarichSync.swift` |

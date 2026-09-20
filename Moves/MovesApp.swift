@@ -52,6 +52,7 @@ struct MovesApp: App {
     @StateObject private var healthWorkoutRouteAutoImporter: HealthWorkoutRouteAutoImportManager
     @StateObject private var cloudDataPresencePublisher: MovesCloudDataPresencePublisher
     @StateObject private var locationServiceSyncManager: LocationServiceSyncManager
+    @StateObject private var photoLibraryController: PhotoLibraryController
 
     init() {
         do {
@@ -72,6 +73,9 @@ struct MovesApp: App {
             )
             _locationServiceSyncManager = StateObject(
                 wrappedValue: LocationServiceSyncManager(modelContainer: container)
+            )
+            _photoLibraryController = StateObject(
+                wrappedValue: PhotoLibraryController(modelContainer: container)
             )
             MovesIntentRuntime.shared.configure(
                 modelContainer: container,
@@ -193,6 +197,7 @@ struct MovesApp: App {
                 .environmentObject(healthWorkoutRouteAutoImporter)
                 .environmentObject(cloudDataPresencePublisher)
                 .environmentObject(locationServiceSyncManager)
+                .environmentObject(photoLibraryController)
         }
         .modelContainer(sharedModelContainer)
         .onChange(of: scenePhase) { _, newPhase in
@@ -207,6 +212,7 @@ struct MovesApp: App {
                     await healthWorkoutRouteAutoImporter.startIfNeeded()
                     await cloudDataPresencePublisher.publishNow()
                     await locationServiceSyncManager.syncNewSamplesIfEnabled()
+                    await photoLibraryController.handleSceneBecameActive()
                 }
                 Task(priority: .utility) {
                     await ShareMapAggregateBuilder.refreshAll(in: sharedModelContainer)

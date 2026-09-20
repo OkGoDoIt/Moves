@@ -73,6 +73,10 @@ struct DayTimelinePage: View {
         .task(id: pageLoadKey) {
             await syncDayTimelineForActivation()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .movesPhotoLibraryDidChange)) { _ in
+            guard isActive else { return }
+            Task { await loadDayTimeline() }
+        }
     }
 
     private var pageLoadKey: String {
@@ -269,6 +273,17 @@ struct DayTimelinePageContent: View {
             .joined(separator: ",")
     }
 
+    /// Place origins and photo counts, so inferred visits and thumbnails refresh.
+    private var photoStripRefreshKey: String {
+        let places = dayTimeline.places
+            .sorted { $0.id.uuidString < $1.id.uuidString }
+            .map { place in
+                "\(place.id.uuidString)|\(place.originRaw)|\(place.photoAttachments.count)"
+            }
+            .joined(separator: ",")
+        return "\(places)|\(dayTimeline.photos.count)"
+    }
+
     /// Shared with activity bubbles and Insights. Bucketed walking+running stays
     /// available; the bubble row uses per-mode `ActivityBubbleMetrics` instead.
     static func transportSummaryMetrics(for dayTimeline: DayTimeline) -> [DayTransportSummaryMetric] {
@@ -338,6 +353,9 @@ struct DayTimelinePageContent: View {
             isMapExpanded = false
         }
         .onChange(of: transportSummaryRefreshKey) { _, _ in
+            presentationCache = Self.makePresentationCache(for: dayTimeline)
+        }
+        .onChange(of: photoStripRefreshKey) { _, _ in
             presentationCache = Self.makePresentationCache(for: dayTimeline)
         }
         .onChange(of: mapSelection) { _, selection in
@@ -1902,6 +1920,10 @@ private struct StorylineRowBody: View {
                     .font(.system(size: 11, weight: .medium, design: .rounded))
                     .foregroundStyle(.secondary)
             }
+
+            if case .place(let place) = entry {
+                VisitPhotoThumbnailStrip(attachments: place.photoAttachments)
+            }
         }
         .padding(.leading, 8)
         .padding(.top, 6)
@@ -2002,8 +2024,8 @@ enum TimelineEntry: Identifiable {
 
     var iconName: String {
         switch self {
-        case .place:
-            return "mappin.circle.fill"
+        case .place(let place):
+            return place.origin == .photoInferred ? "camera.fill" : "mappin.circle.fill"
         case .move(let segment):
             return segment.transportMode.symbolName
         case .liveRoute:
@@ -2142,6 +2164,8 @@ enum TimelineEntry: Identifiable {
 
     var tertiaryText: String? {
         switch self {
+        case .place(let place) where place.origin == .photoInferred:
+            return String(localized: "From photos")
         case .move(let segment):
             var details: [String] = []
 
