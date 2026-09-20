@@ -41,6 +41,7 @@ final class MovesRootController: ObservableObject {
     @Published var shouldOpenToday = false
     @Published var requestedPlaceID: UUID?
     @Published var requestedJumpDate: Date?
+    @Published var isShowingReviewInbox = false
 
     /// Honors `MOVES_START_TAB` so agents can screenshot a destination without tapping.
     private static func initialTab() -> MovesTab {
@@ -60,19 +61,29 @@ struct MovesRootView: View {
     @Environment(\.modelContext) private var modelContext
 
     @StateObject private var controller = MovesRootController()
+    @State private var editController = TimelineEditController()
+    @State private var undoToast = UndoToastPresenter()
 
     @Query(sort: \DayTimeline.dayStart, order: .forward)
     private var dayTimelines: [DayTimeline]
+
+    @Query(filter: #Predicate<VisitPlace> { $0.reviewStateRaw == "pending" })
+    private var pendingReviewVisits: [VisitPlace]
+
+    @Query(filter: #Predicate<MoveSegment> { $0.reviewStateRaw == "pending" })
+    private var pendingReviewMoves: [MoveSegment]
 
     private var selectedDay: DayTimeline? {
         dayTimelines.first { $0.dayKey == controller.selectedDayKey } ?? dayTimelines.last
     }
 
     var body: some View {
+        @Bindable var editor = editController
         TabView(selection: $controller.selectedTab) {
             Tab("Timeline", systemImage: "calendar", value: MovesTab.timeline) {
                 ContentView()
             }
+            .badge(pendingReviewVisits.count + pendingReviewMoves.count)
 
             Tab("Map", systemImage: "map", value: MovesTab.map) {
                 MovesPlaceholderTabView(
@@ -102,8 +113,16 @@ struct MovesRootView: View {
             }
         }
         .environmentObject(controller)
+        .environment(\.timelineItemActions, editController)
+        .environment(\.timelineEditController, editController)
+        .environment(\.undoToastPresenter, undoToast)
         .onAppear {
             modelContext.undoManager = undoController.manager
+            editController.attach(
+                modelContext: modelContext,
+                undoController: undoController,
+                toast: undoToast
+            )
         }
         .sheet(isPresented: $controller.isShowingSettings) {
             MovesSettingsView(
@@ -134,6 +153,38 @@ struct MovesRootView: View {
             )
         }
         .onOpenURL(perform: handleDeepLink)
+        .sheet(isPresented: $controller.isShowingReviewInbox) {
+            ReviewInboxView()
+        }
+        .sheet(item: $editor.presentedSheet) { sheet in
+            editSheet(sheet)
+        }
+        .confirmationDialog(
+            String(localized: "Delete Place?"),
+            isPresented: Binding(
+                get: { editController.confirmDeletePlaceID != nil },
+                set: { if !$0 { editController.confirmDeletePlaceID = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button(String(localized: "Delete"), role: .destructive) {
+                editController.confirmPendingPlaceDeletion()
+            }
+            Button(String(localized: "Cancel"), role: .cancel) {
+                editController.confirmDeletePlaceID = nil
+            }
+        } message: {
+            Text(String(localized: "This stay was longer than an hour. You can undo afterwards."))
+        }
+        .alert(
+            String(localized: "Couldn’t update the timeline"),
+            isPresented: $editor.isShowingError
+        ) {
+            Button(String(localized: "OK"), role: .cancel) {}
+        } message: {
+            Text(editController.errorMessage ?? "")
+        }
+        .undoToast(undoToast)
         .overlay {
             ShakeToUndoDetector(undoManager: undoController.manager) {
                 handleShakeToUndo()
@@ -141,6 +192,40 @@ struct MovesRootView: View {
             .frame(width: 1, height: 1)
             .opacity(0.01)
             .accessibilityHidden(true)
+        }
+    }
+
+    @ViewBuilder
+    private func editSheet(_ sheet: TimelineEditSheet) -> some View {
+        switch sheet {
+        case .rename(let id):
+            if let visit = editController.visit(id: id) {
+                PlaceRenameSheet(visit: visit, editController: editController)
+            }
+        case .pickNearby(let id):
+            if let visit = editController.visit(id: id) {
+                PlaceRenameSheet(visit: visit, focusesNearby: true, editController: editController)
+            }
+        case .editTimes(let id):
+            if let visit = editController.visit(id: id) {
+                EditTimesSheet(
+                    visit: visit,
+                    bounds: editController.timeBounds(for: visit),
+                    editController: editController
+                )
+            }
+        case .splitVisit(let id):
+            if let visit = editController.visit(id: id) {
+                SplitSheet(target: .visit(visit), editController: editController)
+            }
+        case .splitMove(let id):
+            if let move = editController.move(id: id) {
+                SplitSheet(target: .move(move), editController: editController)
+            }
+        case .changeMode(let id):
+            if let move = editController.move(id: id) {
+                TransportModePickerSheet(move: move, editController: editController)
+            }
         }
     }
 
@@ -167,23 +252,15 @@ struct MovesRootView: View {
             controller.selectedTab = .insights
         case "review":
             controller.selectedTab = .timeline
+            controller.isShowingReviewInbox = true
         default:
             break
         }
     }
 
     private func handleShakeToUndo() {
-        let undoManager = undoController.manager
-        guard undoManager.canUndo else { return }
-        modelContext.undoManager = undoManager
-        undoManager.undo()
-        if modelContext.hasChanges {
-            do {
-                try modelContext.save()
-            } catch {
-                print("Failed to save undo changes: \(error.localizedDescription)")
-            }
-        }
+        undoToast.dismiss()
+        editController.undoLastChange()
     }
 }
 
