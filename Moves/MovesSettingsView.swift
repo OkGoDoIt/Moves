@@ -18,6 +18,7 @@ struct MovesSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var locationServiceSyncManager: LocationServiceSyncManager
+    @EnvironmentObject private var webhookSyncManager: WebhookSyncManager
     @AppStorage(MapMarkerDisplaySettings.showsBigMarkersKey) private var showsBigMarkers = false
     @AppStorage(RouteSnappingLevel.storageKey) private var snappingLevel = RouteSnappingLevel.normal.rawValue
     @AppStorage(LandscapeLayoutSettings.controlsOnLeftKey) private var landscapeControlsOnLeft = false
@@ -68,12 +69,21 @@ struct MovesSettingsView: View {
             .min()
     }
 
-    /// `MOVES_OPEN_GOOGLE_IMPORT=1` scrolls so the folder-first Google Timeline row is on screen.
+    /// `MOVES_OPEN_GOOGLE_IMPORT=1` and `MOVES_OPEN_WEBHOOK=1` scroll Settings to those rows.
     private func scrollToScreenshotAnchorIfNeeded(_ proxy: ScrollViewProxy) {
-        guard ProcessInfo.processInfo.environment["MOVES_OPEN_GOOGLE_IMPORT"] == "1" else { return }
+        let env = ProcessInfo.processInfo.environment
+        let anchor: String?
+        if env["MOVES_OPEN_GOOGLE_IMPORT"] == "1" {
+            anchor = SettingsScreenshotAnchor.importCard
+        } else if env["MOVES_OPEN_WEBHOOK"] == "1" {
+            anchor = SettingsScreenshotAnchor.webhookRow
+        } else {
+            anchor = nil
+        }
+        guard let anchor else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
             withAnimation(.easeInOut(duration: 0.25)) {
-                proxy.scrollTo(SettingsScreenshotAnchor.importCard, anchor: .top)
+                proxy.scrollTo(anchor, anchor: .top)
             }
         }
     }
@@ -184,7 +194,19 @@ struct MovesSettingsView: View {
                             .buttonStyle(.plain)
                         }
 
-                        Text("Optionally upload recorded points to one or more supported cloud or self-hosted location servers.")
+                        NavigationLink {
+                            WebhookSettingsView()
+                        } label: {
+                            SettingsNavigationRow(
+                                title: "Webhook",
+                                systemImage: "link",
+                                status: webhookSyncManager.connectionSummary
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .id(SettingsScreenshotAnchor.webhookRow)
+
+                        Text("Optionally upload recorded points to one or more supported cloud or self-hosted location servers, or to any HTTPS webhook.")
                             .font(.system(size: 12, weight: .medium, design: .rounded))
                             .foregroundStyle(.secondary)
                     }
@@ -230,6 +252,30 @@ struct MovesSettingsView: View {
                             isDisabled: dayTimelines.isEmpty
                         ) {
                             export(.csv, scope: .allDays)
+                        }
+
+                        SettingsActionRow(
+                            title: "Selected Day (.kml)",
+                            systemImage: "globe.europe.africa",
+                            isDisabled: dayTimelines.isEmpty
+                        ) {
+                            export(.kml, scope: .selectedDay)
+                        }
+
+                        SettingsActionRow(
+                            title: "All Days (.kml)",
+                            systemImage: "globe",
+                            isDisabled: dayTimelines.isEmpty
+                        ) {
+                            export(.kml, scope: .allDays)
+                        }
+
+                        SettingsActionRow(
+                            title: "Everything (.zip)",
+                            systemImage: "archivebox",
+                            isDisabled: dayTimelines.isEmpty
+                        ) {
+                            exportZip()
                         }
                     }
 
@@ -280,7 +326,7 @@ struct MovesSettingsView: View {
                         }
                         .buttonStyle(.plain)
 
-                        Text("Google Timeline imports a Takeout Location History folder (semantic months first, then Records.json). Use Moves timeline export to restore another Moves install. Files import rebuilds places and trips from any timestamped GPS log. Health import adds workout routes.")
+                        Text("Google Timeline imports a Takeout Location History folder (semantic months first, then Records.json). Use Moves timeline export to restore another Moves install from GPX, GeoJSON, CSV, or zip. Files import rebuilds places and trips from any timestamped GPS log. Health import adds workout routes.")
                             .font(.system(size: 12, weight: .medium, design: .rounded))
                             .foregroundStyle(.secondary)
                     }
@@ -435,6 +481,34 @@ struct MovesSettingsView: View {
             days: days,
             format: format,
             fileStem: "moves-\(scopeName)"
+        ) else {
+            exportMessage = "Could not build export file."
+            isShowingExportMessage = true
+            return
+        }
+
+        exportDocument = TimelineExportDocument(data: payload.data)
+        exportContentType = payload.contentType
+        exportFilename = payload.filename
+        isExporting = true
+    }
+
+    /// Writes GPX, GeoJSON, CSV, KML, `places.json`, and `photos.csv` into one zip.
+    private func exportZip() {
+        guard !dayTimelines.isEmpty else {
+            exportMessage = "No timeline data available yet."
+            isShowingExportMessage = true
+            return
+        }
+
+        let knownPlaces = (try? modelContext.fetch(FetchDescriptor<KnownPlace>())) ?? []
+        let photos = (try? modelContext.fetch(FetchDescriptor<PhotoAttachment>())) ?? []
+
+        guard let payload = TimelineExporter.makeZipPayload(
+            days: dayTimelines,
+            knownPlaces: knownPlaces,
+            photos: photos,
+            fileStem: "moves-all-days"
         ) else {
             exportMessage = "Could not build export file."
             isShowingExportMessage = true
@@ -1237,7 +1311,8 @@ private struct RouteTrackingSettingsSection: View {
     }
 }
 
-/// Screenshot-agent scroll target for Settings → Import.
+/// Screenshot-agent scroll targets in Settings.
 private enum SettingsScreenshotAnchor {
     static let importCard = "settings.import"
+    static let webhookRow = "settings.webhook"
 }

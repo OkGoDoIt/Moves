@@ -815,10 +815,11 @@ enum TimelineExportFormat {
     case gpx
     case geoJSON
     case csv
+    case kml
 
     var contentType: UTType {
         switch self {
-        case .gpx:
+        case .gpx, .kml:
             return .xml
         case .geoJSON:
             return .json
@@ -835,6 +836,8 @@ enum TimelineExportFormat {
             return "geojson"
         case .csv:
             return "csv"
+        case .kml:
+            return "kml"
         }
     }
 }
@@ -853,7 +856,7 @@ struct TimelineTrackPoint {
 }
 
 struct TimelineExportDocument: FileDocument {
-    static var readableContentTypes: [UTType] = [.xml, .json, .commaSeparatedText]
+    static var readableContentTypes: [UTType] = [.xml, .json, .commaSeparatedText, .zip]
 
     let data: Data
 
@@ -912,6 +915,8 @@ enum TimelineExporter {
             exportData = geoJSONData(for: orderedDays)
         case .csv:
             exportData = csvData(for: orderedDays)
+        case .kml:
+            exportData = kmlData(for: orderedDays)
         }
 
         guard let exportData else { return nil }
@@ -919,6 +924,44 @@ enum TimelineExporter {
             data: exportData,
             filename: "\(fileStem).\(format.fileExtension)",
             contentType: format.contentType
+        )
+    }
+
+    /// One zip containing GPX, GeoJSON, CSV, KML, learned places, and photo identifiers.
+    static func makeZipPayload(
+        days: [DayTimeline],
+        knownPlaces: [KnownPlace],
+        photos: [PhotoAttachment],
+        fileStem: String
+    ) -> TimelineExportPayload? {
+        let orderedDays = days.sorted(by: { $0.dayStart < $1.dayStart })
+        guard !orderedDays.isEmpty else { return nil }
+
+        var files: [MovesZipFile] = []
+        if let gpx = gpxData(for: orderedDays) {
+            files.append(MovesZipFile(path: "\(fileStem).gpx", data: gpx))
+        }
+        if let geoJSON = geoJSONData(for: orderedDays) {
+            files.append(MovesZipFile(path: "\(fileStem).geojson", data: geoJSON))
+        }
+        if let csv = csvData(for: orderedDays) {
+            files.append(MovesZipFile(path: "\(fileStem).csv", data: csv))
+        }
+        if let kml = kmlData(for: orderedDays) {
+            files.append(MovesZipFile(path: "\(fileStem).kml", data: kml))
+        }
+        if let places = placesJSONData(knownPlaces) {
+            files.append(MovesZipFile(path: "places.json", data: places))
+        }
+        if let photosCSV = photosCSVData(photos) {
+            files.append(MovesZipFile(path: "photos.csv", data: photosCSV))
+        }
+        guard !files.isEmpty else { return nil }
+
+        return TimelineExportPayload(
+            data: MovesZipArchive.pack(files),
+            filename: "\(fileStem).zip",
+            contentType: .zip
         )
     }
 
@@ -1085,6 +1128,99 @@ enum TimelineExporter {
         """
 
         return xml.data(using: .utf8)
+    }
+
+    private static func kmlData(for days: [DayTimeline]) -> Data? {
+        var xml = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <kml xmlns="http://www.opengis.net/kml/2.2">
+          <Document>
+            <name>Moves</name>
+        """
+
+        for day in days {
+            for place in day.places.sorted(by: { $0.arrivalDate < $1.arrivalDate }) {
+                xml += """
+
+            <Placemark>
+              <name>\(xmlEscaped(place.displayTitle))</name>
+              <TimeStamp><when>\(iso8601.string(from: place.arrivalDate))</when></TimeStamp>
+              <Point>
+                <coordinates>\(coordinateString(place.longitude)),\(coordinateString(place.latitude)),0</coordinates>
+              </Point>
+            </Placemark>
+            """
+            }
+
+            for move in day.moves.sorted(by: { $0.timelineStartDate < $1.timelineStartDate }) {
+                let points = routePoints(for: move)
+                guard points.count > 1 else { continue }
+                let title = "\(move.startPlace?.displayTitle ?? "Unknown start") to \(move.endPlace?.displayTitle ?? "Unknown destination")"
+                let coordinates = points
+                    .map { "\(coordinateString($0.longitude)),\(coordinateString($0.latitude)),0" }
+                    .joined(separator: " ")
+                xml += """
+
+            <Placemark>
+              <name>\(xmlEscaped(title))</name>
+              <description>\(xmlEscaped(move.transportMode.title))</description>
+              <LineString>
+                <tessellate>1</tessellate>
+                <coordinates>\(coordinates)</coordinates>
+              </LineString>
+            </Placemark>
+            """
+            }
+        }
+
+        xml += """
+
+          </Document>
+        </kml>
+        """
+        return xml.data(using: .utf8)
+    }
+
+    private static func placesJSONData(_ places: [KnownPlace]) -> Data? {
+        let payload: [[String: Any]] = places
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            .map { place in
+                var object: [String: Any] = [
+                    "id": place.id.uuidString,
+                    "name": place.name,
+                    "latitude": place.centerLatitude,
+                    "longitude": place.centerLongitude,
+                    "footprint_radius": place.footprintRadius,
+                    "confirmed_visit_count": place.confirmedVisitCount,
+                ]
+                if let category = place.category { object["category"] = category }
+                if let countryCode = place.countryCode { object["country_code"] = countryCode }
+                if let locality = place.locality { object["locality"] = locality }
+                return object
+            }
+        return try? JSONSerialization.data(
+            withJSONObject: payload,
+            options: [.prettyPrinted, .sortedKeys]
+        )
+    }
+
+    private static func photosCSVData(_ photos: [PhotoAttachment]) -> Data? {
+        var rows = ["asset_local_identifier,captured_at,visit_id,day_key"]
+        for photo in photos.sorted(by: { $0.capturedAt < $1.capturedAt }) {
+            let visitID = photo.visitPlace?.id.uuidString ?? ""
+            let dayKey = photo.dayTimeline?.dayKey
+                ?? photo.visitPlace?.dayTimeline?.dayKey
+                ?? ""
+            rows.append(
+                [
+                    csvEscaped(photo.assetLocalIdentifier),
+                    iso8601.string(from: photo.capturedAt),
+                    csvEscaped(visitID),
+                    csvEscaped(dayKey),
+                ].joined(separator: ",")
+            )
+        }
+        return rows.joined(separator: "\n").data(using: .utf8)
     }
 
     private static func geoJSONData(for days: [DayTimeline]) -> Data? {

@@ -53,6 +53,7 @@ struct MovesApp: App {
     @StateObject private var cloudDataPresencePublisher: MovesCloudDataPresencePublisher
     @StateObject private var locationServiceSyncManager: LocationServiceSyncManager
     @StateObject private var photoLibraryController: PhotoLibraryController
+    @StateObject private var webhookSyncManager: WebhookSyncManager
 
     init() {
         do {
@@ -76,6 +77,9 @@ struct MovesApp: App {
             )
             _photoLibraryController = StateObject(
                 wrappedValue: PhotoLibraryController(modelContainer: container)
+            )
+            _webhookSyncManager = StateObject(
+                wrappedValue: WebhookSyncManager(modelContainer: container)
             )
             MovesIntentRuntime.shared.configure(
                 modelContainer: container,
@@ -198,6 +202,7 @@ struct MovesApp: App {
                 .environmentObject(cloudDataPresencePublisher)
                 .environmentObject(locationServiceSyncManager)
                 .environmentObject(photoLibraryController)
+                .environmentObject(webhookSyncManager)
         }
         .modelContainer(sharedModelContainer)
         .onChange(of: scenePhase) { _, newPhase in
@@ -213,6 +218,7 @@ struct MovesApp: App {
                     await cloudDataPresencePublisher.publishNow()
                     await locationServiceSyncManager.syncNewSamplesIfEnabled()
                     await photoLibraryController.handleSceneBecameActive()
+                    await webhookSyncManager.syncNewItemsIfEnabled()
                 }
                 Task(priority: .utility) {
                     await ShareMapAggregateBuilder.refreshAll(in: sharedModelContainer)
