@@ -48,6 +48,8 @@ final class MovesRootController: ObservableObject {
     @Published var isShowingReviewInbox = false
     /// Applied once from `moves://map?from=&to=`, then cleared.
     @Published var requestedMapInterval: DateInterval?
+    /// Opens a trip from `moves://trip/{uuid}`.
+    @Published var requestedTripID: UUID?
 
     /// Honors `MOVES_START_TAB` so agents can screenshot a destination without tapping.
     private static func initialTab() -> MovesTab {
@@ -100,12 +102,7 @@ struct MovesRootView: View {
             }
 
             Tab("Insights", systemImage: "chart.xyaxis.line", value: MovesTab.insights) {
-                MovesPlaceholderTabView(
-                    title: MovesTab.insights.title,
-                    symbolName: "chart.xyaxis.line",
-                    summary: String(localized: "Your year at a glance."),
-                    detail: String(localized: "Distance, countries, streaks, and time-of-day patterns — compared with last year when there’s enough history.")
-                )
+                InsightsTripsGatewayView()
             }
         }
         .environmentObject(controller)
@@ -288,6 +285,10 @@ struct MovesRootView: View {
             controller.selectedTab = .places
         case "insights":
             controller.selectedTab = .insights
+        case "trip":
+            guard let tripID = TripDeepLink.tripID(from: url) else { return }
+            controller.selectedTab = .insights
+            controller.requestedTripID = tripID
         case "review":
             controller.selectedTab = .timeline
             controller.isShowingReviewInbox = true

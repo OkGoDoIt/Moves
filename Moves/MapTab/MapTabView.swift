@@ -27,6 +27,9 @@ struct MapTabView: View {
     @State private var selectedRouteID: UUID?
     @State private var isShowingRangeSheet = false
     @State private var isShowingShare = false
+    @State private var isShowingSaveTrip = false
+    @State private var isShowingTrips = false
+    @State private var presentedTripID: UUID?
     @State private var knownModes: Set<TransportMode> = []
 
     private var calendar: Calendar { .autoupdatingCurrent }
@@ -100,6 +103,9 @@ struct MapTabView: View {
         .onAppear {
             applyRequestedInterval(controller.requestedMapInterval)
         }
+        .task {
+            await applyScreenshotLaunchFlags()
+        }
         .sheet(isPresented: $isShowingRangeSheet) {
             MapRangeSheet(selection: $selection) {
                 isShowingRangeSheet = false
@@ -111,6 +117,43 @@ struct MapTabView: View {
                 initialDate: selection.focus.start,
                 initialPeriod: selection.sharePeriod
             )
+        }
+        .sheet(isPresented: $isShowingSaveTrip) {
+            SaveTripSheet(interval: selection.focus) { trip in
+                presentedTripID = trip.id
+            }
+        }
+        .sheet(isPresented: $isShowingTrips) {
+            NavigationStack {
+                TripListView()
+                    .navigationDestination(for: UUID.self) { tripID in
+                        TripDetailView(tripID: tripID)
+                    }
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button(String(localized: "Done")) {
+                                isShowingTrips = false
+                            }
+                        }
+                    }
+            }
+        }
+        .sheet(isPresented: Binding(
+            get: { presentedTripID != nil },
+            set: { if !$0 { presentedTripID = nil } }
+        )) {
+            if let presentedTripID {
+                NavigationStack {
+                    TripDetailView(tripID: presentedTripID)
+                        .toolbar {
+                            ToolbarItem(placement: .cancellationAction) {
+                                Button(String(localized: "Done")) {
+                                    self.presentedTripID = nil
+                                }
+                            }
+                        }
+                }
+            }
         }
     }
 
@@ -152,7 +195,9 @@ struct MapTabView: View {
                     selectedRouteID = nil
                     selection = selection.stepped(by: delta, now: .now, calendar: calendar)
                 },
-                onOpenSheet: { isShowingRangeSheet = true }
+                onOpenSheet: { isShowingRangeSheet = true },
+                onSaveAsTrip: { isShowingSaveTrip = true },
+                onOpenTrips: { isShowingTrips = true }
             )
             .frame(maxWidth: .infinity)
 
@@ -340,6 +385,52 @@ struct MapTabView: View {
         guard let interval else { return }
         selection = .custom(start: interval.start, end: interval.end, calendar: calendar)
         controller.requestedMapInterval = nil
+    }
+
+    /// `MOVES_OPEN_SAVE_TRIP` / `MOVES_OPEN_TRIP` wait for the demo seeder, then open the sheet or detail.
+    private func applyScreenshotLaunchFlags() async {
+        let env = ProcessInfo.processInfo.environment
+        let wantsSave = env["MOVES_OPEN_SAVE_TRIP"] == "1"
+        let wantsDetail = env["MOVES_OPEN_TRIP"] == "1"
+        guard wantsSave || wantsDetail else { return }
+        await waitForSeededDays()
+        if wantsSave {
+            isShowingSaveTrip = true
+        }
+        if wantsDetail {
+            presentedTripID = ensureScreenshotTrip().id
+        }
+    }
+
+    private func waitForSeededDays() async {
+        for _ in 0..<60 {
+            if dayTimelines.contains(where: { !$0.places.isEmpty || !$0.moves.isEmpty }) {
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(500))
+        }
+    }
+
+    /// Reuses an existing trip covering the current range, or saves one for screenshots.
+    private func ensureScreenshotTrip() -> NamedTrip {
+        let interval = selection.focus
+        let existing = (try? modelContext.fetch(FetchDescriptor<NamedTrip>())) ?? []
+        if let match = existing.first(where: {
+            abs($0.startDate.timeIntervalSince(interval.start)) < 2
+                && abs($0.endDate.timeIntervalSince(interval.end)) < 2
+        }) {
+            return match
+        }
+        let visits = (try? SwiftDataTimelineRepository(modelContext: modelContext).visits(in: interval)) ?? []
+        let trip = NamedTrip(
+            name: TripRangeStats.defaultName(visits: visits, interval: interval, calendar: calendar),
+            startDate: interval.start,
+            endDate: interval.end,
+            notes: String(localized: "Saved from the Map range.")
+        )
+        modelContext.insert(trip)
+        try? modelContext.save()
+        return trip
     }
 }
 

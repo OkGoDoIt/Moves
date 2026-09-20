@@ -248,6 +248,15 @@
     "Delete Place" : {
 
     },
+    "Delete trip" : {
+
+    },
+    "Delete trip?" : {
+
+    },
+    "Days, visits, and photos stay on your timeline." : {
+
+    },
     "Delete Place?" : {
 
     },
@@ -473,6 +482,15 @@
     "No timeline yet" : {
 
     },
+    "No trips yet" : {
+
+    },
+    "No photos in this range" : {
+
+    },
+    "No recorded activity" : {
+
+    },
     "No Visits Yet" : {
 
     },
@@ -568,6 +586,18 @@
 
     },
     "Save" : {
+
+    },
+    "Save as trip" : {
+
+    },
+    "Save as trip…" : {
+
+    },
+    "Save trip" : {
+
+    },
+    "Saved from the Map range." : {
 
     },
     "Search by place, note, or date" : {
@@ -730,6 +760,21 @@
 
     },
     "Today" : {
+
+    },
+    "Trip" : {
+
+    },
+    "Trip actions" : {
+
+    },
+    "Trip map" : {
+
+    },
+    "Trip unavailable" : {
+
+    },
+    "Trips" : {
 
     },
     "Toggle Real Route Tracking" : {
@@ -937,6 +982,24 @@
 
     },
     "Open in Timeline" : {
+
+    },
+    "Open in Map" : {
+
+    },
+    "On the Map, choose a range and save it as a trip." : {
+
+    },
+    "Name" : {
+
+    },
+    "Notes" : {
+
+    },
+    "Photos" : {
+
+    },
+    "Choose a day, week, month, or year. Menu saves the range as a trip." : {
 
     }
   },
