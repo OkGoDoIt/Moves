@@ -7,7 +7,7 @@ import SwiftUI
 /// needs a few points of breathing room; map overlays ignore that inset and
 /// need an explicit lift so Path / remarks stay above the tab pill.
 enum MovesChromeMetrics {
-    /// Extra space under activity bubbles so they are not flush with the tab bar.
+    /// Extra space under mode chips so they are not flush with the tab bar.
     static let timelineTabBarBreathingRoom: CGFloat = 8
 
     /// Extra list/scroll padding so the last row sits above the floating tab pill.
@@ -79,7 +79,7 @@ enum StorylineClock {
 }
 
 /// Timeline tab: wraps day paging so capture stays above the tab bar, and
-/// hosts the header, activity bubbles, and moment-jump helpers that WS0
+/// hosts the header, mode chips, and moment-jump helpers that WS0
 /// left as a placeholder.
 struct TimelineTabView: View {
     var body: some View {
@@ -195,24 +195,14 @@ struct DayHeaderView: View {
     }
 }
 
-// MARK: - Activity bubbles
+// MARK: - Activity chips
 
-/// Diameter math for original-Moves-style activity bubbles. Sized by moving
-/// time, clamped to 44…64 pt so a short walk stays tappable and a long drive
-/// does not steal the storyline.
-enum ActivityBubbleSizing {
-    static let minimumDiameter: CGFloat = 44
-    static let maximumDiameter: CGFloat = 64
-
-    /// Linear interpolation from `minimumDiameter` to `maximumDiameter`.
-    static func diameter(duration: TimeInterval, maximumDuration: TimeInterval) -> CGFloat {
-        guard maximumDuration > 0 else { return minimumDiameter }
-        let fraction = min(max(duration / maximumDuration, 0), 1)
-        return minimumDiameter + (maximumDiameter - minimumDiameter) * fraction
-    }
+/// Compact height for the Timeline mode-filter chips (not the old 88pt bubbles).
+enum ActivityChipSizing {
+    static let rowHeight: CGFloat = 40
 }
 
-/// One transport mode’s moving time and distance for the bubble row.
+/// One transport mode’s moving time and distance for the chip row.
 struct ActivityBubbleMetric: Identifiable, Equatable {
     let mode: TransportMode
     let duration: TimeInterval
@@ -221,6 +211,7 @@ struct ActivityBubbleMetric: Identifiable, Equatable {
     var id: String { mode.rawValue }
 
     var title: String { mode.title }
+    var chipTitle: String { mode.chipTitle }
     var symbolName: String { mode.symbolName }
     var tint: Color { MovesPalette.transport(mode) }
 }
@@ -247,49 +238,36 @@ enum ActivityBubbleMetrics {
     }
 }
 
-/// Horizontal row of mode bubbles. Tap filters the day map to that mode;
-/// tapping the active bubble again clears the filter.
+/// Horizontal row of mode chips. Tap filters the day map to that mode;
+/// tapping the active chip again clears the filter.
 struct ActivityBubblesView: View {
     let metrics: [ActivityBubbleMetric]
     @Binding var filteredModes: Set<TransportMode>
-
-    private var maximumDuration: TimeInterval {
-        metrics.map(\.duration).max() ?? 0
-    }
-
-    private var rowHeight: CGFloat {
-        let diameter = ActivityBubbleSizing.diameter(
-            duration: maximumDuration,
-            maximumDuration: max(maximumDuration, 1)
-        )
-        return diameter + 46
-    }
 
     var body: some View {
         if metrics.isEmpty {
             EmptyView()
         } else {
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(alignment: .bottom, spacing: 18) {
+                HStack(spacing: 8) {
                     ForEach(metrics) { metric in
-                        bubble(for: metric)
+                        chip(for: metric)
                     }
                 }
-                .padding(.horizontal, 8)
+                .padding(.horizontal, 4)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .frame(height: rowHeight)
+            .frame(height: ActivityChipSizing.rowHeight)
             .accessibilityElement(children: .contain)
             .accessibilityLabel(String(localized: "Day activity"))
         }
     }
 
-    private func bubble(for metric: ActivityBubbleMetric) -> some View {
-        let diameter = ActivityBubbleSizing.diameter(
-            duration: metric.duration,
-            maximumDuration: maximumDuration
-        )
+    private func chip(for metric: ActivityBubbleMetric) -> some View {
         let isSelected = filteredModes.contains(metric.mode)
+        let duration = DurationFormatter.text(for: metric.duration)
+        let distance = Measurement(value: max(metric.distanceMeters, 0), unit: UnitLength.meters)
+            .formatted(.measurement(width: .abbreviated, usage: .road))
 
         return Button {
             withAnimation(.snappy(duration: 0.22)) {
@@ -300,34 +278,34 @@ struct ActivityBubblesView: View {
                 }
             }
         } label: {
-            VStack(spacing: 6) {
-                ZStack {
-                    Circle()
-                        .fill(metric.tint.opacity(isSelected ? 0.28 : 0.16))
-                    Circle()
-                        .stroke(metric.tint.opacity(isSelected ? 1 : 0.55), lineWidth: isSelected ? 2.5 : 1)
-                    Image(systemName: metric.symbolName)
-                        .font(.system(size: max(16, diameter * 0.28), weight: .semibold))
-                        .foregroundStyle(metric.tint)
+            HStack(spacing: 6) {
+                Image(systemName: metric.symbolName)
+                    .font(.system(size: 12, weight: .semibold))
+                Text("\(metric.chipTitle) \(duration)")
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .lineLimit(1)
+                if isSelected {
+                    Text(distance)
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .opacity(0.85)
+                        .lineLimit(1)
                 }
-                .frame(width: diameter, height: diameter)
-
-                Text(DurationFormatter.text(for: metric.duration))
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.primary)
-
-                Text(
-                    Measurement(value: max(metric.distanceMeters, 0), unit: UnitLength.meters)
-                        .formatted(.measurement(width: .abbreviated, usage: .road))
-                )
-                .font(.system(size: 11, weight: .medium, design: .rounded))
-                .foregroundStyle(.secondary)
             }
-            .frame(minWidth: 56)
+            .foregroundStyle(isSelected ? Color.white : metric.tint)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 7)
+            .background {
+                Capsule()
+                    .fill(isSelected ? metric.tint : metric.tint.opacity(0.12))
+            }
+            .overlay {
+                Capsule()
+                    .stroke(metric.tint.opacity(isSelected ? 0 : 0.45), lineWidth: 1)
+            }
         }
         .buttonStyle(.plain)
         .accessibilityLabel(metric.title)
-        .accessibilityValue("\(DurationFormatter.text(for: metric.duration)), \(Measurement(value: max(metric.distanceMeters, 0), unit: UnitLength.meters).formatted(.measurement(width: .abbreviated, usage: .road)))")
+        .accessibilityValue("\(duration), \(distance)")
         .accessibilityAddTraits(isSelected ? [.isSelected] : [])
         .accessibilityHint(String(localized: "Filters the map to this way of moving"))
     }

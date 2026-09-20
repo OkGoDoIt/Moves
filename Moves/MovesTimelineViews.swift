@@ -317,14 +317,17 @@ struct DayTimelinePageContent: View {
     }
 
     /// Storyline rows including expanded short-stop children.
+    /// An expanded cluster is replaced in place so a one-stop expander does
+    /// not sit above a second bulky disclosure row.
     private var displayedTimelineEntries: [TimelineEntry] {
         var items: [TimelineEntry] = []
         items.reserveCapacity(timelineEntries.count)
         for entry in timelineEntries {
-            items.append(entry)
             if case .hiddenStops(let cluster) = entry,
                expandedHiddenStopIDs.contains(cluster.id) {
                 items.append(contentsOf: cluster.places.map(TimelineEntry.place))
+            } else {
+                items.append(entry)
             }
         }
         return items
@@ -570,7 +573,8 @@ struct DayTimelinePageContent: View {
             isHighlighted: highlightedEntryID == entry.id,
             onSelect: {
                 select(entry)
-            }
+            },
+            onCollapseShortStops: collapseHandler(for: entry)
         )
 
         Group {
@@ -597,6 +601,7 @@ struct DayTimelinePageContent: View {
                 row
             }
             .buttonStyle(.plain)
+            .navigationLinkIndicatorVisibility(place.appearsAsShortStop ? .hidden : .automatic)
             .timelinePlaceActions(place)
 
         case .move(let segment):
@@ -608,8 +613,13 @@ struct DayTimelinePageContent: View {
             .buttonStyle(.plain)
             .timelineMoveActions(segment)
 
-        case .hiddenStops:
-            row
+        case .hiddenStops(let cluster):
+            if cluster.places.count == 1, let visit = cluster.places.first {
+                row
+                    .timelinePlaceActions(visit)
+            } else {
+                row
+            }
         case .liveRoute, .start, .sample:
             row
         }
@@ -618,6 +628,8 @@ struct DayTimelinePageContent: View {
     @ViewBuilder
     private func timelineDetailLink(for entry: TimelineEntry) -> some View {
         switch entry {
+        case .place(let place) where place.appearsAsShortStop:
+            EmptyView()
         case .place(let place):
             NavigationLink {
                 PlaceMapDetailView(place: place)
@@ -1720,9 +1732,42 @@ private extension View {
             timelinePlaceActions(visit)
         case .move(let move):
             timelineMoveActions(move)
+        case .hiddenStops(let cluster):
+            if cluster.places.count == 1, let visit = cluster.places.first {
+                timelinePlaceActions(visit)
+            } else {
+                self
+            }
         default:
             self
         }
+    }
+}
+
+private extension DayTimelinePageContent {
+    func collapseHandler(for entry: TimelineEntry) -> (() -> Void)? {
+        guard case .place(let place) = entry,
+              let cluster = shortStopCluster(containing: place),
+              expandedHiddenStopIDs.contains(cluster.id),
+              cluster.places.first?.id == place.id
+        else {
+            return nil
+        }
+        return {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                expandedHiddenStopIDs.remove(cluster.id)
+            }
+        }
+    }
+
+    func shortStopCluster(containing place: VisitPlace) -> HiddenStopsCluster? {
+        for entry in timelineEntries {
+            if case .hiddenStops(let cluster) = entry,
+               cluster.places.contains(where: { $0.id == place.id }) {
+                return cluster
+            }
+        }
+        return nil
     }
 }
 
@@ -1748,9 +1793,16 @@ private struct DayMapExpandDragModifier: ViewModifier {
     }
 }
 
+/// Compact storyline measurements. Hidden stops must stay shorter than a place row.
+enum StorylineCompactMetrics {
+    static let hiddenStopRowHeight: CGFloat = 26
+    static let shortStopRowHeight: CGFloat = 28
+}
+
 /// Visual variant of a storyline row. WS2 keys swipe/menu off this plus the entry.
 enum TimelineRowStyle: Equatable {
     case place
+    case shortStop
     case move
     case hiddenStops
     case carryOver
@@ -1769,6 +1821,22 @@ struct HiddenStopsCluster: Identifiable {
     var startDate: Date {
         places.map(\.arrivalDate).min() ?? .now
     }
+
+    var totalStayDuration: TimeInterval {
+        places.reduce(0) { partial, place in
+            let end = place.departureDate ?? place.arrivalDate
+            return partial + max(end.timeIntervalSince(place.arrivalDate), 0)
+        }
+    }
+
+    /// One-line caption such as `· 2m` or `· 2 · 4m`.
+    var collapsedCaption: String {
+        let durationText = DurationFormatter.compactText(for: totalStayDuration)
+        if places.count == 1 {
+            return "· \(durationText)"
+        }
+        return String(localized: "· \(places.count) · \(durationText)")
+    }
 }
 
 /// One storyline item. Layout lives here; swipe/menu chrome is applied by
@@ -1780,10 +1848,32 @@ struct StorylineRow: View {
     let isLast: Bool
     var isHighlighted: Bool = false
     var onSelect: (() -> Void)? = nil
+    var onCollapseShortStops: (() -> Void)? = nil
 
     var style: TimelineRowStyle { entry.rowStyle }
 
     var body: some View {
+        Group {
+            switch style {
+            case .hiddenStops:
+                compactHiddenStopRow
+            case .shortStop:
+                compactShortStopRow
+            default:
+                standardRow
+            }
+        }
+        .contentShape(Rectangle())
+        .simultaneousGesture(
+            TapGesture().onEnded {
+                onSelect?()
+            }
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(isHighlighted ? [.isSelected] : [])
+    }
+
+    private var standardRow: some View {
         HStack(alignment: .top, spacing: 0) {
             StorylineTimeColumn(date: entry.startDate)
             StorylineRail(
@@ -1797,27 +1887,112 @@ struct StorylineRow: View {
             StorylineRowBody(entry: entry)
         }
         .padding(.vertical, 2)
-        .contentShape(Rectangle())
-        .simultaneousGesture(
-            TapGesture().onEnded {
-                onSelect?()
+    }
+
+    private var compactHiddenStopRow: some View {
+        HStack(alignment: .center, spacing: 0) {
+            StorylineTimeColumn(date: entry.startDate, isCompact: true)
+            compactRail(chevron: "chevron.down", action: nil)
+            Text(entry.titleText)
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                .padding(.leading, 8)
+            Spacer(minLength: 0)
+        }
+        .frame(height: StorylineCompactMetrics.hiddenStopRowHeight)
+        .accessibilityLabel(entry.accessibilityCaption)
+        .accessibilityHint(String(localized: "Shows the short stop"))
+        .accessibilityAddTraits(.isButton)
+    }
+
+    private var compactShortStopRow: some View {
+        HStack(alignment: .center, spacing: 0) {
+            StorylineTimeColumn(date: entry.startDate, isCompact: true)
+            compactRail(
+                chevron: onCollapseShortStops == nil ? nil : "chevron.up",
+                action: onCollapseShortStops
+            )
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(entry.titleText)
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                if let caption = entry.compactStayCaption {
+                    Text(caption)
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
             }
-        )
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(isHighlighted ? [.isSelected] : [])
+            .padding(.leading, 8)
+            Spacer(minLength: 0)
+        }
+        .frame(minHeight: 24, maxHeight: StorylineCompactMetrics.shortStopRowHeight)
+        .modifier(ShortStopCollapseHint(isEnabled: onCollapseShortStops != nil))
+    }
+
+    @ViewBuilder
+    private func compactRail(chevron: String?, action: (() -> Void)?) -> some View {
+        VStack(spacing: 0) {
+            Rectangle()
+                .fill(isFirst ? Color.clear : MovesPalette.rail)
+                .frame(width: 2, height: 6)
+            if let chevron {
+                Image(systemName: chevron)
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 14, height: 14)
+                    .contentShape(Rectangle())
+                    .highPriorityGesture(
+                        TapGesture().onEnded {
+                            action?()
+                        }
+                    )
+                    .accessibilityLabel(
+                        chevron == "chevron.up"
+                            ? String(localized: "Hide short stop")
+                            : String(localized: "Show short stop")
+                    )
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityHidden(action == nil)
+            } else {
+                Capsule()
+                    .fill(MovesPalette.rail)
+                    .frame(width: 2, height: 8)
+            }
+            Rectangle()
+                .fill(isLast ? Color.clear : MovesPalette.rail)
+                .frame(width: 2)
+                .frame(maxHeight: .infinity)
+        }
+        .frame(width: 24, height: StorylineCompactMetrics.hiddenStopRowHeight)
+    }
+}
+
+private struct ShortStopCollapseHint: ViewModifier {
+    let isEnabled: Bool
+
+    func body(content: Content) -> some View {
+        if isEnabled {
+            content.accessibilityHint(String(localized: "Hides the short stop"))
+        } else {
+            content
+        }
     }
 }
 
 private struct StorylineTimeColumn: View {
     let date: Date
+    var isCompact: Bool = false
     @ScaledMetric(relativeTo: .caption2) private var columnWidth: CGFloat = 50
 
     var body: some View {
-        let period = StorylineClock.periodText(from: date)
+        let period = isCompact ? nil : StorylineClock.periodText(from: date)
 
         VStack(alignment: .trailing, spacing: 1) {
             Text(StorylineClock.hourMinuteText(from: date))
-                .font(.system(size: 12, weight: .semibold, design: .rounded).width(.condensed))
+                .font(.system(size: isCompact ? 11 : 12, weight: .semibold, design: .rounded).width(.condensed))
                 .monospacedDigit()
                 .lineLimit(1)
                 .minimumScaleFactor(0.75)
@@ -1830,10 +2005,10 @@ private struct StorylineTimeColumn: View {
                     .minimumScaleFactor(0.7)
             }
         }
-        .foregroundStyle(.secondary)
+        .foregroundStyle(isCompact ? Color.secondary.opacity(0.8) : Color.secondary)
         .frame(width: columnWidth, alignment: .trailing)
         .padding(.trailing, 4)
-        .padding(.top, 6)
+        .padding(.top, isCompact ? 0 : 6)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(date, format: .dateTime.hour().minute()))
     }
@@ -1916,12 +2091,6 @@ private struct StorylineRowBody: View {
                         .padding(.vertical, 2)
                         .background(Capsule().fill(MovesPalette.start.opacity(0.14)))
                 }
-
-                if entry.rowStyle == .hiddenStops {
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.tertiary)
-                }
             }
 
             Text(entry.subtitleText)
@@ -1934,7 +2103,7 @@ private struct StorylineRowBody: View {
                     .foregroundStyle(.secondary)
             }
 
-            if case .place(let place) = entry {
+            if case .place(let place) = entry, !place.appearsAsShortStop {
                 VisitPhotoThumbnailStrip(attachments: place.photoAttachments)
             }
         }
@@ -1972,7 +2141,8 @@ enum TimelineEntry: Identifiable {
 
     var rowStyle: TimelineRowStyle {
         switch self {
-        case .place: return .place
+        case .place(let place):
+            return place.appearsAsShortStop ? .shortStop : .place
         case .move: return .move
         case .hiddenStops: return .hiddenStops
         case .start: return .carryOver
@@ -2127,12 +2297,31 @@ enum TimelineEntry: Identifiable {
                 longitude: location.longitude
             )
         case .hiddenStops(let cluster):
-            let count = cluster.places.count
-            if count == 1 {
-                return String(localized: "1 short stop hidden")
-            }
-            return String(localized: "\(count) short stops hidden")
+            return cluster.collapsedCaption
         }
+    }
+
+    /// Spoken description for the collapsed short-stop hairline.
+    var accessibilityCaption: String {
+        switch self {
+        case .hiddenStops(let cluster):
+            let duration = DurationFormatter.compactText(for: cluster.totalStayDuration)
+            if cluster.places.count == 1 {
+                return String(localized: "Short stop, \(duration)")
+            }
+            return String(localized: "\(cluster.places.count) short stops, \(duration)")
+        default:
+            return titleText
+        }
+    }
+
+    /// Stay caption for a compact short-stop row. Sub-minute stays are omitted.
+    var compactStayCaption: String? {
+        guard case .place(let place) = self else { return nil }
+        guard let departure = place.departureDate else { return nil }
+        let duration = departure.timeIntervalSince(place.arrivalDate)
+        guard duration >= 60 else { return nil }
+        return DurationFormatter.compactText(for: duration)
     }
 
     var subtitleText: String {
@@ -2171,7 +2360,7 @@ enum TimelineEntry: Identifiable {
         case .sample:
             return String(localized: "In progress")
         case .hiddenStops:
-            return String(localized: "Tap to show")
+            return ""
         }
     }
 

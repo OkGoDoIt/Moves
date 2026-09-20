@@ -50,12 +50,15 @@ final class TimelineEditingTests: XCTestCase {
 
         let merged = try repository.dissolveVisit(light)
 
-        XCTAssertEqual(merged.id, incoming.id)
-        XCTAssertEqual(merged.startPlace?.id, home.id)
-        XCTAssertEqual(merged.endPlace?.id, cafe.id)
-        XCTAssertEqual(merged.startDate, date(10, 30))
-        XCTAssertEqual(merged.endDate, date(10, 50))
-        XCTAssertGreaterThan(merged.distanceMeters, 1_000)
+        guard case .merged(let mergedMove) = merged else {
+            return XCTFail("Expected same-mode legs to merge into one move")
+        }
+        XCTAssertEqual(mergedMove.id, incoming.id)
+        XCTAssertEqual(mergedMove.startPlace?.id, home.id)
+        XCTAssertEqual(mergedMove.endPlace?.id, cafe.id)
+        XCTAssertEqual(mergedMove.startDate, date(10, 30))
+        XCTAssertEqual(mergedMove.endDate, date(10, 50))
+        XCTAssertGreaterThan(mergedMove.distanceMeters, 1_000)
         XCTAssertNil(try context.fetch(FetchDescriptor<VisitPlace>()).first { $0.id == light.id })
         XCTAssertNil(try context.fetch(FetchDescriptor<MoveSegment>()).first { $0.id == outgoing.id })
     }
@@ -74,6 +77,215 @@ final class TimelineEditingTests: XCTestCase {
         XCTAssertThrowsError(try repository.dissolveVisit(visit)) { error in
             XCTAssertEqual(error as? TimelineEditingError, .missingNeighbors)
         }
+    }
+
+    func testDissolveVisitMergesTenTwoTwentyWalkingIntoThirtyTwoMinutes() throws {
+        let (repository, context, _) = try makeRepository()
+        let home = insertPlace(
+            in: context,
+            arrival: date(9, 50),
+            departure: date(10, 0),
+            latitude: 52.52,
+            longitude: 13.40,
+            userLabel: "Home"
+        )
+        let brief = insertPlace(
+            in: context,
+            arrival: date(10, 10),
+            departure: date(10, 12),
+            latitude: 52.521,
+            longitude: 13.405
+        )
+        brief.isHiddenAsShortStop = true
+        let cafe = insertPlace(
+            in: context,
+            arrival: date(10, 32),
+            departure: date(11, 0),
+            latitude: 52.53,
+            longitude: 13.41,
+            userLabel: "Cafe"
+        )
+        let incoming = insertMove(
+            in: context,
+            from: home,
+            to: brief,
+            start: date(10, 0),
+            end: date(10, 10),
+            mode: .walking,
+            distance: 800,
+            stepCount: 1_200
+        )
+        let outgoing = insertMove(
+            in: context,
+            from: brief,
+            to: cafe,
+            start: date(10, 12),
+            end: date(10, 32),
+            mode: .walking,
+            distance: 1_600,
+            stepCount: 2_400
+        )
+        _ = insertSample(in: context, at: date(10, 5), latitude: 52.5205, longitude: 13.402, move: incoming)
+        _ = insertSample(in: context, at: date(10, 20), latitude: 52.525, longitude: 13.408, move: outgoing)
+        try context.save()
+
+        let result = try repository.dissolveVisit(brief)
+
+        guard case .merged(let merged) = result else {
+            return XCTFail("Expected one walking move that includes the 2-minute stop")
+        }
+        XCTAssertEqual(merged.id, incoming.id)
+        XCTAssertEqual(merged.startPlace?.id, home.id)
+        XCTAssertEqual(merged.endPlace?.id, cafe.id)
+        XCTAssertEqual(merged.startDate, date(10, 0))
+        XCTAssertEqual(merged.endDate, date(10, 32))
+        XCTAssertEqual(merged.endDate.timeIntervalSince(merged.startDate), 32 * 60, accuracy: 0.5)
+        XCTAssertEqual(merged.transportMode, .walking)
+        XCTAssertEqual(merged.stepCount, 3_600)
+        XCTAssertEqual(merged.samples.count, 2)
+        XCTAssertNil(try context.fetch(FetchDescriptor<VisitPlace>()).first { $0.id == brief.id })
+        XCTAssertEqual(try context.fetch(FetchDescriptor<MoveSegment>()).count, 1)
+    }
+
+    func testDissolveVisitKeepsDifferentModesAsTwoMoves() throws {
+        let (repository, context, _) = try makeRepository()
+        let home = insertPlace(
+            in: context,
+            arrival: date(9, 50),
+            departure: date(10, 0),
+            latitude: 52.52,
+            longitude: 13.40,
+            userLabel: "Home"
+        )
+        let brief = insertPlace(
+            in: context,
+            arrival: date(10, 10),
+            departure: date(10, 12),
+            latitude: 52.521,
+            longitude: 13.405
+        )
+        brief.isHiddenAsShortStop = true
+        let work = insertPlace(
+            in: context,
+            arrival: date(10, 32),
+            departure: date(17, 0),
+            latitude: 52.53,
+            longitude: 13.41,
+            userLabel: "Work"
+        )
+        let incoming = insertMove(
+            in: context,
+            from: home,
+            to: brief,
+            start: date(10, 0),
+            end: date(10, 10),
+            mode: .walking,
+            distance: 800
+        )
+        let outgoing = insertMove(
+            in: context,
+            from: brief,
+            to: work,
+            start: date(10, 12),
+            end: date(10, 32),
+            mode: .automotive,
+            distance: 4_000
+        )
+        try context.save()
+
+        let result = try repository.dissolveVisit(brief)
+
+        guard case .connected(let first, let second) = result else {
+            return XCTFail("Expected two moves when modes differ")
+        }
+        XCTAssertEqual(first.id, incoming.id)
+        XCTAssertEqual(second.id, outgoing.id)
+        XCTAssertEqual(first.transportMode, .walking)
+        XCTAssertEqual(second.transportMode, .automotive)
+        XCTAssertEqual(first.endDate, date(10, 12))
+        XCTAssertEqual(second.startDate, date(10, 12))
+        XCTAssertEqual(first.endPlace?.id, work.id)
+        XCTAssertEqual(second.startPlace?.id, home.id)
+        XCTAssertNil(try context.fetch(FetchDescriptor<VisitPlace>()).first { $0.id == brief.id })
+        XCTAssertEqual(try context.fetch(FetchDescriptor<MoveSegment>()).count, 2)
+    }
+
+    func testDeletingAShortStopDissolvesAndUndoRestoresTheStop() throws {
+        let (_, context, _) = try makeRepository()
+        let home = insertPlace(
+            in: context,
+            arrival: date(9, 50),
+            departure: date(10, 0),
+            latitude: 52.52,
+            longitude: 13.40,
+            userLabel: "Home"
+        )
+        let brief = insertPlace(
+            in: context,
+            arrival: date(10, 10),
+            departure: date(10, 12),
+            latitude: 52.521,
+            longitude: 13.405
+        )
+        brief.isHiddenAsShortStop = true
+        let cafe = insertPlace(
+            in: context,
+            arrival: date(10, 32),
+            departure: date(11, 0),
+            latitude: 52.53,
+            longitude: 13.41,
+            userLabel: "Cafe"
+        )
+        let incoming = insertMove(
+            in: context,
+            from: home,
+            to: brief,
+            start: date(10, 0),
+            end: date(10, 10),
+            mode: .walking,
+            distance: 800,
+            stepCount: 1_200
+        )
+        let briefID = brief.id
+        let incomingID = incoming.id
+        _ = insertMove(
+            in: context,
+            from: brief,
+            to: cafe,
+            start: date(10, 12),
+            end: date(10, 32),
+            mode: .walking,
+            distance: 1_600,
+            stepCount: 2_400
+        )
+        try context.save()
+
+        let controller = TimelineEditController()
+        let undoController = AppUndoController()
+        undoController.manager.groupsByEvent = false
+        let toast = UndoToastPresenter()
+        controller.attach(modelContext: context, undoController: undoController, toast: toast)
+
+        undoController.manager.beginUndoGrouping()
+        controller.requestDeletePlace(brief)
+        undoController.manager.endUndoGrouping()
+
+        XCTAssertTrue(undoController.manager.canUndo)
+        XCTAssertNil(try context.fetch(FetchDescriptor<VisitPlace>()).first { $0.id == briefID })
+        XCTAssertEqual(try context.fetch(FetchDescriptor<MoveSegment>()).count, 1)
+        let merged = try XCTUnwrap(try context.fetch(FetchDescriptor<MoveSegment>()).first)
+        XCTAssertEqual(merged.id, incomingID)
+        XCTAssertEqual(merged.endDate.timeIntervalSince(merged.startDate), 32 * 60, accuracy: 0.5)
+
+        controller.undoLastChange()
+
+        XCTAssertNotNil(try context.fetch(FetchDescriptor<VisitPlace>()).first { $0.id == briefID })
+        XCTAssertEqual(try context.fetch(FetchDescriptor<MoveSegment>()).count, 2)
+        let restoredIncoming = try XCTUnwrap(
+            try context.fetch(FetchDescriptor<MoveSegment>()).first { $0.id == incomingID }
+        )
+        XCTAssertEqual(restoredIncoming.endDate, date(10, 10))
+        XCTAssertEqual(restoredIncoming.endPlace?.id, briefID)
     }
 
     func testMergeVisitsDeletesTheConnectingMove() throws {
@@ -447,7 +659,8 @@ final class TimelineEditingTests: XCTestCase {
         start: Date,
         end: Date,
         mode: TransportMode,
-        distance: CLLocationDistance
+        distance: CLLocationDistance,
+        stepCount: Int? = nil
     ) -> MoveSegment {
         let move = MoveSegment(
             dedupeKey: UUID().uuidString,
@@ -455,13 +668,39 @@ final class TimelineEditingTests: XCTestCase {
             endDate: end,
             transportMode: mode,
             distanceMeters: distance,
-            stepCount: nil
+            stepCount: stepCount
         )
         move.startPlace = startPlace
         move.endPlace = endPlace
         move.dayTimeline = timeline(in: context, for: start)
         context.insert(move)
         return move
+    }
+
+    private func insertSample(
+        in context: ModelContext,
+        at date: Date,
+        latitude: Double,
+        longitude: Double,
+        move: MoveSegment
+    ) -> LocationSample {
+        let sample = LocationSample(
+            location: CLLocation(
+                coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
+                altitude: 0,
+                horizontalAccuracy: 5,
+                verticalAccuracy: -1,
+                course: -1,
+                speed: 1.4,
+                timestamp: date
+            ),
+            source: .significantChange,
+            dedupeKey: UUID().uuidString
+        )
+        sample.moveSegment = move
+        sample.dayTimeline = move.dayTimeline
+        context.insert(sample)
+        return sample
     }
 
     private func timeline(in context: ModelContext, for date: Date) -> DayTimeline {

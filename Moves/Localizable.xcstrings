@@ -1079,6 +1079,55 @@
     },
     "Your timeline stays in your private iCloud. Last updated %@." : {
 
+    },
+    "Walk" : {
+
+    },
+    "Run" : {
+
+    },
+    "Swim" : {
+
+    },
+    "Bike" : {
+
+    },
+    "Drive" : {
+
+    },
+    "Fly" : {
+
+    },
+    "Still" : {
+
+    },
+    "Move" : {
+
+    },
+    "<1m" : {
+
+    },
+    "Shows the short stop" : {
+
+    },
+    "Hides the short stop" : {
+
+    },
+    "Show short stop" : {
+
+    },
+    "Hide short stop" : {
+
+    },
+    "Short stop, %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Short stop, %@"
+          }
+        }
+      }
     }
   },
   "version" : "1.2"

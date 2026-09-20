@@ -70,6 +70,14 @@ enum DurationFormatter {
     static func text(for duration: TimeInterval) -> String {
         formatter.string(from: max(duration, 0)) ?? "0m"
     }
+
+    /// One-line stay or chip duration. Sub-minute stays are `<1m`, not `0m`.
+    static func compactText(for duration: TimeInterval) -> String {
+        if duration < 60 {
+            return String(localized: "<1m")
+        }
+        return text(for: duration)
+    }
 }
 
 struct LiveRouteTrackingSnapshot {

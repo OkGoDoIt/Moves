@@ -3,39 +3,37 @@ import XCTest
 @testable import Moves
 
 final class TimelineTabTests: XCTestCase {
-    func testBubbleDiameterUsesMinimumWhenMaxIsZero() {
-        XCTAssertEqual(
-            ActivityBubbleSizing.diameter(duration: 120, maximumDuration: 0),
-            ActivityBubbleSizing.minimumDiameter
-        )
+    func testActivityChipTitlesAreSentenceCase() {
+        XCTAssertEqual(TransportMode.walking.chipTitle, "Walk")
+        XCTAssertEqual(TransportMode.automotive.chipTitle, "Drive")
+        XCTAssertEqual(TransportMode.running.chipTitle, "Run")
+        XCTAssertEqual(TransportMode.cycling.chipTitle, "Bike")
     }
 
-    func testBubbleDiameterUsesMinimumForZeroDuration() {
-        XCTAssertEqual(
-            ActivityBubbleSizing.diameter(duration: 0, maximumDuration: 3600),
-            ActivityBubbleSizing.minimumDiameter
-        )
+    func testActivityChipRowStaysCompact() {
+        XCTAssertEqual(ActivityChipSizing.rowHeight, 40)
+        XCTAssertLessThanOrEqual(StorylineCompactMetrics.hiddenStopRowHeight, 28)
+        XCTAssertLessThanOrEqual(StorylineCompactMetrics.shortStopRowHeight, 28)
     }
 
-    func testBubbleDiameterUsesMaximumWhenDurationsMatch() {
-        XCTAssertEqual(
-            ActivityBubbleSizing.diameter(duration: 3600, maximumDuration: 3600),
-            ActivityBubbleSizing.maximumDiameter
-        )
+    func testCompactDurationUsesLessThanOneMinuteBelowSixtySeconds() {
+        XCTAssertEqual(DurationFormatter.compactText(for: 0), "<1m")
+        XCTAssertEqual(DurationFormatter.compactText(for: 45), "<1m")
+        XCTAssertNotEqual(DurationFormatter.compactText(for: 120), "<1m")
     }
 
-    func testBubbleDiameterInterpolatesLinearly() {
-        let diameter = ActivityBubbleSizing.diameter(duration: 1800, maximumDuration: 3600)
-        let expected = ActivityBubbleSizing.minimumDiameter
-            + (ActivityBubbleSizing.maximumDiameter - ActivityBubbleSizing.minimumDiameter) * 0.5
-        XCTAssertEqual(diameter, expected, accuracy: 0.01)
-    }
-
-    func testBubbleDiameterClampsAboveTheMaximum() {
-        XCTAssertEqual(
-            ActivityBubbleSizing.diameter(duration: 10_000, maximumDuration: 3600),
-            ActivityBubbleSizing.maximumDiameter
+    func testHiddenStopCaptionIsASingleQuietLine() {
+        let stop = VisitPlace(
+            arrivalDate: date(8, 59),
+            departureDate: date(9, 1),
+            latitude: 10.76,
+            longitude: 106.70,
+            horizontalAccuracy: 10
         )
+        let cluster = HiddenStopsCluster(places: [stop])
+        XCTAssertEqual(cluster.collapsedCaption, "· \(DurationFormatter.compactText(for: 120))")
+        XCTAssertFalse(cluster.collapsedCaption.localizedCaseInsensitiveContains("tap to show"))
+        XCTAssertFalse(cluster.collapsedCaption.localizedCaseInsensitiveContains("hidden"))
     }
 
     func testMomentJumpTargetMapsAVisit() {

@@ -65,24 +65,7 @@ final class TimelineEditController: TimelineItemActions {
     }
 
     func markNotAStop(_ visit: VisitPlace) {
-        guard let incoming = visit.incomingMoves.sorted(by: { $0.endDate < $1.endDate }).last,
-              let outgoing = visit.outgoingMoves.sorted(by: { $0.startDate < $1.startDate }).first,
-              incoming.id != outgoing.id
-        else {
-            presentError(TimelineEditingError.missingNeighbors)
-            return
-        }
-
-        let payload = DissolvedVisitUndoPayload(visit: visit, incoming: incoming, outgoing: outgoing)
-        performStructural(named: String(localized: "Not a stop")) { repo, context in
-            let merged = try repo.dissolveVisit(visit)
-            merged.clearCachedRouteCoordinates()
-            registerRestore(payload, on: context)
-            Task { @MainActor in
-                _ = await RoadRouteMatcher.matchedCoordinates(for: merged)
-                try? context.save()
-            }
-        }
+        dissolve(visit, named: String(localized: "Not a stop"))
     }
 
     func mergeWithPreviousPlace(_ visit: VisitPlace) {
@@ -110,6 +93,10 @@ final class TimelineEditController: TimelineItemActions {
     }
 
     func requestDeletePlace(_ visit: VisitPlace) {
+        if shouldDissolveOnDelete(visit) {
+            dissolve(visit, named: String(localized: "Deleted"))
+            return
+        }
         let duration = TimelineReviewHeuristics.stayDuration(of: visit) ?? 0
         if duration > TimelineReviewHeuristics.longVisitDeleteConfirmation {
             confirmDeletePlaceID = visit.id
@@ -317,6 +304,47 @@ final class TimelineEditController: TimelineItemActions {
 
     // MARK: - Private
 
+    private func dissolve(_ visit: VisitPlace, named name: String) {
+        guard let incoming = visit.incomingMoves.sorted(by: { $0.endDate < $1.endDate }).last,
+              let outgoing = visit.outgoingMoves.sorted(by: { $0.startDate < $1.startDate }).first,
+              incoming.id != outgoing.id
+        else {
+            presentError(TimelineEditingError.missingNeighbors)
+            return
+        }
+
+        let willMergeLegs = incoming.transportMode == outgoing.transportMode
+        let payload = DissolvedVisitUndoPayload(
+            visit: visit,
+            incoming: incoming,
+            outgoing: outgoing,
+            didDeleteOutgoing: willMergeLegs
+        )
+        performStructural(named: name) { repo, context in
+            let result = try repo.dissolveVisit(visit)
+            for move in result.movesNeedingRouteRefresh {
+                move.clearCachedRouteCoordinates()
+            }
+            registerRestore(payload, on: context)
+            let moves = result.movesNeedingRouteRefresh
+            Task { @MainActor in
+                for move in moves {
+                    _ = await RoadRouteMatcher.matchedCoordinates(for: move)
+                }
+                try? context.save()
+            }
+        }
+    }
+
+    private func shouldDissolveOnDelete(_ visit: VisitPlace) -> Bool {
+        let incoming = visit.incomingMoves.sorted { $0.endDate < $1.endDate }.last
+        let outgoing = visit.outgoingMoves.sorted { $0.startDate < $1.startDate }.first
+        guard let incoming, let outgoing, incoming.id != outgoing.id else {
+            return false
+        }
+        return visit.appearsAsShortStop || TimelineReviewHeuristics.isShortTransitStop(visit)
+    }
+
     private func mergeVisits(_ a: VisitPlace, _ b: VisitPlace) {
         let first = a.arrivalDate <= b.arrivalDate ? a : b
         let second = first.id == a.id ? b : a
@@ -426,9 +454,19 @@ final class TimelineEditController: TimelineItemActions {
 
     private func registerRestore<Payload: TimelineUndoRestoring>(_ payload: Payload, on context: ModelContext) {
         guard let undoController else { return }
-        undoController.manager.registerUndo(withTarget: context) { target in
-            payload.restore(in: target)
+        let manager = undoController.manager
+        manager.beginUndoGrouping()
+        manager.registerUndo(withTarget: self) { editor in
+            guard let targetContext = editor.modelContext else { return }
+            let previous = targetContext.undoManager
+            targetContext.undoManager = nil
+            payload.restore(in: targetContext)
+            if targetContext.hasChanges {
+                try? targetContext.save()
+            }
+            targetContext.undoManager = previous
         }
+        manager.endUndoGrouping()
     }
 
     private func presentToast(_ name: String) {
@@ -519,6 +557,10 @@ private struct TimelineDeletedPlacePayload: TimelineUndoRestoring {
     }
 
     func restore(in context: ModelContext) {
+        restore(in: context, relinkMoves: true)
+    }
+
+    func restore(in context: ModelContext, relinkMoves: Bool) {
         guard !Self.containsPlace(id, in: context) else { return }
         let restored = VisitPlace(
             arrivalDate: arrivalDate,
@@ -543,11 +585,14 @@ private struct TimelineDeletedPlacePayload: TimelineUndoRestoring {
         restored.dayTimeline = dayTimeline
         restored.knownPlace = knownPlace
         context.insert(restored)
-        for move in outgoingMoves {
-            move.startPlace = restored
-        }
-        for move in incomingMoves {
-            move.endPlace = restored
+        if relinkMoves {
+            let liveMoveIDs = Set(((try? context.fetch(FetchDescriptor<MoveSegment>())) ?? []).map(\.id))
+            for move in outgoingMoves where liveMoveIDs.contains(move.id) {
+                move.startPlace = restored
+            }
+            for move in incomingMoves where liveMoveIDs.contains(move.id) {
+                move.endPlace = restored
+            }
         }
     }
 
@@ -652,41 +697,68 @@ private struct TimelineDeletedMovePayload: TimelineUndoRestoring {
 private struct DissolvedVisitUndoPayload: TimelineUndoRestoring {
     let visit: TimelineDeletedPlacePayload
     let outgoing: TimelineDeletedMovePayload
+    let didDeleteOutgoing: Bool
     let incomingID: UUID
     let incomingEndDate: Date
     let incomingDistance: Double
     let incomingMode: TransportMode
+    let incomingStepCount: Int?
     let incomingComment: String?
     let incomingCacheSignature: String?
     let incomingCacheData: Data?
     let incomingManualData: Data?
+    let outgoingStartDate: Date
+    let outgoingCacheSignature: String?
+    let outgoingCacheData: Data?
+    let outgoingManualData: Data?
 
-    init(visit: VisitPlace, incoming: MoveSegment, outgoing: MoveSegment) {
+    init(
+        visit: VisitPlace,
+        incoming: MoveSegment,
+        outgoing: MoveSegment,
+        didDeleteOutgoing: Bool
+    ) {
         self.visit = TimelineDeletedPlacePayload(place: visit)
         self.outgoing = TimelineDeletedMovePayload(segment: outgoing)
+        self.didDeleteOutgoing = didDeleteOutgoing
         incomingID = incoming.id
         incomingEndDate = incoming.endDate
         incomingDistance = incoming.distanceMeters
         incomingMode = incoming.transportMode
+        incomingStepCount = incoming.stepCount
         incomingComment = incoming.comment
         incomingCacheSignature = incoming.routeCacheSignature
         incomingCacheData = incoming.routeCacheCoordinatesData
         incomingManualData = incoming.manualRouteCoordinatesData
+        outgoingStartDate = outgoing.startDate
+        outgoingCacheSignature = outgoing.routeCacheSignature
+        outgoingCacheData = outgoing.routeCacheCoordinatesData
+        outgoingManualData = outgoing.manualRouteCoordinatesData
     }
 
     func restore(in context: ModelContext) {
-        visit.restore(in: context)
+        visit.restore(in: context, relinkMoves: false)
         let restoredVisit = (try? context.fetch(FetchDescriptor<VisitPlace>()))?.first { $0.id == visit.id }
-        outgoing.restore(
-            in: context,
-            startPlaceOverride: restoredVisit,
-            endPlaceOverride: outgoing.endPlace
-        )
+        if didDeleteOutgoing {
+            outgoing.restore(
+                in: context,
+                startPlaceOverride: restoredVisit,
+                endPlaceOverride: outgoing.endPlace
+            )
+        } else {
+            let liveOutgoing = (try? context.fetch(FetchDescriptor<MoveSegment>()))?.first { $0.id == outgoing.id }
+            liveOutgoing?.startPlace = restoredVisit
+            liveOutgoing?.startDate = outgoingStartDate
+            liveOutgoing?.routeCacheSignature = outgoingCacheSignature
+            liveOutgoing?.routeCacheCoordinatesData = outgoingCacheData
+            liveOutgoing?.manualRouteCoordinatesData = outgoingManualData
+        }
         let incoming = (try? context.fetch(FetchDescriptor<MoveSegment>()))?.first { $0.id == incomingID }
         incoming?.endPlace = restoredVisit
         incoming?.endDate = incomingEndDate
         incoming?.distanceMeters = incomingDistance
         incoming?.transportMode = incomingMode
+        incoming?.stepCount = incomingStepCount
         incoming?.comment = incomingComment
         incoming?.routeCacheSignature = incomingCacheSignature
         incoming?.routeCacheCoordinatesData = incomingCacheData

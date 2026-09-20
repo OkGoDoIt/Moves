@@ -32,6 +32,22 @@ enum TransportMode: String, Codable, CaseIterable, Identifiable {
         }
     }
 
+    /// Short sentence-case label for compact filter chips (`Walk 5h 35m`).
+    var chipTitle: String {
+        switch self {
+        case .stationary: return String(localized: "Still")
+        case .walking: return String(localized: "Walk")
+        case .running: return String(localized: "Run")
+        case .swimming: return String(localized: "Swim")
+        case .cycling: return String(localized: "Bike")
+        case .automotive: return String(localized: "Drive")
+        case .train: return String(localized: "Train")
+        case .plane: return String(localized: "Fly")
+        case .boat: return String(localized: "Boat")
+        case .unknown: return String(localized: "Move")
+        }
+    }
+
     var symbolName: String {
         switch self {
         case .stationary: return "pause.circle.fill"
@@ -156,6 +172,24 @@ enum TimelineEditingError: Error, Equatable {
     case cannotMergeSameVisit
     case visitNotFound
     case moveNotFound
+}
+
+/// Outcome of removing a visit that sat between two moves.
+enum DissolveVisitResult {
+    /// Same-mode legs became one move that includes the stop’s duration.
+    case merged(MoveSegment)
+    /// Different-mode legs stay separate and meet at the join time.
+    case connected(incoming: MoveSegment, outgoing: MoveSegment)
+
+    /// Moves whose polylines should be rematched after the visit is gone.
+    var movesNeedingRouteRefresh: [MoveSegment] {
+        switch self {
+        case .merged(let move):
+            return [move]
+        case .connected(let incoming, let outgoing):
+            return [incoming, outgoing]
+        }
+    }
 }
 
 /// Models in the CloudKit-backed (or local fallback) timeline store.
@@ -387,6 +421,15 @@ final class VisitPlace {
             return false
         }
         return true
+    }
+
+    /// True when the storyline should render this visit as a compact short stop.
+    var appearsAsShortStop: Bool {
+        if isHiddenAsShortStop {
+            return true
+        }
+        guard let dayTimeline else { return false }
+        return matchesShortStopHeuristic(in: dayTimeline)
     }
 
     /// The current storyline short-stop heuristic, copied so upgrades and the
@@ -788,7 +831,7 @@ protocol TimelineRepository {
     func setAutomaticLabel(_ label: String, for placeID: UUID) throws
     func saveIfNeeded() throws
 
-    func dissolveVisit(_ visit: VisitPlace) throws -> MoveSegment
+    func dissolveVisit(_ visit: VisitPlace) throws -> DissolveVisitResult
     func mergeVisits(_ a: VisitPlace, _ b: VisitPlace) throws -> VisitPlace
     func splitMove(_ move: MoveSegment, at date: Date) throws -> (MoveSegment, VisitPlace, MoveSegment)
     func splitVisit(_ visit: VisitPlace, at date: Date) throws -> (VisitPlace, VisitPlace)
@@ -1932,7 +1975,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         try modelContext.save()
     }
 
-    func dissolveVisit(_ visit: VisitPlace) throws -> MoveSegment {
+    func dissolveVisit(_ visit: VisitPlace) throws -> DissolveVisitResult {
         try performingUndoableChange(named: "Not a Stop") {
             let incoming = visit.incomingMoves.sorted { $0.endDate < $1.endDate }.last
             let outgoing = visit.outgoingMoves.sorted { $0.startDate < $1.startDate }.first
@@ -1940,64 +1983,11 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                 throw TimelineEditingError.missingNeighbors
             }
 
-            let firstCoordinates = TimelineLocator.displayedCoordinates(for: incoming)
-            let secondCoordinates = TimelineLocator.displayedCoordinates(for: outgoing)
-
-            incoming.endPlace = outgoing.endPlace
-            incoming.endDate = max(outgoing.endDate, incoming.endDate)
-            if incoming.endDate <= incoming.startDate {
-                incoming.endDate = incoming.startDate.addingTimeInterval(1)
+            if incoming.transportMode == outgoing.transportMode {
+                return .merged(mergeSameModeLegs(incoming: incoming, outgoing: outgoing, visit: visit))
             }
-
-            let incomingSamples = incoming.samples
-            let outgoingSamples = outgoing.samples
-            for sample in outgoingSamples where sample.moveSegment?.id != incoming.id {
-                sample.moveSegment = incoming
-            }
-
-            let combinedLocations = (incomingSamples + outgoingSamples)
-                .sorted { $0.timestamp < $1.timestamp }
-                .map(\.asLocation)
-            if combinedLocations.count > 1 {
-                incoming.distanceMeters = Self.totalDistance(for: combinedLocations)
-            } else {
-                incoming.distanceMeters += outgoing.distanceMeters
-            }
-
-            if incoming.transportMode != outgoing.transportMode {
-                incoming.transportMode = outgoing.distanceMeters > incoming.distanceMeters
-                    ? outgoing.transportMode
-                    : incoming.transportMode
-            }
-
-            let mergedCoordinates = TimelineLocator.concatenating(firstCoordinates, secondCoordinates)
-            incoming.clearCachedRouteCoordinates()
-            if incoming.manualRouteCoordinatesData != nil || outgoing.manualRouteCoordinatesData != nil {
-                incoming.storeManualRouteCoordinates(mergedCoordinates)
-                incoming.routeMatchPolicy = .manual
-            } else if mergedCoordinates.count > 1 {
-                incoming.storeCachedRouteCoordinates(
-                    mergedCoordinates,
-                    signature: "dissolved-\(incoming.id.uuidString)"
-                )
-            }
-            if incoming.usesHighAccuracyRouteTracking || outgoing.usesHighAccuracyRouteTracking {
-                if incoming.routeMatchPolicy == .auto {
-                    incoming.routeMatchPolicy = .recorded
-                }
-                if incoming.routeMatchConfidence == .unknown {
-                    incoming.routeMatchConfidence = .recorded
-                }
-            }
-
-            incoming.comment = [incoming.comment, outgoing.comment]
-                .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
-                .joined(separator: "\n")
-
-            modelContext.delete(outgoing)
-            modelContext.delete(visit)
-            return incoming
+            let connected = connectDifferentModeLegs(incoming: incoming, outgoing: outgoing, visit: visit)
+            return .connected(incoming: connected.incoming, outgoing: connected.outgoing)
         }
     }
 
@@ -2386,6 +2376,104 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         let result = try body()
         try saveIfNeeded()
         return result
+    }
+
+    /// Walk 10m → stop 2m → walk 20m becomes one 32-minute walk, including the stop.
+    private func mergeSameModeLegs(
+        incoming: MoveSegment,
+        outgoing: MoveSegment,
+        visit: VisitPlace
+    ) -> MoveSegment {
+        let firstCoordinates = TimelineLocator.displayedCoordinates(for: incoming)
+        let secondCoordinates = TimelineLocator.displayedCoordinates(for: outgoing)
+
+        incoming.endPlace = outgoing.endPlace
+        var endDate = max(outgoing.endDate, incoming.endDate)
+        if let departure = visit.departureDate {
+            endDate = max(endDate, departure)
+        }
+        incoming.endDate = endDate
+        if incoming.endDate <= incoming.startDate {
+            incoming.endDate = incoming.startDate.addingTimeInterval(1)
+        }
+
+        let incomingSamples = incoming.samples
+        let outgoingSamples = outgoing.samples
+        for sample in outgoingSamples where sample.moveSegment?.id != incoming.id {
+            sample.moveSegment = incoming
+        }
+
+        let combinedLocations = (incomingSamples + outgoingSamples)
+            .sorted { $0.timestamp < $1.timestamp }
+            .map(\.asLocation)
+        if combinedLocations.count > 1 {
+            incoming.distanceMeters = Self.totalDistance(for: combinedLocations)
+        } else {
+            incoming.distanceMeters += outgoing.distanceMeters
+        }
+
+        incoming.stepCount = Self.combinedStepCount(incoming.stepCount, outgoing.stepCount)
+        incoming.speedProfileData = nil
+
+        let mergedCoordinates = TimelineLocator.concatenating(firstCoordinates, secondCoordinates)
+        incoming.clearCachedRouteCoordinates()
+        if incoming.manualRouteCoordinatesData != nil || outgoing.manualRouteCoordinatesData != nil {
+            incoming.storeManualRouteCoordinates(mergedCoordinates)
+            incoming.routeMatchPolicy = .manual
+        }
+        if incoming.usesHighAccuracyRouteTracking || outgoing.usesHighAccuracyRouteTracking {
+            if incoming.routeMatchPolicy == .auto {
+                incoming.routeMatchPolicy = .recorded
+            }
+            if incoming.routeMatchConfidence == .unknown {
+                incoming.routeMatchConfidence = .recorded
+            }
+        }
+
+        incoming.comment = [incoming.comment, outgoing.comment]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+
+        modelContext.delete(outgoing)
+        modelContext.delete(visit)
+        return incoming
+    }
+
+    /// Different modes keep two rows that meet when the stop ended.
+    private func connectDifferentModeLegs(
+        incoming: MoveSegment,
+        outgoing: MoveSegment,
+        visit: VisitPlace
+    ) -> (incoming: MoveSegment, outgoing: MoveSegment) {
+        let destination = outgoing.endPlace
+        let origin = incoming.startPlace
+        var joinTime = visit.departureDate ?? outgoing.startDate
+        joinTime = max(joinTime, incoming.startDate.addingTimeInterval(1))
+        if joinTime >= outgoing.endDate {
+            joinTime = outgoing.endDate.addingTimeInterval(-1)
+        }
+
+        incoming.endPlace = destination
+        incoming.endDate = joinTime
+        outgoing.startPlace = origin
+        outgoing.startDate = joinTime
+        incoming.clearCachedRouteCoordinates()
+        outgoing.clearCachedRouteCoordinates()
+        incoming.speedProfileData = nil
+        outgoing.speedProfileData = nil
+
+        modelContext.delete(visit)
+        return (incoming, outgoing)
+    }
+
+    private static func combinedStepCount(_ lhs: Int?, _ rhs: Int?) -> Int? {
+        switch (lhs, rhs) {
+        case let (left?, right?): return left + right
+        case let (left?, nil): return left
+        case let (nil, right?): return right
+        case (nil, nil): return nil
+        }
     }
 
     private func visitsPossiblyCovering(_ date: Date) throws -> [VisitPlace] {
@@ -3653,9 +3741,10 @@ enum SimulatorDemoDataSeeder {
         var pendingMoves: [PendingMove] = []
 
         for (stopIndex, plannedStop) in plannedStops.enumerated() {
-            let dwellMinutes = dwellMinutes(for: routeIndex, stopIndex: stopIndex)
+            let unlabeled = plannedStop.stop.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let stayMinutes = unlabeled ? 2 : dwellMinutes(for: routeIndex, stopIndex: stopIndex)
             let arrival = currentTime
-            let departure = arrival.addingTimeInterval(TimeInterval(dwellMinutes * 60))
+            let departure = arrival.addingTimeInterval(TimeInterval(stayMinutes * 60))
 
             let place = VisitPlace(
                 arrivalDate: arrival,
@@ -3663,8 +3752,9 @@ enum SimulatorDemoDataSeeder {
                 latitude: plannedStop.stop.coordinate.latitude,
                 longitude: plannedStop.stop.coordinate.longitude,
                 horizontalAccuracy: horizontalAccuracy(for: plannedStop.transportMode),
-                userLabel: plannedStop.stop.label
+                userLabel: unlabeled ? nil : plannedStop.stop.label
             )
+            place.isHiddenAsShortStop = unlabeled
             place.dayTimeline = timeline
             context.insert(place)
             places.append(place)
@@ -4347,6 +4437,7 @@ enum SimulatorDemoDataSeeder {
             [
                 stop("Circular Quay", -33.861100, 151.210900),
                 stop("Opera House", -33.856800, 151.215300),
+                stop("", -33.860800, 151.216000),
                 stop("Royal Botanic Garden", -33.864700, 151.216800),
                 stop("Bondi Beach", -33.890800, 151.274300)
             ]
