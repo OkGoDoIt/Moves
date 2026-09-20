@@ -86,9 +86,8 @@ private struct PhotoViewerItem: Identifiable {
 
 /// Horizontal read-only thumbnails for photos in a date range.
 ///
-/// Named trip detail (`TripPhotoStrip` in WS9b) should present this after
-/// merge so visit attachments in the trip interval show real stills, not
-/// placeholder glyphs. Does not copy or own the attachments.
+/// Named trip detail presents this for visit attachments in the trip interval.
+/// Does not copy or own the attachments.
 struct PhotoAttachmentRangeStrip: View {
     let attachments: [PhotoAttachment]
     var thumbnailSize: CGFloat = 72

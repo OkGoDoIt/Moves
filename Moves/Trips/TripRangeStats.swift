@@ -101,24 +101,17 @@ enum TripRangeStats {
         return !(startsAtMidnight && endsAtMidnight)
     }
 
+    /// Photos whose capture time falls in `range` (end exclusive).
     static func photos(
         in range: DateInterval,
         context: ModelContext
     ) throws -> [PhotoAttachment] {
-        let start = range.start
-        let end = range.end
-        let descriptor = FetchDescriptor<PhotoAttachment>(
-            predicate: #Predicate { photo in
-                photo.capturedAt >= start && photo.capturedAt < end
-            },
-            sortBy: [SortDescriptor(\PhotoAttachment.capturedAt, order: .forward)]
-        )
-        return try context.fetch(descriptor)
+        try PhotoAttachmentQuery.photos(in: range, context: context)
     }
 
     /// First geotagged photo in range, else the earliest attachment.
     static func coverPhoto(from photos: [PhotoAttachment]) -> PhotoAttachment? {
-        photos.first { $0.latitude != nil && $0.longitude != nil } ?? photos.first
+        PhotoAttachmentQuery.coverPhoto(from: photos)
     }
 
     static func summary(

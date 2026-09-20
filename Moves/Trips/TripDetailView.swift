@@ -116,7 +116,7 @@ struct TripDetailView: View {
             }
 
             Section {
-                TripPhotoStrip(photos: photos)
+                PhotoAttachmentRangeStrip(attachments: photos)
             } header: {
                 Text(String(localized: "Photos"))
             }
@@ -293,37 +293,4 @@ struct TripDaySection: Identifiable {
     let entries: [TimelineEntry]
 
     var id: TimeInterval { dayStart.timeIntervalSinceReferenceDate }
-}
-
-/// Horizontal strip of photos attached in the trip’s range.
-///
-/// Thumbnails from the Photos library belong to WS9; without assets this
-/// still shows a count of `PhotoAttachment` rows so the strip is not a blank hole.
-struct TripPhotoStrip: View {
-    let photos: [PhotoAttachment]
-
-    var body: some View {
-        if photos.isEmpty {
-            Text(String(localized: "No photos in this range"))
-                .font(.system(.subheadline, design: .rounded))
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        } else {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(Array(photos.enumerated()), id: \.offset) { _, photo in
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(MovesPalette.frostedFill)
-                            Image(systemName: photo.latitude == nil ? "photo" : "photo.badge.location")
-                                .font(.system(size: 18, weight: .medium))
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(width: 72, height: 72)
-                        .accessibilityLabel(Text(photo.capturedAt, format: .dateTime.hour().minute()))
-                    }
-                }
-            }
-        }
-    }
 }

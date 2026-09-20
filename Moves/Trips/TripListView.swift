@@ -106,9 +106,13 @@ private struct TripListRow: View {
         ZStack {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(MovesPalette.place.opacity(0.14))
-            Image(systemName: summary.coverAssetLocalIdentifier == nil ? "suitcase.fill" : "photo")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(MovesPalette.place)
+            if let identifier = summary.coverAssetLocalIdentifier {
+                PhotoAssetThumbnail(identifier: identifier, cornerRadius: 10)
+            } else {
+                Image(systemName: "suitcase.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(MovesPalette.place)
+            }
         }
         .frame(width: 44, height: 44)
         .accessibilityHidden(true)
