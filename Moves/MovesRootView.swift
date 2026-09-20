@@ -203,9 +203,16 @@ struct MovesRootView: View {
         }
     }
 
-    /// `MOVES_JUMP_DATE` lets screenshot agents open a specific day without tapping.
+    /// Screenshot-agent launch flags (`MOVES_JUMP_DATE`, `MOVES_OPEN_SETTINGS`, `MOVES_OPEN_REVIEW`).
     private func applyLaunchJumpIfNeeded() {
-        guard let raw = ProcessInfo.processInfo.environment["MOVES_JUMP_DATE"],
+        let env = ProcessInfo.processInfo.environment
+        if env["MOVES_OPEN_SETTINGS"] == "1" {
+            controller.isShowingSettings = true
+        }
+        if env["MOVES_OPEN_REVIEW"] == "1" {
+            controller.isShowingReviewInbox = true
+        }
+        guard let raw = env["MOVES_JUMP_DATE"],
               let date = TimelineDeepLink.parseTimestamp(raw) else { return }
         controller.selectedTab = .timeline
         controller.requestedJumpDate = date
@@ -277,6 +284,8 @@ struct MovesRootView: View {
         case "review":
             controller.selectedTab = .timeline
             controller.isShowingReviewInbox = true
+        case "settings":
+            controller.isShowingSettings = true
         default:
             break
         }

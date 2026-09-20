@@ -149,6 +149,7 @@ struct DayTimelinePageContent: View {
     @State private var expandedHiddenStopIDs: Set<String> = []
     @State private var highlightedEntryID: String?
     @State private var isMapExpanded = false
+    @State private var screenshotOpenedMove: MoveSegment?
 
     init(dayTimeline: DayTimeline, isActive: Bool) {
         self.dayTimeline = dayTimeline
@@ -345,6 +346,31 @@ struct DayTimelinePageContent: View {
                 highlightedEntryID = match.id
             }
         }
+        .onAppear {
+            applyScreenshotAgentFlagsIfNeeded()
+        }
+        .navigationDestination(isPresented: Binding(
+            get: { screenshotOpenedMove != nil },
+            set: { if !$0 { screenshotOpenedMove = nil } }
+        )) {
+            if let move = screenshotOpenedMove {
+                MoveMapDetailView(segment: move)
+            }
+        }
+    }
+
+    /// `MOVES_EXPAND_MAP` / `MOVES_OPEN_FIRST_MOVE` let screenshot agents reach
+    /// screens that otherwise need a tap, without a Simulator.app window.
+    private func applyScreenshotAgentFlagsIfNeeded() {
+        let env = ProcessInfo.processInfo.environment
+        if env["MOVES_EXPAND_MAP"] == "1" {
+            isMapExpanded = true
+        }
+        if env["MOVES_OPEN_FIRST_MOVE"] == "1" {
+            screenshotOpenedMove = dayTimeline.moves
+                .sorted { $0.timelineStartDate < $1.timelineStartDate }
+                .first
+        }
     }
 
     private var momentJumpTaskID: String {
@@ -353,7 +379,7 @@ struct DayTimelinePageContent: View {
     }
 
     private func portraitContent(pageSize: CGSize) -> some View {
-        let heroHeight = max(260, pageSize.height * 0.42)
+        let heroHeight = max(240, pageSize.height * 0.36)
 
         return ZStack {
             VStack(spacing: 8) {
@@ -369,8 +395,17 @@ struct DayTimelinePageContent: View {
                     .padding(.horizontal, 14)
 
                     storylineList(usesSelection: false)
+
+                    if !activityBubbleMetrics.isEmpty {
+                        ActivityBubblesView(
+                            metrics: activityBubbleMetrics,
+                            filteredModes: $filteredModes
+                        )
+                        .padding(.horizontal, 8)
+                    }
                 }
             }
+            .padding(.bottom, 52)
 
             if isMapExpanded {
                 DayMapStrip(
@@ -387,6 +422,7 @@ struct DayTimelinePageContent: View {
                 .padding(.bottom, 8)
             }
         }
+        .safeAreaPadding(.bottom)
     }
 
     private var landscapeContent: some View {
@@ -412,9 +448,18 @@ struct DayTimelinePageContent: View {
                 .padding(.horizontal, 4)
 
                 storylineList(usesSelection: true)
+
+                if !activityBubbleMetrics.isEmpty {
+                    ActivityBubblesView(
+                        metrics: activityBubbleMetrics,
+                        filteredModes: $filteredModes
+                    )
+                    .padding(.horizontal, 4)
+                }
             }
         }
         .safeAreaPadding(.horizontal, 14)
+        .safeAreaPadding(.bottom)
     }
 
     private func storylineList(usesSelection: Bool) -> some View {
@@ -439,21 +484,12 @@ struct DayTimelinePageContent: View {
                         .listRowBackground(rowBackground(for: entry))
                     }
                 }
-
-                if !activityBubbleMetrics.isEmpty {
-                    ActivityBubblesView(
-                        metrics: activityBubbleMetrics,
-                        filteredModes: $filteredModes
-                    )
-                    .listRowSeparator(.hidden)
-                    .listRowInsets(EdgeInsets(top: 10, leading: 4, bottom: 18, trailing: 4))
-                    .listRowBackground(Color.clear)
-                }
             }
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
             .scrollIndicators(.hidden)
             .scrollEdgeEffectStyle(.soft, for: .top)
+            .contentMargins(.bottom, 12, for: .scrollContent)
             .onChange(of: highlightedEntryID) { _, entryID in
                 guard let entryID else { return }
                 withAnimation(.easeInOut(duration: 0.28)) {

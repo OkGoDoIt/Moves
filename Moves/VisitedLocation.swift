@@ -3389,8 +3389,17 @@ enum SimulatorDemoDataSeeder {
             let context = ModelContext(container)
             let descriptor = FetchDescriptor<DayTimeline>()
 
-            guard try context.fetch(descriptor).isEmpty else {
+            let existing = try context.fetch(descriptor)
+            // `ContentView.openCurrentDay()` can insert an empty "today" before this
+            // Task runs. Treat empty shells as unseeded so demo days still appear.
+            if existing.contains(where: { !$0.places.isEmpty || !$0.moves.isEmpty }) {
                 return
+            }
+            for day in existing {
+                context.delete(day)
+            }
+            if !existing.isEmpty {
+                try context.save()
             }
 
             Task { @MainActor in

@@ -663,6 +663,21 @@ struct ContentView: View {
         let calendar = Calendar.current
         let todayStart = calendar.startOfDay(for: .now)
         let todayKey = DayTimeline.makeDayKey(for: todayStart)
+
+        // Demo seeding is async. Inserting an empty "today" here races it and can
+        // make the seeder think data already exists, leaving the Timeline blank.
+        if captureManager.isDemoMode {
+            selectedDayKey = todayKey
+            if let todayIndex = dayTimelines.firstIndex(where: { $0.dayKey == todayKey }),
+               !dayTimelines[todayIndex].places.isEmpty || !dayTimelines[todayIndex].moves.isEmpty {
+                selectedPageIndex = todayIndex
+            } else if let recordedIndex = dayTimelines.lastIndex(where: { !$0.places.isEmpty || !$0.moves.isEmpty }) {
+                selectedPageIndex = recordedIndex
+                selectedDayKey = dayTimelines[recordedIndex].dayKey
+            }
+            return
+        }
+
         var existingKeys = Set(dayTimelines.map(\.dayKey))
         var didInsertDay = false
 
