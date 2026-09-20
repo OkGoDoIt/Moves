@@ -128,6 +128,7 @@
 		F21000013050000100000001 /* TimelineItemActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = F21000013050000100000000 /* TimelineItemActions.swift */; };
 		F21100013051000100000001 /* TimelineTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F21100013051000100000000 /* TimelineTabView.swift */; };
 		F21100013051000100000003 /* TimelineTabTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F21100013051000100000002 /* TimelineTabTests.swift */; };
+		F220000130E0000100000003 /* MapRegionFactoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F220000130E0000100000002 /* MapRegionFactoryTests.swift */; };
 		F30000013050000100000001 /* RouteRendering.swift in Sources */ = {isa = PBXBuildFile; fileRef = F30000013050000100000000 /* RouteRendering.swift */; };
 		F30000013050000100000003 /* SpeedProfileBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = F30000013050000100000002 /* SpeedProfileBuilder.swift */; };
 		F30000013050000100000005 /* SpeedProfileBuilderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F30000013050000100000004 /* SpeedProfileBuilderTests.swift */; };
@@ -158,6 +159,8 @@
 		F70000013070000100000007 /* PlacesIndex.swift in Sources */ = {isa = PBXBuildFile; fileRef = F70000013070000100000006 /* PlacesIndex.swift */; };
 		F70000013070000100000009 /* PlaceGeocodeBackfill.swift in Sources */ = {isa = PBXBuildFile; fileRef = F70000013070000100000008 /* PlaceGeocodeBackfill.swift */; };
 		F7000001307000010000000B /* PlacesIndexTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F7000001307000010000000A /* PlacesIndexTests.swift */; };
+		F7000001307000010000000D /* PlaceDisplayName.swift in Sources */ = {isa = PBXBuildFile; fileRef = F7000001307000010000000C /* PlaceDisplayName.swift */; };
+		F7000001307000010000000F /* PlaceConfirmSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = F7000001307000010000000E /* PlaceConfirmSheet.swift */; };
 		F80000013080000100000001 /* InsightsTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F80000013080000100000000 /* InsightsTabView.swift */; };
 		F80000013080000100000003 /* InsightsSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = F80000013080000100000002 /* InsightsSnapshot.swift */; };
 		F80000013080000100000005 /* InsightsConnectionsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F80000013080000100000004 /* InsightsConnectionsView.swift */; };
@@ -374,6 +377,7 @@
 		F21000013050000100000000 /* TimelineItemActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineItemActions.swift; sourceTree = "<group>"; };
 		F21100013051000100000000 /* TimelineTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineTabView.swift; sourceTree = "<group>"; };
 		F21100013051000100000002 /* TimelineTabTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineTabTests.swift; sourceTree = "<group>"; };
+		F220000130E0000100000002 /* MapRegionFactoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapRegionFactoryTests.swift; sourceTree = "<group>"; };
 		F30000013050000100000000 /* RouteRendering.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteRendering.swift; sourceTree = "<group>"; };
 		F30000013050000100000002 /* SpeedProfileBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeedProfileBuilder.swift; sourceTree = "<group>"; };
 		F30000013050000100000004 /* SpeedProfileBuilderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeedProfileBuilderTests.swift; sourceTree = "<group>"; };
@@ -404,6 +408,8 @@
 		F70000013070000100000006 /* PlacesIndex.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlacesIndex.swift; sourceTree = "<group>"; };
 		F70000013070000100000008 /* PlaceGeocodeBackfill.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaceGeocodeBackfill.swift; sourceTree = "<group>"; };
 		F7000001307000010000000A /* PlacesIndexTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlacesIndexTests.swift; sourceTree = "<group>"; };
+		F7000001307000010000000C /* PlaceDisplayName.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaceDisplayName.swift; sourceTree = "<group>"; };
+		F7000001307000010000000E /* PlaceConfirmSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaceConfirmSheet.swift; sourceTree = "<group>"; };
 		F80000013080000100000000 /* InsightsTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InsightsTabView.swift; sourceTree = "<group>"; };
 		F80000013080000100000002 /* InsightsSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InsightsSnapshot.swift; sourceTree = "<group>"; };
 		F80000013080000100000004 /* InsightsConnectionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InsightsConnectionsView.swift; sourceTree = "<group>"; };
@@ -666,6 +672,8 @@
 				F70000013070000100000002 /* PlaceDetailView.swift */,
 				F70000013070000100000004 /* OccupancyChartView.swift */,
 				F70000013070000100000006 /* PlacesIndex.swift */,
+				F7000001307000010000000C /* PlaceDisplayName.swift */,
+				F7000001307000010000000E /* PlaceConfirmSheet.swift */,
 			);
 			path = PlacesTab;
 			sourceTree = "<group>";
@@ -726,6 +734,7 @@
 				F20000013040000100000006 /* TimelineEditingTests.swift */,
 				F20000013040000100000008 /* TimelineLocatorTests.swift */,
 				F21100013051000100000002 /* TimelineTabTests.swift */,
+				F220000130E0000100000002 /* MapRegionFactoryTests.swift */,
 				F30000013050000100000004 /* SpeedProfileBuilderTests.swift */,
 				F21000013050000100000010 /* NearbyPlaceSuggesterTests.swift */,
 				F40000013050000100000002 /* RouteMatchPolicyTests.swift */,
@@ -1076,6 +1085,8 @@
 				F70000013070000100000003 /* PlaceDetailView.swift in Sources */,
 				F70000013070000100000005 /* OccupancyChartView.swift in Sources */,
 				F70000013070000100000007 /* PlacesIndex.swift in Sources */,
+				F7000001307000010000000D /* PlaceDisplayName.swift in Sources */,
+				F7000001307000010000000F /* PlaceConfirmSheet.swift in Sources */,
 				F70000013070000100000009 /* PlaceGeocodeBackfill.swift in Sources */,
 				F80000013080000100000001 /* InsightsTabView.swift in Sources */,
 				F80000013080000100000003 /* InsightsSnapshot.swift in Sources */,
@@ -1140,6 +1151,7 @@
 				F20000013040000100000007 /* TimelineEditingTests.swift in Sources */,
 				F20000013040000100000009 /* TimelineLocatorTests.swift in Sources */,
 				F21100013051000100000003 /* TimelineTabTests.swift in Sources */,
+				F220000130E0000100000003 /* MapRegionFactoryTests.swift in Sources */,
 				F30000013050000100000005 /* SpeedProfileBuilderTests.swift in Sources */,
 				F21000013050000100000011 /* NearbyPlaceSuggesterTests.swift in Sources */,
 				F40000013050000100000003 /* RouteMatchPolicyTests.swift in Sources */,
@@ -1350,7 +1362,7 @@
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_ENTITLEMENTS = Moves/Moves.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 37;
+				CURRENT_PROJECT_VERSION = 39;
 				DEVELOPMENT_ASSET_PATHS = "\"Moves/Preview Content\"";
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
@@ -1399,7 +1411,7 @@
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_ENTITLEMENTS = Moves/Moves.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 37;
+				CURRENT_PROJECT_VERSION = 39;
 				DEVELOPMENT_ASSET_PATHS = "\"Moves/Preview Content\"";
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
@@ -1497,7 +1509,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = "Moves Watch App/MovesWatch.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 37;
+				CURRENT_PROJECT_VERSION = 39;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Moves Watch App/Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1523,7 +1535,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = "Moves Watch App/MovesWatch.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 37;
+				CURRENT_PROJECT_VERSION = 39;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Moves Watch App/Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1549,7 +1561,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = "Moves Widgets/MovesWidgets.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 37;
+				CURRENT_PROJECT_VERSION = 39;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Moves Widgets/MovesWidgets-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1575,7 +1587,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = "Moves Widgets/MovesWidgets.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 37;
+				CURRENT_PROJECT_VERSION = 39;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Moves Widgets/MovesWidgets-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1601,7 +1613,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = "Moves Widgets/MovesWidgets.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 37;
+				CURRENT_PROJECT_VERSION = 39;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Moves Widgets/MovesWidgets-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1628,7 +1640,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = "Moves Widgets/MovesWidgets.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 37;
+				CURRENT_PROJECT_VERSION = 39;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Moves Widgets/MovesWidgets-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (

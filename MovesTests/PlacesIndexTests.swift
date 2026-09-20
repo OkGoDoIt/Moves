@@ -357,6 +357,209 @@ final class PlacesIndexTests: XCTestCase {
         XCTAssertFalse(created.arrivalHourHistogram.allSatisfy { $0 == 0 })
     }
 
+    func testSuggestedClusterExposesDisplayNameAndAddressForUnconfirmedVisits() {
+        let first = PlacesVisitRecord(
+            name: "10.81393, 106.71000",
+            latitude: 10.81393,
+            longitude: 106.71000,
+            arrivalDate: hours(3),
+            departureDate: hours(2),
+            autoLabel: nil,
+            thoroughfare: "Ben Van Don",
+            formattedAddress: "150 Ben Van Don, District 4"
+        )
+        let nearby = PlacesVisitRecord(
+            name: "10.81395, 106.71002",
+            latitude: 10.81395,
+            longitude: 106.71002,
+            arrivalDate: hours(30),
+            departureDate: hours(28),
+            thoroughfare: "Ben Van Don",
+            formattedAddress: "150 Ben Van Don, District 4"
+        )
+
+        let snapshot = PlacesIndexBuilder.build(
+            knownPlaces: [],
+            visits: [first, nearby],
+            sort: .mostVisited,
+            query: "",
+            now: now,
+            calendar: calendar
+        )
+
+        XCTAssertEqual(snapshot.suggested.count, 1)
+        XCTAssertEqual(snapshot.suggested[0].displayName, "Ben Van Don")
+        XCTAssertEqual(snapshot.suggested[0].address, "150 Ben Van Don, District 4")
+        XCTAssertFalse(snapshot.suggested[0].name.localizedCaseInsensitiveContains("Untitled"))
+        XCTAssertTrue(snapshot.suggested[0].subtitle.contains("Ben Van Don") || snapshot.suggested[0].subtitle.contains("visit"))
+    }
+
+    func testUnlabeledClustersUseCompactCoordinatesInsteadOfUntitled() {
+        let visit = PlacesVisitRecord(
+            name: "52.52000, 13.40500",
+            latitude: 52.52000,
+            longitude: 13.40500,
+            arrivalDate: hours(4),
+            departureDate: hours(3)
+        )
+
+        let snapshot = PlacesIndexBuilder.build(
+            knownPlaces: [],
+            visits: [visit],
+            sort: .mostVisited,
+            query: "",
+            now: now,
+            calendar: calendar
+        )
+
+        XCTAssertEqual(snapshot.suggested.count, 1)
+        XCTAssertEqual(snapshot.suggested[0].displayName, PlaceDisplayName.compactCoordinate(visit.coordinate))
+        XCTAssertTrue(snapshot.suggested[0].isNaming)
+        XCTAssertFalse(snapshot.suggested[0].name.contains("Untitled"))
+        XCTAssertTrue(snapshot.suggested[0].subtitle.contains("Naming"))
+    }
+
+    func testSameStreetClustersStaySeparateAndShowThumbnails() {
+        let north = PlacesVisitRecord(
+            name: "coord",
+            latitude: 52.35580,
+            longitude: 4.89120,
+            arrivalDate: hours(8),
+            departureDate: hours(6),
+            thoroughfare: "Hobbemakade",
+            formattedAddress: "Hobbemakade 120"
+        )
+        let south = PlacesVisitRecord(
+            name: "coord",
+            latitude: 52.35390,
+            longitude: 4.89380,
+            arrivalDate: hours(40),
+            departureDate: hours(38),
+            thoroughfare: "Hobbemakade",
+            formattedAddress: "Hobbemakade 40"
+        )
+        let user = CLLocationCoordinate2D(latitude: 52.35580, longitude: 4.89120)
+
+        let snapshot = PlacesIndexBuilder.build(
+            knownPlaces: [],
+            visits: [north, south],
+            sort: .mostVisited,
+            query: "",
+            now: now,
+            calendar: calendar,
+            userCoordinate: user
+        )
+
+        XCTAssertEqual(snapshot.suggested.count, 2)
+        XCTAssertTrue(snapshot.suggested.allSatisfy { $0.name == "Hobbemakade" })
+        XCTAssertTrue(snapshot.suggested.allSatisfy(\.showsMapThumbnail))
+        XCTAssertTrue(snapshot.suggested.contains { $0.subtitle.localizedCaseInsensitiveContains("away") })
+    }
+
+    func testPlaceDisplayNamerPrefersPOIThenStreetThenCoordinate() {
+        let poi = PlaceDisplayNamer.resolve(
+            userLabel: nil,
+            autoLabel: "Highlands Coffee",
+            thoroughfare: "Ben Van Don",
+            formattedAddress: "150 Ben Van Don",
+            locality: "Ho Chi Minh City",
+            coordinate: CLLocationCoordinate2D(latitude: 10.81, longitude: 106.71),
+            isPending: false
+        )
+        XCTAssertEqual(poi.primary, "Highlands Coffee")
+        XCTAssertEqual(poi.address, "150 Ben Van Don")
+
+        let street = PlaceDisplayNamer.resolve(
+            userLabel: nil,
+            autoLabel: nil,
+            thoroughfare: "Museumstraat",
+            formattedAddress: nil,
+            locality: "Amsterdam",
+            coordinate: CLLocationCoordinate2D(latitude: 52.36, longitude: 4.88),
+            isPending: false
+        )
+        XCTAssertEqual(street.primary, "Museumstraat")
+        XCTAssertEqual(street.address, "Amsterdam")
+    }
+
+    func testConfirmSuggestedStoresCategoryAndAddress() throws {
+        let schema = Schema(MovesTimelineSchema.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)
+        )
+        let context = ModelContext(container)
+        context.undoManager = UndoManager()
+        let visit = VisitPlace(
+            arrivalDate: now,
+            departureDate: now.addingTimeInterval(1_200),
+            latitude: 52.36,
+            longitude: 4.88,
+            horizontalAccuracy: 10
+        )
+        visit.thoroughfare = "Museumstraat"
+        context.insert(visit)
+        try context.save()
+
+        let created = try PlacesLibrary.confirmSuggested(
+            visitIDs: [visit.id],
+            name: "Rijksmuseum Garden",
+            in: context,
+            formattedAddress: "Museumstraat, Amsterdam",
+            thoroughfare: "Museumstraat",
+            category: "Gym"
+        )
+
+        XCTAssertEqual(created.name, "Rijksmuseum Garden")
+        XCTAssertEqual(created.formattedAddress, "Museumstraat, Amsterdam")
+        XCTAssertEqual(created.thoroughfare, "Museumstraat")
+        XCTAssertEqual(created.category, KnownPlaceCategory.gym.rawValue)
+        XCTAssertEqual(visit.assignmentSource, .user)
+        XCTAssertEqual(visit.userLabel, "Rijksmuseum Garden")
+    }
+
+    func testFillMissingNamesWritesAutoLabelFromFakeGeocode() async throws {
+        let schema = Schema(MovesTimelineSchema.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)
+        )
+        let context = ModelContext(container)
+        let visit = VisitPlace(
+            arrivalDate: now,
+            departureDate: now.addingTimeInterval(600),
+            latitude: 10.8139,
+            longitude: 106.7100,
+            horizontalAccuracy: 12
+        )
+        context.insert(visit)
+        try context.save()
+
+        let region = PlaceGeocodeRegion(
+            countryCode: "VN",
+            locality: "Ho Chi Minh City",
+            name: nil,
+            thoroughfare: "Ben Van Don",
+            formattedAddress: "150 Ben Van Don, District 4"
+        )
+        let cacheURL = FileManager.default.temporaryDirectory.appendingPathComponent("places-name-\(UUID().uuidString).json")
+        let cache = PlaceGeocodeCellCache(regions: [:], url: cacheURL)
+        let filled = await PlaceGeocodeBackfill.fillMissingNames(
+            in: container,
+            geocoder: FakePlaceReverseGeocoder(region: region),
+            searcher: nil,
+            cache: cache,
+            limit: 4
+        )
+
+        XCTAssertGreaterThanOrEqual(filled, 1)
+        let reloaded = try ModelContext(container).fetch(FetchDescriptor<VisitPlace>())
+        XCTAssertEqual(reloaded.first?.autoLabel, "Ben Van Don")
+        XCTAssertEqual(reloaded.first?.thoroughfare, "Ben Van Don")
+        XCTAssertEqual(reloaded.first?.formattedAddress, "150 Ben Van Don, District 4")
+        XCTAssertEqual(reloaded.first?.locality, "Ho Chi Minh City")
+    }
+
     func testMergeUsesPlaceLearningEngineAndDeletesSource() throws {
         let schema = Schema(MovesTimelineSchema.models)
         let container = try ModelContainer(
@@ -453,5 +656,13 @@ final class PlacesIndexTests: XCTestCase {
 
     private func hours(_ value: Int) -> Date {
         now.addingTimeInterval(TimeInterval(-value) * 3_600)
+    }
+}
+
+private struct FakePlaceReverseGeocoder: PlaceReverseGeocoding, Sendable {
+    let region: PlaceGeocodeRegion
+
+    func reverseGeocode(_ coordinate: CLLocationCoordinate2D) async throws -> PlaceGeocodeRegion? {
+        region
     }
 }

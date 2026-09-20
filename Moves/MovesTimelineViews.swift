@@ -1398,7 +1398,9 @@ struct DayMapStrip: View {
         showsBigMarkers: Bool
     ) async throws -> UIImage {
         let options = MKMapSnapshotter.Options()
-        options.region = region
+        // `setRegion:` raises NSException (not a Swift Error) for NaN, Inf,
+        // zero span, or a center latitude outside ±90. Always sanitize first.
+        options.region = MapRegionFactory.snapshotSafe(region)
         options.size = size
         options.scale = scale
 

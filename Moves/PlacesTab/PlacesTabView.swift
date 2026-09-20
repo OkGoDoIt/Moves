@@ -1,3 +1,4 @@
+import CoreLocation
 import MapKit
 import SwiftData
 import SwiftUI
@@ -6,7 +7,6 @@ import SwiftUI
 struct PlacesTabView: View {
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var rootController: MovesRootController
-    @Environment(\.undoToastPresenter) private var undoToast
 
     @Query(sort: \KnownPlace.name)
     private var knownPlaces: [KnownPlace]
@@ -17,6 +17,7 @@ struct PlacesTabView: View {
     @State private var index = PlacesIndex()
     @State private var path = NavigationPath()
     @State private var didOpenLaunchPlace = false
+    @State private var clusterToConfirm: PlacesSuggestedCluster?
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -49,9 +50,17 @@ struct PlacesTabView: View {
                     PlaceDetailView(placeID: id)
                 case .suggested(let clusterID):
                     if let cluster = index.snapshot.suggestedCluster(id: clusterID) {
-                        SuggestedPlaceDetailView(cluster: cluster)
+                        SuggestedPlaceDetailView(cluster: cluster) { placeID in
+                            path.removeLast()
+                            path.append(PlacesRoute.known(placeID))
+                        }
                     }
                 }
+            }
+        }
+        .sheet(item: $clusterToConfirm) { cluster in
+            PlaceConfirmSheet(cluster: cluster) { place in
+                path.append(PlacesRoute.known(place.id))
             }
         }
         .onAppear(perform: rebuild)
@@ -60,6 +69,9 @@ struct PlacesTabView: View {
         .onChange(of: index.query) { _, _ in rebuild() }
         .onChange(of: index.snapshot.placeCount) { _, _ in
             openFirstPlaceIfRequested()
+        }
+        .onChange(of: index.snapshot.suggested.count) { _, _ in
+            openConfirmIfRequested()
         }
         .onChange(of: rootController.requestedKnownPlaceID) { _, placeID in
             guard let placeID else { return }
@@ -77,8 +89,8 @@ struct PlacesTabView: View {
         let known = knownPlaces.map {
             "\($0.id.uuidString):\($0.name):\($0.countryCode ?? ""):\($0.locality ?? ""):\($0.confirmedVisitCount):\($0.footprintRadius)"
         }
-        let assigned = visits.prefix(200).map {
-            "\($0.id.uuidString):\($0.knownPlace?.id.uuidString ?? ""):\($0.countryCode ?? ""):\($0.locality ?? "")"
+        let assigned = visits.prefix(400).map {
+            "\($0.id.uuidString):\($0.knownPlace?.id.uuidString ?? ""):\($0.autoLabel ?? ""):\($0.thoroughfare ?? ""):\($0.formattedAddress ?? ""):\($0.countryCode ?? ""):\($0.locality ?? "")"
         }
         return (known + assigned).joined(separator: ",")
     }
@@ -106,7 +118,7 @@ struct PlacesTabView: View {
                                 SuggestedPlaceRow(cluster: cluster)
                             }
                             Button(String(localized: "Confirm")) {
-                                confirm(cluster)
+                                clusterToConfirm = cluster
                             }
                             .font(.system(size: 13, weight: .semibold, design: .rounded))
                             .buttonStyle(.borderedProminent)
@@ -167,7 +179,11 @@ struct PlacesTabView: View {
     }
 
     private func rebuild() {
-        index.ingest(knownPlaces: knownPlaces, visits: visits)
+        index.ingest(
+            knownPlaces: knownPlaces,
+            visits: visits,
+            userCoordinate: CLLocationManager().location?.coordinate
+        )
     }
 
     /// Simulator seed and `runIfNeeded` race: labeled visits can land after the
@@ -182,6 +198,12 @@ struct PlacesTabView: View {
         try? TimelineSchemaUpgrader.upgrade(in: modelContext)
     }
 
+    /// Screenshot-agent flag `MOVES_OPEN_CONFIRM=1` presents the confirm sheet.
+    private func openConfirmIfRequested() {
+        guard ProcessInfo.processInfo.environment["MOVES_OPEN_CONFIRM"] == "1" else { return }
+        guard clusterToConfirm == nil, let first = index.snapshot.suggested.first else { return }
+        clusterToConfirm = first
+    }
     /// Screenshot-agent flag `MOVES_OPEN_FIRST_PLACE=1` opens the first learned place.
     private func openFirstPlaceIfRequested() {
         guard !didOpenLaunchPlace else { return }
@@ -189,22 +211,6 @@ struct PlacesTabView: View {
         guard path.isEmpty, let first = index.snapshot.countries.first?.cities.first?.places.first else { return }
         didOpenLaunchPlace = true
         path.append(PlacesRoute.known(first.id))
-    }
-
-    private func confirm(_ cluster: PlacesSuggestedCluster) {
-        do {
-            let created = try PlacesLibrary.confirmSuggested(
-                visitIDs: cluster.visitIDs,
-                name: cluster.name,
-                in: modelContext
-            )
-            undoToast?.show(actionName: String(localized: "Confirmed")) {
-                modelContext.undoManager?.undo()
-            }
-            path.append(PlacesRoute.known(created.id))
-        } catch {
-            // The empty state reappears if the visits vanished; keep the list stable.
-        }
     }
 }
 
@@ -271,7 +277,11 @@ private struct SuggestedPlaceRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            PlacesCategoryGlyph(category: nil, suggested: true)
+            if cluster.showsMapThumbnail {
+                SuggestedPlaceMapThumb(coordinate: cluster.coordinate)
+            } else {
+                PlacesCategoryGlyph(category: nil, suggested: true)
+            }
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(cluster.name)
@@ -280,11 +290,31 @@ private struct SuggestedPlaceRow: View {
                 Text(cluster.subtitle)
                     .font(.system(size: 12, weight: .medium, design: .rounded))
                     .foregroundStyle(.secondary)
+                    .lineLimit(2)
             }
         }
         .padding(.vertical, 4)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(cluster.name), \(cluster.subtitle)")
+    }
+}
+
+private struct SuggestedPlaceMapThumb: View {
+    let coordinate: CLLocationCoordinate2D
+
+    var body: some View {
+        Map(initialPosition: .region(
+            MKCoordinateRegion(center: coordinate, latitudinalMeters: 220, longitudinalMeters: 220)
+        )) {
+            Marker("", coordinate: coordinate)
+                .tint(MovesPalette.place)
+        }
+        .mapStyle(.standard(elevation: .flat, pointsOfInterest: .excludingAll))
+        .mapControlVisibility(.hidden)
+        .disabled(true)
+        .frame(width: 52, height: 52)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .accessibilityHidden(true)
     }
 }
 

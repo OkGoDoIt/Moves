@@ -175,6 +175,7 @@ struct PlaceDetailView: View {
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
+        .movesFloatingTabBarClearance()
     }
 
     private func footprintMap(place: KnownPlace, summary: PlacesPlaceSummary) -> some View {
@@ -275,32 +276,15 @@ struct PlaceDetailView: View {
     }
 }
 
-/// Unassigned cluster: map plus Confirm, the on-ramp for learning.
+/// Unassigned cluster: confirm form as the hero, visits below.
 struct SuggestedPlaceDetailView: View {
     let cluster: PlacesSuggestedCluster
+    var onConfirmed: (UUID) -> Void
 
-    @Environment(\.modelContext) private var modelContext
-    @Environment(\.dismiss) private var dismiss
-    @Environment(\.undoToastPresenter) private var undoToast
     @EnvironmentObject private var rootController: MovesRootController
 
     @Query(sort: \VisitPlace.arrivalDate, order: .reverse)
     private var allVisits: [VisitPlace]
-
-    @State private var camera: MapCameraPosition
-
-    init(cluster: PlacesSuggestedCluster) {
-        self.cluster = cluster
-        _camera = State(
-            initialValue: .region(
-                MKCoordinateRegion(
-                    center: cluster.coordinate,
-                    latitudinalMeters: 400,
-                    longitudinalMeters: 400
-                )
-            )
-        )
-    }
 
     private var visits: [VisitPlace] {
         let wanted = Set(cluster.visitIDs)
@@ -310,27 +294,13 @@ struct SuggestedPlaceDetailView: View {
     var body: some View {
         List {
             Section {
-                Map(position: $camera) {
-                    Marker(cluster.name, coordinate: cluster.coordinate)
+                PlaceConfirmForm(cluster: cluster) { place in
+                    onConfirmed(place.id)
                 }
-                .mapStyle(.standard(elevation: .flat, pointsOfInterest: .excludingAll))
-                .frame(height: 200)
-                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-                .listRowInsets(EdgeInsets())
+                .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
                 .listRowBackground(Color.clear)
-            }
-
-            Section {
-                Button {
-                    confirm()
-                } label: {
-                    Label(String(localized: "Confirm this place"), systemImage: "checkmark.circle.fill")
-                        .font(.system(.body, design: .rounded).weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                }
-                .tint(MovesPalette.place)
             } footer: {
-                Text(String(localized: "Confirming remembers this name for these visits. Future visits are learned separately."))
+                Text(String(localized: "Moves will use this name the next time you stop here."))
             }
 
             if !visits.isEmpty {
@@ -348,6 +318,7 @@ struct SuggestedPlaceDetailView: View {
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
+        .movesFloatingTabBarClearance()
         .background {
             LinearGradient(
                 colors: [MovesPalette.backgroundTop, MovesPalette.backgroundBottom],
@@ -358,20 +329,6 @@ struct SuggestedPlaceDetailView: View {
         }
         .navigationTitle(cluster.name)
         .navigationBarTitleDisplayMode(.inline)
-    }
-
-    private func confirm() {
-        do {
-            _ = try PlacesLibrary.confirmSuggested(
-                visitIDs: cluster.visitIDs,
-                name: cluster.name,
-                in: modelContext
-            )
-            undoToast?.show(actionName: String(localized: "Confirmed")) {
-                modelContext.undoManager?.undo()
-            }
-            dismiss()
-        } catch {}
     }
 }
 
@@ -385,10 +342,10 @@ private struct PlaceVisitRow: View {
                 .frame(width: 28)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(visit.arrivalDate.formatted(date: .abbreviated, time: .shortened))
+                Text(dayTitle)
                     .font(.system(size: 15, weight: .semibold, design: .rounded))
                     .foregroundStyle(.primary)
-                Text(MovesStatisticsFormatting.visitInterval(visit))
+                Text(detailLine)
                     .font(.system(size: 12, weight: .medium, design: .rounded))
                     .foregroundStyle(.secondary)
             }
@@ -399,6 +356,26 @@ private struct PlaceVisitRow: View {
                 .foregroundStyle(.secondary)
         }
         .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(dayTitle), \(detailLine)")
+    }
+
+    /// Relative day or a date without the time, so the timestamp is not repeated.
+    private var dayTitle: String {
+        let calendar = Calendar.autoupdatingCurrent
+        if calendar.isDateInToday(visit.arrivalDate) {
+            return String(localized: "Today")
+        }
+        if calendar.isDateInYesterday(visit.arrivalDate) {
+            return String(localized: "Yesterday")
+        }
+        return visit.arrivalDate.formatted(date: .abbreviated, time: .omitted)
+    }
+
+    private var detailLine: String {
+        let time = visit.arrivalDate.formatted(date: .omitted, time: .shortened)
+        let duration = MovesStatisticsFormatting.duration(visit.stayDuration(now: .now))
+        return "\(time) · \(duration)"
     }
 }
 

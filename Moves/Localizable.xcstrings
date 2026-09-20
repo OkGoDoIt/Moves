@@ -873,6 +873,37 @@
     "Nearby places" : {
 
     },
+    "Naming…" : {
+
+    },
+    "Confirm place" : {
+
+    },
+    "Address" : {
+
+    },
+    "Label" : {
+
+    },
+    "Custom label" : {
+
+    },
+    "Moves will use this name the next time you stop here." : {
+
+    },
+    "Map pin. Drag the map to set the address." : {
+
+    },
+    "%@ away" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%@ away"
+          }
+        }
+      }
+    },
     "Not a stop" : {
 
     },
