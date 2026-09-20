@@ -2085,7 +2085,10 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         try performingUndoableChange(named: "Change Path") {
             move.routeMatchPolicy = policy
             if policy != .manual {
+                move.clearManualRouteCoordinates()
                 move.clearCachedRouteCoordinates()
+                move.routeMatchSummary = nil
+                move.routeMatchConfidence = .unknown
             }
         }
     }

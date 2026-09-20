@@ -19,6 +19,7 @@ struct MovesSettingsView: View {
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var locationServiceSyncManager: LocationServiceSyncManager
     @AppStorage(MapMarkerDisplaySettings.showsBigMarkersKey) private var showsBigMarkers = false
+    @AppStorage(RouteSnappingLevel.storageKey) private var snappingLevel = RouteSnappingLevel.normal.rawValue
     @AppStorage(LandscapeLayoutSettings.controlsOnLeftKey) private var landscapeControlsOnLeft = false
     @AppStorage(DailyTimelineBackup.isEnabledKey) private var dailyBackupIsEnabled = false
     @AppStorage(DailyTimelineBackup.formatKey) private var dailyBackupFormat = DailyTimelineBackupFormat.gpx.rawValue
@@ -119,13 +120,32 @@ struct MovesSettingsView: View {
 
                             Divider()
 
+                            MapAppearanceSpeedShadeToggle()
+
+                            Divider()
+
+                            Text("Path")
+                                .font(.system(size: 14, weight: .semibold, design: .rounded))
+
+                            Picker("Path", selection: $snappingLevel) {
+                                ForEach(RouteSnappingLevel.allCases) { level in
+                                    Text(level.title).tag(level.rawValue)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .accessibilityLabel("Path matching")
+
+                            Text("Conservative only fits dense recordings onto roads. Off keeps the recorded line.")
+                                .font(.system(size: 12, weight: .medium, design: .rounded))
+                                .foregroundStyle(.secondary)
+
+                            Divider()
+
                             Toggle("Controls on left in landscape", isOn: $landscapeControlsOnLeft)
 
                             Text("Places, moves, and edit controls can be swapped to the left for comfortable one-handed use.")
                                 .font(.system(size: 12, weight: .medium, design: .rounded))
                                 .foregroundStyle(.secondary)
-
-                            MapAppearanceSpeedShadeToggle()
                         }
                     }
 
@@ -684,8 +704,6 @@ private struct MapAppearanceSpeedShadeToggle: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Divider()
-
             Toggle("Shade routes by speed", isOn: $shadeRoutesBySpeed)
 
             Text("Lighter where you were faster. The compact timeline map stays a solid colour.")

@@ -20,6 +20,7 @@ final class MovesAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
         UNUserNotificationCenter.current().delegate = self
         DailyTimelineBackup.registerBackgroundTask()
         ShareMapAggregateBackgroundTask.register()
+        RouteMatchBackgroundTask.register()
         return true
     }
 

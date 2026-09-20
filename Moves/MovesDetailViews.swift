@@ -265,6 +265,7 @@ struct MoveMapDetailView: View {
     @Bindable var segment: MoveSegment
     @AppStorage(MapMarkerDisplaySettings.showsBigMarkersKey) private var showsBigMarkers = false
     @AppStorage(MapRouteShadingSettings.shadeRoutesBySpeedKey) private var shadeRoutesBySpeed = true
+    @AppStorage(RouteSnappingLevel.storageKey) private var snappingLevel = RouteSnappingLevel.normal.rawValue
 
     @State private var camera: MapCameraPosition
     @State private var routeCoordinates: [CLLocationCoordinate2D]
@@ -306,7 +307,7 @@ struct MoveMapDetailView: View {
             }
             .joined(separator: ",")
 
-        return "\(segment.id.uuidString)|\(segment.transportMode.rawValue)|\(start)|\(end)|\(sampleKey)"
+        return "\(segment.id.uuidString)|\(segment.transportMode.rawValue)|\(segment.routeMatchPolicyRaw)|\(snappingLevel)|\(start)|\(end)|\(sampleKey)"
     }
 
     init(segment: MoveSegment) {
@@ -450,6 +451,15 @@ struct MoveMapDetailView: View {
                         .stroke(activeRenderedRoute.shadowTint, lineWidth: activeRenderedRoute.shadowLineWidth)
                 }
 
+                ForEach(rawFixDotItems) { item in
+                    Annotation("", coordinate: item.coordinate, anchor: .center) {
+                        Circle()
+                            .fill(Color.primary.opacity(0.28))
+                            .frame(width: 5, height: 5)
+                            .allowsHitTesting(false)
+                    }
+                }
+
                 if activeRenderedRoute.coordinates.count > 1 {
                     MapPolyline(coordinates: activeRenderedRoute.coordinates)
                         .stroke(
@@ -527,6 +537,8 @@ struct MoveMapDetailView: View {
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
                     .foregroundStyle(Color.primary.opacity(0.75))
 
+                pathPolicyControls
+
                 HStack(alignment: .bottom, spacing: 8) {
                     TextField("Remarks", text: $draftComment, axis: .vertical)
                         .textInputAutocapitalization(.sentences)
@@ -573,6 +585,90 @@ struct MoveMapDetailView: View {
             .disabled(true)
             .help("A route is needed to share this move as GPX")
             .accessibilityLabel("Share move as GPX")
+        }
+    }
+
+    private var displayedPathPolicy: RouteMatchPolicy {
+        if segment.hasManualRouteCoordinates {
+            return .manual
+        }
+        return segment.routeMatchPolicy == .manual ? .auto : segment.routeMatchPolicy
+    }
+
+    private var pathPolicyBinding: Binding<RouteMatchPolicy> {
+        Binding(
+            get: { displayedPathPolicy },
+            set: { applyPathPolicy($0) }
+        )
+    }
+
+    @ViewBuilder
+    private var pathPolicyControls: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Path")
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+
+            Picker("Path", selection: pathPolicyBinding) {
+                Text("Auto").tag(RouteMatchPolicy.auto)
+                Text("Recorded").tag(RouteMatchPolicy.recorded)
+                Text("Roads").tag(RouteMatchPolicy.roads)
+                if displayedPathPolicy == .manual {
+                    Text("Manual").tag(RouteMatchPolicy.manual)
+                }
+            }
+            .pickerStyle(.segmented)
+            .disabled(isSavingManualRoute)
+
+            if let summary = segment.routeMatchSummary, !summary.isEmpty {
+                Label(summary, systemImage: pathConfidenceSymbolName)
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .labelStyle(.titleAndIcon)
+            }
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    private var pathConfidenceSymbolName: String {
+        switch segment.routeMatchConfidence {
+        case .recorded:
+            return "recordingtape"
+        case .high:
+            return "checkmark.circle"
+        case .medium:
+            return "circle.lefthalf.filled"
+        case .estimated:
+            return "line.diagonal"
+        case .unknown:
+            return "questionmark.circle"
+        }
+    }
+
+    private var rawFixDotItems: [RawFixDotItem] {
+        let coordinates = MoveRouteGeometry.rawCoordinates(for: segment)
+        let sampled = coordinates.count > 250
+            ? RouteCoordinateOps.sampleAnchors(from: coordinates, maximumCount: 250)
+            : coordinates
+        return sampled.enumerated().map { index, coordinate in
+            RawFixDotItem(id: "\(segment.id.uuidString)-raw-\(index)", coordinate: coordinate)
+        }
+    }
+
+    private func applyPathPolicy(_ policy: RouteMatchPolicy) {
+        guard policy != displayedPathPolicy else { return }
+        if policy == .manual {
+            return
+        }
+
+        do {
+            try SwiftDataTimelineRepository(modelContext: modelContext)
+                .setRouteMatchPolicy(policy, for: segment)
+            Task { @MainActor in
+                await refreshRouteCoordinates()
+            }
+        } catch {
+            print("Failed to change path: \(error.localizedDescription)")
         }
     }
 
@@ -826,6 +922,9 @@ struct MoveMapDetailView: View {
             }
 
             segment.storeManualRouteCoordinates(committed)
+            segment.routeMatchPolicy = .manual
+            segment.routeMatchSummary = RouteMatchSummaries.manual
+            segment.routeMatchConfidence = .unknown
             routeCoordinates = committed
             segment.distanceMeters = routeDistance(for: committed)
             refreshMoveGPXShareFile()
@@ -913,10 +1012,10 @@ struct MoveMapDetailView: View {
     private func revertManualRoute() {
         guard segment.hasManualRouteCoordinates else { return }
         isSavingManualRoute = true
-        segment.clearManualRouteCoordinates()
 
         do {
-            try modelContext.save()
+            try SwiftDataTimelineRepository(modelContext: modelContext)
+                .setRouteMatchPolicy(.auto, for: segment)
             Task { @MainActor in
                 await refreshRouteCoordinates()
                 if isEditingManualRoute {
@@ -961,6 +1060,11 @@ struct MoveMapDetailView: View {
 
 private struct ManualRouteDragState {
     let closestRouteIndex: Int
+}
+
+private struct RawFixDotItem: Identifiable {
+    let id: String
+    let coordinate: CLLocationCoordinate2D
 }
 
 private struct ManualRouteWaypointMarker: View {
