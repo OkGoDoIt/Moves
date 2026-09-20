@@ -134,6 +134,8 @@
 		F2100001305000010000000F /* NearbyPlaceSuggester.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2100001305000010000000E /* NearbyPlaceSuggester.swift */; };
 		F21000013050000100000011 /* NearbyPlaceSuggesterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F21000013050000100000010 /* NearbyPlaceSuggesterTests.swift */; };
 		F40000013050000100000003 /* RouteMatchPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F40000013050000100000002 /* RouteMatchPolicyTests.swift */; };
+		F50000013060000100000001 /* PlaceLearningEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = F50000013060000100000000 /* PlaceLearningEngine.swift */; };
+		F50000013060000100000003 /* PlaceLearningEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F50000013060000100000002 /* PlaceLearningEngineTests.swift */; };
 		F10000013030000100000003 /* TimelineArchiveImportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000013030000100000002 /* TimelineArchiveImportTests.swift */; };
 		F10000013030000100000005 /* LocationLogImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000013030000100000004 /* LocationLogImport.swift */; };
 		F10000013030000100000007 /* LocationLogImportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000013030000100000006 /* LocationLogImportTests.swift */; };
@@ -333,6 +335,8 @@
 		F2100001305000010000000E /* NearbyPlaceSuggester.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NearbyPlaceSuggester.swift; sourceTree = "<group>"; };
 		F21000013050000100000010 /* NearbyPlaceSuggesterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NearbyPlaceSuggesterTests.swift; sourceTree = "<group>"; };
 		F40000013050000100000002 /* RouteMatchPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteMatchPolicyTests.swift; sourceTree = "<group>"; };
+		F50000013060000100000000 /* PlaceLearningEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaceLearningEngine.swift; sourceTree = "<group>"; };
+		F50000013060000100000002 /* PlaceLearningEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaceLearningEngineTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -433,6 +437,7 @@
 				F30000013050000100000002 /* SpeedProfileBuilder.swift */,
 				F20000013040000100000002 /* TimelineSchemaUpgrader.swift */,
 				F20000013040000100000004 /* TimelineLocator.swift */,
+				F50000013060000100000000 /* PlaceLearningEngine.swift */,
 				F21000013050000100000002 /* TimelineEditController.swift */,
 				F21000013050000100000004 /* PlaceRenameSheet.swift */,
 				F21000013050000100000006 /* EditTimesSheet.swift */,
@@ -549,6 +554,7 @@
 				F30000013050000100000004 /* SpeedProfileBuilderTests.swift */,
 				F21000013050000100000010 /* NearbyPlaceSuggesterTests.swift */,
 				F40000013050000100000002 /* RouteMatchPolicyTests.swift */,
+				F50000013060000100000002 /* PlaceLearningEngineTests.swift */,
 			);
 			path = MovesTests;
 			sourceTree = "<group>";
@@ -870,6 +876,7 @@
 				F30000013050000100000003 /* SpeedProfileBuilder.swift in Sources */,
 				F20000013040000100000003 /* TimelineSchemaUpgrader.swift in Sources */,
 				F20000013040000100000005 /* TimelineLocator.swift in Sources */,
+				F50000013060000100000001 /* PlaceLearningEngine.swift in Sources */,
 				F21000013050000100000003 /* TimelineEditController.swift in Sources */,
 				F21000013050000100000005 /* PlaceRenameSheet.swift in Sources */,
 				F21000013050000100000007 /* EditTimesSheet.swift in Sources */,
@@ -915,6 +922,7 @@
 				F30000013050000100000005 /* SpeedProfileBuilderTests.swift in Sources */,
 				F21000013050000100000011 /* NearbyPlaceSuggesterTests.swift in Sources */,
 				F40000013050000100000003 /* RouteMatchPolicyTests.swift in Sources */,
+				F50000013060000100000003 /* PlaceLearningEngineTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
