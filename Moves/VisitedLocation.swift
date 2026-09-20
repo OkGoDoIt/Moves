@@ -536,6 +536,15 @@ enum TimelineDeduplicationSnapshotStore {
 final class SwiftDataTimelineRepository: TimelineRepository {
     private let modelContext: ModelContext
     private var archiveImportSampleKeys: Set<String>?
+    /// Day timelines keyed by `dayKey`, populated only during bulk imports.
+    private var bulkDayTimelineCache: [String: DayTimeline]?
+    /// User-labelled places, populated only during bulk imports.
+    private var bulkLabeledPlaces: [(label: String, coordinate: CLLocationCoordinate2D)]?
+    /// Visits inserted by the running bulk import; never merged into each other.
+    private var bulkCreatedPlaceIDs: Set<UUID>?
+    private static let logPlaceMatchDistance: CLLocationDistance = 120
+    private static let logPlaceMatchSlack: TimeInterval = 15 * 60
+    private static let logPlaceExtendLimit: TimeInterval = 12 * 60 * 60
     private static let sampleDedupeTimeWindow: TimeInterval = 5 * 60
     private static let sampleDedupeDistanceThreshold: CLLocationDistance = 120
     private static let placeDedupeArrivalWindow: TimeInterval = 3 * 60
@@ -973,6 +982,344 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         )
     }
 
+    /// Writes a segmented location log as visits, moves, and GPS samples.
+    ///
+    /// Designed for tens of thousands of fixes: existing sample keys, day
+    /// timelines, and user-labelled places are loaded once up front, and the
+    /// context is saved in batches instead of after every record. Stays that
+    /// overlap an existing visit at the same spot extend that visit rather
+    /// than duplicating it, and moves that overlap an existing trip between
+    /// the same endpoints enrich it (transport mode, route samples) instead
+    /// of adding a parallel one. Re-importing the same file is therefore a
+    /// no-op.
+    ///
+    /// - Parameters:
+    ///   - log: Output of `LocationLogSegmenter`.
+    ///   - source: Sample source recorded on every fix.
+    ///   - transportModeOverride: When the file name already says what the
+    ///     activity was (for example a "Morning Run" GPX), that mode wins over
+    ///     the speed-based inference.
+    ///   - progress: Called on the caller's thread with a 0…1 fraction.
+    @discardableResult
+    func importLocationLog(
+        _ log: LocationLogTimeline,
+        source: LocationSampleSource,
+        transportModeOverride: TransportMode? = nil,
+        progress: ((Double, String) -> Void)? = nil
+    ) throws -> LocationLogImportReport {
+        guard !log.isEmpty else {
+            throw LocationLogImportError.noTimelineData
+        }
+
+        try beginBulkImport()
+        defer { endBulkImport() }
+
+        var report = LocationLogImportReport()
+        var previousPlace: VisitPlace?
+        var pendingMove: LocationLogMove?
+        let total = Double(max(log.segments.count, 1))
+
+        for (index, segment) in log.segments.enumerated() {
+            progress?(Double(index) / total, "Rebuilding timeline…")
+
+            switch segment {
+            case .stay(let stay):
+                let (place, isNew) = try upsertLogStay(stay, source: source, report: &report)
+                if isNew {
+                    report.placeCount += 1
+                    report.newPlaces.append(
+                        LocationLogPlaceNamer.Candidate(placeID: place.id, coordinate: place.coordinate, dwell: stay.duration)
+                    )
+                } else {
+                    report.mergedPlaceCount += 1
+                }
+
+                if let move = pendingMove {
+                    let start = try previousPlace ?? logEndpointPlace(at: move.points.first, fallback: place, report: &report)
+                    try insertLogMove(
+                        move,
+                        from: start,
+                        to: place,
+                        source: source,
+                        transportModeOverride: transportModeOverride,
+                        report: &report
+                    )
+                    pendingMove = nil
+                }
+                previousPlace = place
+
+            case .move(let move):
+                if let orphan = pendingMove {
+                    // Two moves in a row only happen at the log edges; give the
+                    // first one a point-shaped destination so it still renders.
+                    let start = try previousPlace ?? logEndpointPlace(at: orphan.points.first, fallback: nil, report: &report)
+                    let end = try logEndpointPlace(at: orphan.points.last, fallback: start, report: &report)
+                    try insertLogMove(orphan, from: start, to: end, source: source, transportModeOverride: transportModeOverride, report: &report)
+                    previousPlace = end
+                }
+                pendingMove = move
+            }
+
+            if index.isMultiple(of: 120) {
+                try saveIfNeeded()
+            }
+        }
+
+        if let move = pendingMove {
+            let start = try previousPlace ?? logEndpointPlace(at: move.points.first, fallback: nil, report: &report)
+            let end = try logEndpointPlace(at: move.points.last, fallback: start, report: &report)
+            try insertLogMove(move, from: start, to: end, source: source, transportModeOverride: transportModeOverride, report: &report)
+        }
+
+        progress?(0.98, "Saving…")
+        try fillMissingDeparturesFromMoves()
+        try saveIfNeeded()
+        progress?(1, "Done")
+        return report
+    }
+
+    /// Loads the lookup tables the bulk importers use to avoid per-record fetches.
+    private func beginBulkImport() throws {
+        var keyDescriptor = FetchDescriptor<LocationSample>()
+        keyDescriptor.propertiesToFetch = [\.dedupeKey]
+        archiveImportSampleKeys = Set(try modelContext.fetch(keyDescriptor).map(\.dedupeKey))
+
+        let timelines = try modelContext.fetch(FetchDescriptor<DayTimeline>())
+        var cache: [String: DayTimeline] = [:]
+        cache.reserveCapacity(timelines.count)
+        for timeline in timelines where cache[timeline.dayKey] == nil {
+            cache[timeline.dayKey] = timeline
+        }
+        bulkDayTimelineCache = cache
+
+        let labeled = try modelContext.fetch(
+            FetchDescriptor<VisitPlace>(predicate: #Predicate { $0.userLabel != nil })
+        )
+        bulkLabeledPlaces = labeled.compactMap { place in
+            guard let label = place.userLabel?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty else {
+                return nil
+            }
+            return (label, place.coordinate)
+        }
+        bulkCreatedPlaceIDs = []
+    }
+
+    private func endBulkImport() {
+        archiveImportSampleKeys = nil
+        bulkDayTimelineCache = nil
+        bulkLabeledPlaces = nil
+        bulkCreatedPlaceIDs = nil
+    }
+
+    /// Finds or creates the visit for a stay. Existing visits within
+    /// `logPlaceMatchDistance` whose time range touches the stay are reused
+    /// and extended.
+    private func upsertLogStay(
+        _ stay: LocationLogStay,
+        source: LocationSampleSource,
+        report: inout LocationLogImportReport
+    ) throws -> (VisitPlace, isNew: Bool) {
+        report.sampleCount += try appendSamples(from: stay.points.map(\.location), source: source).count
+
+        let windowStart = stay.arrivalDate.addingTimeInterval(-36 * 60 * 60)
+        let windowEnd = stay.departureDate.addingTimeInterval(Self.logPlaceMatchSlack)
+        var descriptor = FetchDescriptor<VisitPlace>(
+            predicate: #Predicate { place in
+                place.arrivalDate >= windowStart && place.arrivalDate <= windowEnd
+            },
+            sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .reverse)]
+        )
+        descriptor.fetchLimit = 96
+
+        // Pick the existing visit sharing the most time with this stay. Places
+        // created earlier in this same import are skipped: the segmenter
+        // already decided those were separate stays, and folding them back
+        // together would swallow the short trip between them.
+        let nearby = try modelContext.fetch(descriptor).filter { place in
+            guard bulkCreatedPlaceIDs?.contains(place.id) != true else { return false }
+            return Self.distanceMeters(from: stay.coordinate, to: place.coordinate) <= Self.logPlaceMatchDistance
+        }
+        let match = nearby
+            .map { place -> (VisitPlace, TimeInterval) in
+                let placeEnd = place.departureDate ?? place.arrivalDate.addingTimeInterval(Self.logPlaceMatchSlack)
+                let overlap = min(placeEnd, stay.departureDate).timeIntervalSince(max(place.arrivalDate, stay.arrivalDate))
+                return (place, overlap)
+            }
+            .filter { $0.1 >= -Self.logPlaceMatchSlack }
+            .max(by: { $0.1 < $1.1 })?
+            .0
+
+        if let match {
+            // Grow the visit toward the stay's bounds, but never across a
+            // neighbouring visit at the same spot (CLVisit often splits one
+            // evening at home into several fragments).
+            let previousDeparture = nearby
+                .filter { $0.id != match.id && $0.arrivalDate < match.arrivalDate }
+                .compactMap { $0.departureDate }
+                .max()
+            let nextArrival = nearby
+                .filter { $0.id != match.id && $0.arrivalDate > match.arrivalDate }
+                .map(\.arrivalDate)
+                .min()
+
+            if stay.arrivalDate < match.arrivalDate,
+               match.arrivalDate.timeIntervalSince(stay.arrivalDate) <= Self.logPlaceExtendLimit {
+                match.arrivalDate = max(stay.arrivalDate, previousDeparture ?? stay.arrivalDate)
+            }
+            let wantedDeparture = min(stay.departureDate, nextArrival ?? stay.departureDate)
+            if let departure = match.departureDate {
+                if wantedDeparture > departure,
+                   wantedDeparture.timeIntervalSince(departure) <= Self.logPlaceExtendLimit {
+                    match.departureDate = wantedDeparture
+                }
+            } else {
+                match.departureDate = max(wantedDeparture, match.arrivalDate)
+            }
+            match.horizontalAccuracy = min(match.horizontalAccuracy, Self.logPlaceAccuracy(for: stay))
+            if match.dayTimeline == nil {
+                match.dayTimeline = try timeline(for: match.arrivalDate)
+            }
+            return (match, false)
+        }
+
+        let place = VisitPlace(
+            arrivalDate: stay.arrivalDate,
+            departureDate: stay.departureDate,
+            latitude: stay.latitude,
+            longitude: stay.longitude,
+            horizontalAccuracy: Self.logPlaceAccuracy(for: stay),
+            userLabel: try inferredUserLabel(near: stay.coordinate)
+        )
+        place.dayTimeline = try timeline(for: stay.arrivalDate)
+        modelContext.insert(place)
+        bulkCreatedPlaceIDs?.insert(place.id)
+        return (place, true)
+    }
+
+    private static func logPlaceAccuracy(for stay: LocationLogStay) -> Double {
+        min(max(stay.radius, 20), 150)
+    }
+
+    /// Point-shaped visit used when a move starts or ends without a stay
+    /// (the log began or ended mid-trip).
+    private func logEndpointPlace(
+        at point: LocationLogPoint?,
+        fallback: VisitPlace?,
+        report: inout LocationLogImportReport
+    ) throws -> VisitPlace {
+        guard let point else {
+            if let fallback { return fallback }
+            throw LocationLogImportError.noTimelineData
+        }
+        let existed = try existingVisit(near: point.timestamp, coordinate: point.coordinate) != nil
+        let place = try routeEndpointPlace(at: point.location, arrivalDate: point.timestamp, departureDate: point.timestamp)
+        if existed {
+            report.mergedPlaceCount += 1
+        } else {
+            report.placeCount += 1
+            bulkCreatedPlaceIDs?.insert(place.id)
+            report.newPlaces.append(
+                LocationLogPlaceNamer.Candidate(placeID: place.id, coordinate: place.coordinate, dwell: 0)
+            )
+        }
+        return place
+    }
+
+    /// Adds a move between two visits, or enriches an existing move that
+    /// already covers the same trip.
+    private func insertLogMove(
+        _ move: LocationLogMove,
+        from startPlace: VisitPlace,
+        to endPlace: VisitPlace,
+        source: LocationSampleSource,
+        transportModeOverride: TransportMode?,
+        report: inout LocationLogImportReport
+    ) throws {
+        let locations = move.points.map(\.location)
+        let samples = try appendSamples(from: locations, source: source)
+        report.sampleCount += samples.count
+
+        let startDate = move.startDate
+        let endDate = max(move.endDate, startDate.addingTimeInterval(1))
+        let mode = transportModeOverride ?? move.transportMode
+
+        if let existing = try existingLogMove(
+            startPlace: startPlace,
+            endPlace: endPlace,
+            startDate: startDate,
+            endDate: endDate
+        ) {
+            if existing.transportMode == .unknown, mode != .unknown {
+                existing.transportMode = mode
+            }
+            if existing.distanceMeters <= 0 {
+                existing.distanceMeters = move.distanceMeters
+            }
+            if existing.startPlace == nil { existing.startPlace = startPlace }
+            if existing.endPlace == nil { existing.endPlace = endPlace }
+            if existing.samples.count < samples.count {
+                for sample in samples where sample.moveSegment == nil || sample.moveSegment === existing {
+                    sample.moveSegment = existing
+                }
+            }
+            report.mergedMoveCount += 1
+            return
+        }
+
+        let segment = MoveSegment(
+            dedupeKey: Self.makeMoveDedupeKey(
+                startPlaceID: startPlace.id,
+                endPlaceID: endPlace.id,
+                startDate: startDate,
+                endDate: endDate
+            ),
+            startDate: startDate,
+            endDate: endDate,
+            transportMode: mode,
+            distanceMeters: move.distanceMeters,
+            stepCount: nil
+        )
+        segment.startPlace = startPlace
+        segment.endPlace = endPlace
+        segment.dayTimeline = try timeline(for: startDate)
+        modelContext.insert(segment)
+        for sample in samples where sample.moveSegment == nil {
+            sample.moveSegment = segment
+        }
+        report.moveCount += 1
+    }
+
+    /// A move already in the store that covers the same trip: same endpoints
+    /// (by identity or within `moveDedupeEndpointDistanceThreshold`) and at
+    /// least half of the shorter duration in common.
+    private func existingLogMove(
+        startPlace: VisitPlace,
+        endPlace: VisitPlace,
+        startDate: Date,
+        endDate: Date
+    ) throws -> MoveSegment? {
+        var descriptor = FetchDescriptor<MoveSegment>(
+            predicate: #Predicate { move in
+                move.startDate <= endDate && move.endDate >= startDate
+            },
+            sortBy: [SortDescriptor(\MoveSegment.startDate, order: .forward)]
+        )
+        descriptor.fetchLimit = 64
+
+        let ownDuration = endDate.timeIntervalSince(startDate)
+        return try modelContext.fetch(descriptor).first { candidate in
+            let overlap = min(candidate.endDate, endDate).timeIntervalSince(max(candidate.startDate, startDate))
+            let shorter = max(min(ownDuration, candidate.endDate.timeIntervalSince(candidate.startDate)), 1)
+            guard overlap >= shorter * 0.5 else { return false }
+
+            let sameStart = candidate.startPlace?.id == startPlace.id
+                || candidate.startPlace.map { Self.distanceMeters(from: $0.coordinate, to: startPlace.coordinate) <= Self.moveDedupeEndpointDistanceThreshold } == true
+            let sameEnd = candidate.endPlace?.id == endPlace.id
+                || candidate.endPlace.map { Self.distanceMeters(from: $0.coordinate, to: endPlace.coordinate) <= Self.moveDedupeEndpointDistanceThreshold } == true
+            return sameStart && sameEnd
+        }
+    }
+
     func latestPlace(before date: Date, excluding placeID: UUID?) throws -> VisitPlace? {
         var descriptor = FetchDescriptor<VisitPlace>(
             predicate: #Predicate { place in
@@ -1371,6 +1718,16 @@ final class SwiftDataTimelineRepository: TimelineRepository {
     private func timeline(for date: Date) throws -> DayTimeline {
         let dayStart = Calendar.current.startOfDay(for: date)
         let dayKey = DayTimeline.makeDayKey(for: dayStart)
+
+        if bulkDayTimelineCache != nil {
+            if let cached = bulkDayTimelineCache?[dayKey] {
+                return cached
+            }
+            let timeline = DayTimeline(dayStart: dayStart)
+            modelContext.insert(timeline)
+            bulkDayTimelineCache?[dayKey] = timeline
+            return timeline
+        }
 
         var descriptor = FetchDescriptor<DayTimeline>(
             predicate: #Predicate { timeline in
@@ -2136,6 +2493,14 @@ final class SwiftDataTimelineRepository: TimelineRepository {
     }
 
     private func inferredUserLabel(near coordinate: CLLocationCoordinate2D) throws -> String? {
+        if let cached = bulkLabeledPlaces {
+            return cached
+                .map { ($0.label, Self.distanceMeters(from: coordinate, to: $0.coordinate)) }
+                .filter { $0.1 <= 120 }
+                .min(by: { $0.1 < $1.1 })?
+                .0
+        }
+
         let descriptor = FetchDescriptor<VisitPlace>(
             predicate: #Predicate { place in
                 place.userLabel != nil

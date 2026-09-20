@@ -165,7 +165,7 @@ struct MovesSettingsView: View {
                             export(.gpx, scope: .allDays)
                         }
                     }
-                    
+
                     SettingsCard(title: "Other Export Formats") {
                         SettingsActionRow(
                             title: "Selected Day (.geojson)",
@@ -228,7 +228,7 @@ struct MovesSettingsView: View {
                         }
                         .buttonStyle(.plain)
 
-                        Text("Use Moves timeline export to restore another Moves install from its GPX, GeoJSON, and CSV files. Health and Files import only add GPS tracks.")
+                        Text("Use Moves timeline export to restore another Moves install from its GPX, GeoJSON, and CSV files. Files import rebuilds places and trips from any timestamped GPS log, such as an export from another tracking app. Health import adds workout routes.")
                             .font(.system(size: 12, weight: .medium, design: .rounded))
                             .foregroundStyle(.secondary)
                     }

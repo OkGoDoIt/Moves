@@ -4,12 +4,32 @@ import SwiftData
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// Outcome of a Files import, covering both segmented location logs and
+/// legacy single-route tracks (files without timestamps).
 struct RouteFileImportReport {
-    let fileCount: Int
-    let routeCount: Int
-    let sampleCount: Int
+    var fileCount: Int
+    var log: LocationLogImportReport
+    /// Tracks without usable timestamps that were stored as one route each.
+    var untimedRouteCount: Int
+    var untimedSampleCount: Int
+
+    var summary: String {
+        var text = log.summary
+        if untimedRouteCount > 0 {
+            text += " \(untimedRouteCount) track\(untimedRouteCount == 1 ? "" : "s") without timestamps"
+            text += " \(untimedRouteCount == 1 ? "was" : "were") stored as plain route\(untimedRouteCount == 1 ? "" : "s") (\(untimedSampleCount) points)."
+        }
+        return text
+    }
 }
 
+/// Imports GPX / TCX / KML / GeoJSON files from the Files picker.
+///
+/// Parsing, segmentation, and all SwiftData writes run on a background
+/// `ModelContext` so a year-long log (tens of thousands of fixes) never
+/// blocks the main thread. Timestamped fixes from every selected file are
+/// pooled and rebuilt into visits and trips by `LocationLogSegmenter`; tracks
+/// whose points carry no time are stored as single routes, as before.
 @MainActor
 final class RouteFileImporter: ObservableObject {
     @Published private(set) var isImporting = false
@@ -18,10 +38,10 @@ final class RouteFileImporter: ObservableObject {
     @Published private(set) var lastReport: RouteFileImportReport?
     @Published private(set) var lastErrorMessage: String?
 
-    private let modelContext: ModelContext
+    private let modelContainer: ModelContainer
 
     init(modelContext: ModelContext) {
-        self.modelContext = modelContext
+        self.modelContainer = modelContext.container
     }
 
     func importFiles(urls: [URL]) async {
@@ -34,7 +54,7 @@ final class RouteFileImporter: ObservableObject {
 
         isImporting = true
         importProgress = 0
-        importProgressText = "Preparing import..."
+        importProgressText = "Reading files…"
         defer {
             isImporting = false
             importProgress = nil
@@ -42,71 +62,212 @@ final class RouteFileImporter: ObservableObject {
         }
 
         do {
-            let repository = SwiftDataTimelineRepository(modelContext: modelContext)
-            var routeCount = 0
-            var sampleCount = 0
-
+            var payloads: [(name: String, data: Data)] = []
             for (index, url) in securityScopedURLs.enumerated() {
-                importProgressText = "Importing \(index + 1) of \(securityScopedURLs.count): \(url.lastPathComponent)"
-                let fileTracks = try loadTracks(from: url)
-                for track in fileTracks where track.locations.count >= 2 {
+                importProgressText = "Reading \(index + 1) of \(securityScopedURLs.count): \(url.lastPathComponent)"
+                payloads.append((url.lastPathComponent, try Self.readSecurityScopedData(from: url)))
+            }
+
+            importProgressText = "Finding stays and trips…"
+            importProgress = nil
+            let parsed = try await Task.detached(priority: .userInitiated) {
+                try Self.parse(payloads)
+            }.value
+
+            guard !parsed.timedGroups.isEmpty || !parsed.untimedTracks.isEmpty else {
+                throw LocationLogImportError.noTimelineData
+            }
+
+            let container = modelContainer
+            let reporter = ProgressReporter { [weak self] fraction, text in
+                self?.importProgress = fraction
+                self?.importProgressText = text
+            }
+            let skipNaming = ProcessInfo.processInfo.isRunningUnitTests
+
+            var report = try await Task.detached(priority: .userInitiated) { () throws -> RouteFileImportReport in
+                let repository = SwiftDataTimelineRepository(modelContainer: container)
+                var report = RouteFileImportReport(
+                    fileCount: securityScopedURLs.count,
+                    log: LocationLogImportReport(),
+                    untimedRouteCount: 0,
+                    untimedSampleCount: 0
+                )
+
+                let groupCount = Double(max(parsed.timedGroups.count, 1))
+                for (groupIndex, group) in parsed.timedGroups.enumerated() {
+                    let timeline = LocationLogSegmenter().segment(group.points)
+                    guard !timeline.isEmpty else { continue }
+                    let base = Double(groupIndex) / groupCount
+                    let partial = try repository.importLocationLog(
+                        timeline,
+                        source: .fileRouteImport,
+                        transportModeOverride: group.transportMode == .unknown ? nil : group.transportMode
+                    ) { fraction, text in
+                        reporter.report(base + fraction / groupCount, text)
+                    }
+                    report.log.merge(partial)
+                }
+
+                for track in parsed.untimedTracks where track.locations.count >= 2 {
                     _ = try repository.importRouteTrack(
                         locations: track.locations,
                         source: .fileRouteImport,
                         transportMode: track.transportMode
                     )
-                    routeCount += 1
-                    sampleCount += track.locations.count
+                    report.untimedRouteCount += 1
+                    report.untimedSampleCount += track.locations.count
+                }
+                try repository.saveIfNeeded()
+
+                if !skipNaming, !report.log.newPlaces.isEmpty {
+                    let namer = LocationLogPlaceNamer()
+                    let resolver = CLGeocoderPlaceNameResolver()
+                    report.log.namedPlaceCount = await namer.nameClusters(
+                        report.log.newPlaces,
+                        resolver: resolver,
+                        progress: { done, total in
+                            reporter.report(
+                                total > 0 ? Double(done) / Double(total) : 1,
+                                "Naming places… \(done) of \(total)"
+                            )
+                        },
+                        apply: { name, placeIDs in
+                            for placeID in placeIDs {
+                                try repository.setAutomaticLabel(name, for: placeID)
+                            }
+                            try repository.saveIfNeeded()
+                        }
+                    )
                 }
 
-                importProgress = Double(index + 1) / Double(securityScopedURLs.count)
-            }
+                return report
+            }.value
 
-            try repository.saveIfNeeded()
-            lastReport = RouteFileImportReport(
-                fileCount: securityScopedURLs.count,
-                routeCount: routeCount,
-                sampleCount: sampleCount
-            )
+            report.fileCount = securityScopedURLs.count
+            NotificationCenter.default.post(name: .movesLocationSamplesDidChange, object: nil)
+            lastReport = report
             lastErrorMessage = nil
         } catch {
+            lastReport = nil
             lastErrorMessage = error.localizedDescription
         }
     }
 
-    private func loadTracks(from url: URL) throws -> [ImportedRouteTrack] {
+    // MARK: Parsing
+
+    /// Fixes with real timestamps, grouped by the transport mode the file
+    /// name implies (usually just one `.unknown` group).
+    fileprivate struct TimedGroup {
+        var transportMode: TransportMode
+        var points: [LocationLogPoint]
+    }
+
+    fileprivate struct ParsedFiles {
+        var timedGroups: [TimedGroup]
+        var untimedTracks: [ImportedRouteTrack]
+    }
+
+    nonisolated private static func parse(_ payloads: [(name: String, data: Data)]) throws -> ParsedFiles {
+        var groups: [TransportMode: [LocationLogPoint]] = [:]
+        var untimed: [ImportedRouteTrack] = []
+
+        for payload in payloads {
+            let fileMode = inferTransportMode(from: payload.name)
+            if payload.name.lowercased().hasSuffix(".gpx") {
+                let result = try LocationLogGPXParser.parse(data: payload.data)
+                if !result.points.isEmpty {
+                    groups[fileMode, default: []].append(contentsOf: result.points)
+                    continue
+                }
+            }
+
+            for track in try loadTracks(named: payload.name, data: payload.data) {
+                if track.hasRecordedTimestamps {
+                    groups[track.transportMode, default: []].append(contentsOf: track.locations.map(LocationLogPoint.init))
+                } else {
+                    untimed.append(track)
+                }
+            }
+        }
+
+        let timedGroups = groups
+            .map { TimedGroup(transportMode: $0.key, points: $0.value) }
+            .sorted { $0.transportMode.rawValue < $1.transportMode.rawValue }
+        return ParsedFiles(timedGroups: timedGroups, untimedTracks: untimed)
+    }
+
+    nonisolated private static func readSecurityScopedData(from url: URL) throws -> Data {
         let didAccess = url.startAccessingSecurityScopedResource()
         defer {
             if didAccess {
                 url.stopAccessingSecurityScopedResource()
             }
         }
+        return try Data(contentsOf: url)
+    }
 
-        let data = try Data(contentsOf: url)
-        let lowercasedName = url.lastPathComponent.lowercased()
+    nonisolated private static func loadTracks(named fileName: String, data: Data) throws -> [ImportedRouteTrack] {
+        let lowercasedName = fileName.lowercased()
         if lowercasedName.hasSuffix(".gpx") || lowercasedName.hasSuffix(".tcx") || lowercasedName.hasSuffix(".kml") {
-            return try XMLRouteTrackParser.parse(data: data, fileName: url.lastPathComponent)
+            return try XMLRouteTrackParser.parse(data: data, fileName: fileName)
         }
 
         if lowercasedName.hasSuffix(".geojson") || lowercasedName.hasSuffix(".json") {
-            return try GeoJSONRouteTrackParser.parse(data: data, fileName: url.lastPathComponent)
+            return try GeoJSONRouteTrackParser.parse(data: data, fileName: fileName)
         }
 
         // Last resort: try XML first, then GeoJSON.
-        if let xmlTracks = try? XMLRouteTrackParser.parse(data: data, fileName: url.lastPathComponent),
+        if let xmlTracks = try? XMLRouteTrackParser.parse(data: data, fileName: fileName),
            !xmlTracks.isEmpty {
             return xmlTracks
         }
-        if let geoJSONTracks = try? GeoJSONRouteTrackParser.parse(data: data, fileName: url.lastPathComponent),
+        if let geoJSONTracks = try? GeoJSONRouteTrackParser.parse(data: data, fileName: fileName),
            !geoJSONTracks.isEmpty {
             return geoJSONTracks
         }
 
-        throw NSError(
-            domain: "Moves.RouteFileImport",
-            code: 1,
-            userInfo: [NSLocalizedDescriptionKey: "Unsupported route format in \(url.lastPathComponent)."]
-        )
+        throw LocationLogImportError.unsupportedFormat(fileName)
+    }
+}
+
+/// Forwards background progress to the main actor, dropping updates that
+/// would not visibly change the bar so thousands of segments do not queue
+/// thousands of main-thread hops.
+private final class ProgressReporter: @unchecked Sendable {
+    private let handler: @MainActor (Double, String) -> Void
+    private let lock = NSLock()
+    private var lastFraction: Double = -1
+    private var lastText = ""
+
+    init(handler: @escaping @MainActor (Double, String) -> Void) {
+        self.handler = handler
+    }
+
+    func report(_ fraction: Double, _ text: String) {
+        lock.lock()
+        let shouldSend = text != lastText || abs(fraction - lastFraction) >= 0.005 || fraction >= 1
+        if shouldSend {
+            lastFraction = fraction
+            lastText = text
+        }
+        lock.unlock()
+        guard shouldSend else { return }
+        let handler = self.handler
+        Task { @MainActor in handler(fraction, text) }
+    }
+}
+
+extension LocationLogImportReport {
+    /// Accumulates counts from another group's import into this one.
+    mutating func merge(_ other: LocationLogImportReport) {
+        placeCount += other.placeCount
+        mergedPlaceCount += other.mergedPlaceCount
+        moveCount += other.moveCount
+        mergedMoveCount += other.mergedMoveCount
+        sampleCount += other.sampleCount
+        newPlaces.append(contentsOf: other.newPlaces)
+        namedPlaceCount += other.namedPlaceCount
     }
 }
 
@@ -149,7 +310,7 @@ struct RouteFileImportSettingsView: View {
                         }
                     }
 
-                    Text("Supports GPX, TCX, KML, and GeoJSON route files. You can select one or multiple files at once. Duplicate points are merged automatically, and imported route tracks are preferred over less accurate phone/watch samples.")
+                    Text("Supports GPX, TCX, KML, and GeoJSON. Select one or several files at once. Timestamped logs from other tracking apps are split into places and trips, transport modes are inferred from speed, and new places are named from the map. Points you already have are skipped, so re-importing is safe.")
                         .font(.system(size: 12, weight: .medium, design: .rounded))
                         .foregroundStyle(.secondary)
                 }
@@ -183,7 +344,7 @@ struct RouteFileImportSettingsView: View {
                 Task { @MainActor in
                     await importer.importFiles(urls: urls)
                     if let report = importer.lastReport {
-                        importMessage = "Imported \(report.routeCount) route(s) from \(report.fileCount) file(s), covering \(report.sampleCount) GPS point(s)."
+                        importMessage = report.summary
                     } else {
                         importMessage = importer.lastErrorMessage ?? "No route data was imported."
                     }
@@ -256,9 +417,12 @@ private enum RouteFileImportContentTypes {
     ]
 }
 
-private struct ImportedRouteTrack {
+struct ImportedRouteTrack {
     let locations: [CLLocation]
     let transportMode: TransportMode
+    /// False when any point had to be given a synthetic timestamp; such
+    /// tracks cannot be segmented into stays and moves.
+    let hasRecordedTimestamps: Bool
 }
 
 private enum GeoJSONRouteTrackParser {
@@ -291,12 +455,16 @@ private enum GeoJSONRouteTrackParser {
         switch type {
         case "LineString":
             let locations = locationsFromCoordinates(geometry["coordinates"])
-            return locations.count >= 2 ? [ImportedRouteTrack(locations: locations, transportMode: transportMode)] : []
+            return locations.count >= 2
+                ? [ImportedRouteTrack(locations: locations, transportMode: transportMode, hasRecordedTimestamps: false)]
+                : []
         case "MultiLineString":
             guard let lines = geometry["coordinates"] as? [[[Double]]] else { return [] }
             return lines.compactMap { line in
                 let locations = locationsFromLine(line)
-                return locations.count >= 2 ? ImportedRouteTrack(locations: locations, transportMode: transportMode) : nil
+                return locations.count >= 2
+                    ? ImportedRouteTrack(locations: locations, transportMode: transportMode, hasRecordedTimestamps: false)
+                    : nil
             }
         default:
             return []
@@ -328,8 +496,10 @@ private enum GeoJSONRouteTrackParser {
 }
 
 private final class XMLRouteTrackParser: NSObject, XMLParserDelegate {
-    private var tracks: [[CLLocation]] = []
+    private var tracks: [(locations: [CLLocation], hasRecordedTimestamps: Bool)] = []
     private var currentTrack: [CLLocation] = []
+    /// Set when a point in the current track had no usable time.
+    private var currentTrackUsedFallback = false
     private var currentCoordinate: CLLocationCoordinate2D?
     private var currentAltitude: Double?
     private var currentTimestamp: Date?
@@ -355,8 +525,14 @@ private final class XMLRouteTrackParser: NSObject, XMLParserDelegate {
 
         delegate.finalizeCurrentTrack()
         return delegate.tracks
-            .filter { $0.count >= 2 }
-            .map { ImportedRouteTrack(locations: $0, transportMode: delegate.transportMode) }
+            .filter { $0.locations.count >= 2 }
+            .map {
+                ImportedRouteTrack(
+                    locations: $0.locations,
+                    transportMode: delegate.transportMode,
+                    hasRecordedTimestamps: $0.hasRecordedTimestamps
+                )
+            }
     }
 
     func parser(
@@ -430,6 +606,9 @@ private final class XMLRouteTrackParser: NSObject, XMLParserDelegate {
 
     private func appendCurrentPointIfPossible() {
         guard let coordinate = currentCoordinate else { return }
+        if currentTimestamp == nil {
+            currentTrackUsedFallback = true
+        }
         let timestamp = currentTimestamp ?? fallbackTimestamp
         fallbackTimestamp = timestamp.addingTimeInterval(1)
         let altitude = currentAltitude ?? 0
@@ -453,6 +632,10 @@ private final class XMLRouteTrackParser: NSObject, XMLParserDelegate {
             .split(whereSeparator: { $0.isWhitespace || $0.isNewline })
             .map(String.init)
 
+        if !coordinateChunks.isEmpty {
+            currentTrackUsedFallback = true
+        }
+
         for chunk in coordinateChunks {
             let values = chunk.split(separator: ",").compactMap { Double($0) }
             guard values.count >= 2 else { continue }
@@ -473,13 +656,18 @@ private final class XMLRouteTrackParser: NSObject, XMLParserDelegate {
     }
 
     private func finalizeCurrentTrack() {
-        guard currentTrack.count >= 2 else {
+        defer {
             currentTrack.removeAll(keepingCapacity: true)
-            return
+            currentTrackUsedFallback = false
         }
+        guard currentTrack.count >= 2 else { return }
 
-        tracks.append(currentTrack.sorted(by: { $0.timestamp < $1.timestamp }))
-        currentTrack.removeAll(keepingCapacity: true)
+        tracks.append(
+            (
+                locations: currentTrack.sorted(by: { $0.timestamp < $1.timestamp }),
+                hasRecordedTimestamps: !currentTrackUsedFallback
+            )
+        )
     }
 }
 
