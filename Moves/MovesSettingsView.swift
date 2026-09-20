@@ -18,6 +18,7 @@ struct MovesSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var locationServiceSyncManager: LocationServiceSyncManager
+    @EnvironmentObject private var webhookSyncManager: WebhookSyncManager
     @AppStorage(MapMarkerDisplaySettings.showsBigMarkersKey) private var showsBigMarkers = false
     @AppStorage(RouteSnappingLevel.storageKey) private var snappingLevel = RouteSnappingLevel.normal.rawValue
     @AppStorage(LandscapeLayoutSettings.controlsOnLeftKey) private var landscapeControlsOnLeft = false
@@ -165,7 +166,18 @@ struct MovesSettingsView: View {
                             .buttonStyle(.plain)
                         }
 
-                        Text("Optionally upload recorded points to one or more supported cloud or self-hosted location servers.")
+                        NavigationLink {
+                            WebhookSettingsView()
+                        } label: {
+                            SettingsNavigationRow(
+                                title: "Webhook",
+                                systemImage: "link",
+                                status: webhookSyncManager.connectionSummary
+                            )
+                        }
+                        .buttonStyle(.plain)
+
+                        Text("Optionally upload recorded points to one or more supported cloud or self-hosted location servers, or to any HTTPS webhook.")
                             .font(.system(size: 12, weight: .medium, design: .rounded))
                             .foregroundStyle(.secondary)
                     }
@@ -212,6 +224,30 @@ struct MovesSettingsView: View {
                         ) {
                             export(.csv, scope: .allDays)
                         }
+
+                        SettingsActionRow(
+                            title: "Selected Day (.kml)",
+                            systemImage: "globe.europe.africa",
+                            isDisabled: dayTimelines.isEmpty
+                        ) {
+                            export(.kml, scope: .selectedDay)
+                        }
+
+                        SettingsActionRow(
+                            title: "All Days (.kml)",
+                            systemImage: "globe",
+                            isDisabled: dayTimelines.isEmpty
+                        ) {
+                            export(.kml, scope: .allDays)
+                        }
+
+                        SettingsActionRow(
+                            title: "Everything (.zip)",
+                            systemImage: "archivebox",
+                            isDisabled: dayTimelines.isEmpty
+                        ) {
+                            exportZip()
+                        }
                     }
 
                     dailyICloudBackupSettings
@@ -250,7 +286,7 @@ struct MovesSettingsView: View {
                         }
                         .buttonStyle(.plain)
 
-                        Text("Use Moves timeline export to restore another Moves install from its GPX, GeoJSON, and CSV files. Files import rebuilds places and trips from any timestamped GPS log, such as an export from another tracking app. Health import adds workout routes.")
+                        Text("Use Moves timeline export to restore another Moves install from its GPX, GeoJSON, CSV, or zip files. Files import rebuilds places and trips from any timestamped GPS log, such as an export from another tracking app. Health import adds workout routes.")
                             .font(.system(size: 12, weight: .medium, design: .rounded))
                             .foregroundStyle(.secondary)
                     }
@@ -401,6 +437,34 @@ struct MovesSettingsView: View {
             days: days,
             format: format,
             fileStem: "moves-\(scopeName)"
+        ) else {
+            exportMessage = "Could not build export file."
+            isShowingExportMessage = true
+            return
+        }
+
+        exportDocument = TimelineExportDocument(data: payload.data)
+        exportContentType = payload.contentType
+        exportFilename = payload.filename
+        isExporting = true
+    }
+
+    /// Writes GPX, GeoJSON, CSV, KML, `places.json`, and `photos.csv` into one zip.
+    private func exportZip() {
+        guard !dayTimelines.isEmpty else {
+            exportMessage = "No timeline data available yet."
+            isShowingExportMessage = true
+            return
+        }
+
+        let knownPlaces = (try? modelContext.fetch(FetchDescriptor<KnownPlace>())) ?? []
+        let photos = (try? modelContext.fetch(FetchDescriptor<PhotoAttachment>())) ?? []
+
+        guard let payload = TimelineExporter.makeZipPayload(
+            days: dayTimelines,
+            knownPlaces: knownPlaces,
+            photos: photos,
+            fileStem: "moves-all-days"
         ) else {
             exportMessage = "Could not build export file."
             isShowingExportMessage = true

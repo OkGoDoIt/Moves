@@ -303,6 +303,65 @@ final class MovesIntentRuntime {
         return days.filter { interval.contains($0.dayStart) }
     }
 
+    func visitEntities(
+        in interval: DateInterval? = nil,
+        identifiedBy identifiers: [String]? = nil
+    ) throws -> [VisitEntity] {
+        guard let modelContainer else { throw MovesIntentError.runtimeUnavailable }
+        let context = ModelContext(modelContainer)
+        var descriptor = FetchDescriptor<VisitPlace>(
+            sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .reverse)]
+        )
+        descriptor.fetchLimit = 200
+        let visits = try context.fetch(descriptor)
+        let identifierSet = identifiers.map(Set.init)
+        return visits.compactMap { visit in
+            if let identifierSet, !identifierSet.contains(visit.id.uuidString) {
+                return nil
+            }
+            if let interval, !interval.contains(visit.arrivalDate) {
+                return nil
+            }
+            return VisitEntity(visit: visit)
+        }
+    }
+
+    func moveEntities(
+        in interval: DateInterval? = nil,
+        identifiedBy identifiers: [String]? = nil
+    ) throws -> [MoveEntity] {
+        guard let modelContainer else { throw MovesIntentError.runtimeUnavailable }
+        let context = ModelContext(modelContainer)
+        var descriptor = FetchDescriptor<MoveSegment>(
+            sortBy: [SortDescriptor(\MoveSegment.startDate, order: .reverse)]
+        )
+        descriptor.fetchLimit = 200
+        let moves = try context.fetch(descriptor)
+        let identifierSet = identifiers.map(Set.init)
+        return moves.compactMap { move in
+            if let identifierSet, !identifierSet.contains(move.id.uuidString) {
+                return nil
+            }
+            if let interval, !interval.contains(move.timelineStartDate) {
+                return nil
+            }
+            return MoveEntity(move: move)
+        }
+    }
+
+    func whereWasI(at date: Date, includeCoordinates: Bool) throws -> String {
+        guard let modelContainer else { throw MovesIntentError.runtimeUnavailable }
+        let context = ModelContext(modelContainer)
+        let visits = try context.fetch(FetchDescriptor<VisitPlace>())
+        let moves = try context.fetch(FetchDescriptor<MoveSegment>())
+        let result = TimelineLocator.locate(at: date, visits: visits, moves: moves)
+        return TimelineMomentSummary.text(
+            result: result,
+            at: date,
+            includeCoordinates: includeCoordinates
+        )
+    }
+
     private static func distanceText(_ meters: CLLocationDistance) -> String {
         let formatter = MeasurementFormatter()
         formatter.unitStyle = .medium
@@ -538,6 +597,187 @@ struct ExportMovesTimelineIntent: AppIntent {
     }
 }
 
+/// Shortcuts-facing visit. Coordinates are omitted; use Where Was I At with Include Coordinates to opt in.
+struct VisitEntity: AppEntity {
+    static let typeDisplayRepresentation = TypeDisplayRepresentation(name: "Visit")
+    static let defaultQuery = VisitEntityQuery()
+
+    let id: String
+    let name: String
+    let arrival: Date
+    let departure: Date?
+
+    init(visit: VisitPlace) {
+        id = visit.id.uuidString
+        let label = WebhookPlaceName.name(for: visit)
+        name = label
+        arrival = visit.arrivalDate
+        departure = visit.departureDate
+    }
+
+    var displayRepresentation: DisplayRepresentation {
+        DisplayRepresentation(
+            title: "\(name)",
+            subtitle: "Arrived \(arrival.formatted(date: .abbreviated, time: .shortened))"
+        )
+    }
+}
+
+struct VisitEntityQuery: EntityQuery {
+    func entities(for identifiers: [VisitEntity.ID]) async throws -> [VisitEntity] {
+        try await MovesIntentRuntime.shared.visitEntities(identifiedBy: identifiers)
+    }
+
+    func suggestedEntities() async throws -> [VisitEntity] {
+        try await MovesIntentRuntime.shared.visitEntities(
+            in: MovesTimelinePeriod.today.dateInterval()
+        )
+    }
+}
+
+/// Shortcuts-facing move. Route coordinates are omitted unless a later intent opts in.
+struct MoveEntity: AppEntity {
+    static let typeDisplayRepresentation = TypeDisplayRepresentation(name: "Move")
+    static let defaultQuery = MoveEntityQuery()
+
+    let id: String
+    let mode: String
+    let startName: String
+    let endName: String
+    let start: Date
+    let end: Date
+    let distanceMeters: Double
+
+    init(move: MoveSegment) {
+        id = move.id.uuidString
+        mode = move.transportMode.title
+        startName = WebhookPlaceName.name(for: move.startPlace)
+        endName = WebhookPlaceName.name(for: move.endPlace)
+        start = move.timelineStartDate
+        end = move.endDate
+        distanceMeters = move.distanceMeters
+    }
+
+    var displayRepresentation: DisplayRepresentation {
+        DisplayRepresentation(
+            title: "\(startName) to \(endName)",
+            subtitle: "\(mode) · \(start.formatted(date: .omitted, time: .shortened))"
+        )
+    }
+}
+
+struct MoveEntityQuery: EntityQuery {
+    func entities(for identifiers: [MoveEntity.ID]) async throws -> [MoveEntity] {
+        try await MovesIntentRuntime.shared.moveEntities(identifiedBy: identifiers)
+    }
+
+    func suggestedEntities() async throws -> [MoveEntity] {
+        try await MovesIntentRuntime.shared.moveEntities(
+            in: MovesTimelinePeriod.today.dateInterval()
+        )
+    }
+}
+
+/// Spoken/Shortcuts sentence for a moment on the timeline.
+enum TimelineMomentSummary {
+    static func text(
+        result: TimelineLocator.Result,
+        at date: Date,
+        includeCoordinates: Bool
+    ) -> String {
+        let time = date.formatted(date: .abbreviated, time: .shortened)
+        switch result {
+        case .visit(let visit):
+            var sentence = "You were at \(WebhookPlaceName.name(for: visit)) at \(time)."
+            if includeCoordinates {
+                sentence += " \(coordinateText(latitude: visit.latitude, longitude: visit.longitude))."
+            }
+            return sentence
+        case .move(let move, let coordinate, _):
+            var sentence = "You were \(move.transportMode.title.lowercased()) from \(WebhookPlaceName.name(for: move.startPlace)) to \(WebhookPlaceName.name(for: move.endPlace)) at \(time)."
+            if includeCoordinates {
+                sentence += " \(coordinateText(latitude: coordinate.latitude, longitude: coordinate.longitude))."
+            }
+            return sentence
+        case .gap:
+            return "Moves has no recorded activity at \(time)."
+        }
+    }
+
+    private static func coordinateText(latitude: Double, longitude: Double) -> String {
+        String(format: "%.5f, %.5f", latitude, longitude)
+    }
+}
+
+struct GetVisitsIntent: AppIntent {
+    static let title: LocalizedStringResource = "Get Visits"
+    static let description = IntentDescription("Returns visits for a period. Place names and times only — never coordinates.")
+    static let supportedModes: IntentModes = .background
+    static let authenticationPolicy: IntentAuthenticationPolicy = .requiresAuthentication
+
+    @Parameter(title: "Period", default: .today)
+    var period: MovesTimelinePeriod
+
+    static var parameterSummary: some ParameterSummary {
+        Summary("Get visits for \(\.$period)")
+    }
+
+    func perform() async throws -> some IntentResult & ReturnsValue<[VisitEntity]> & ProvidesDialog {
+        let visits = try await MovesIntentRuntime.shared.visitEntities(in: period.dateInterval())
+        let message = visits.isEmpty
+            ? "Moves has no visits for \(period.title.lowercased())."
+            : "Found \(visits.count) visit\(visits.count == 1 ? "" : "s") for \(period.title.lowercased())."
+        return .result(value: visits, dialog: IntentDialog(stringLiteral: message))
+    }
+}
+
+struct GetMovesIntent: AppIntent {
+    static let title: LocalizedStringResource = "Get Moves"
+    static let description = IntentDescription("Returns moves for a period. Place names, mode, and times only — never coordinates.")
+    static let supportedModes: IntentModes = .background
+    static let authenticationPolicy: IntentAuthenticationPolicy = .requiresAuthentication
+
+    @Parameter(title: "Period", default: .today)
+    var period: MovesTimelinePeriod
+
+    static var parameterSummary: some ParameterSummary {
+        Summary("Get moves for \(\.$period)")
+    }
+
+    func perform() async throws -> some IntentResult & ReturnsValue<[MoveEntity]> & ProvidesDialog {
+        let moves = try await MovesIntentRuntime.shared.moveEntities(in: period.dateInterval())
+        let message = moves.isEmpty
+            ? "Moves has no moves for \(period.title.lowercased())."
+            : "Found \(moves.count) move\(moves.count == 1 ? "" : "s") for \(period.title.lowercased())."
+        return .result(value: moves, dialog: IntentDialog(stringLiteral: message))
+    }
+}
+
+struct WhereWasIAtIntent: AppIntent {
+    static let title: LocalizedStringResource = "Where Was I At"
+    static let description = IntentDescription("Reports the place or move covering a time. Coordinates are omitted unless you turn them on.")
+    static let supportedModes: IntentModes = .background
+    static let authenticationPolicy: IntentAuthenticationPolicy = .requiresAuthentication
+
+    @Parameter(title: "Time")
+    var time: Date
+
+    @Parameter(title: "Include Coordinates", default: false)
+    var includeCoordinates: Bool
+
+    static var parameterSummary: some ParameterSummary {
+        Summary("Where was I at \(\.$time)")
+    }
+
+    func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
+        let message = try await MovesIntentRuntime.shared.whereWasI(
+            at: time,
+            includeCoordinates: includeCoordinates
+        )
+        return .result(value: message, dialog: IntentDialog(stringLiteral: message))
+    }
+}
+
 struct MovesAppShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(
@@ -589,6 +829,33 @@ struct MovesAppShortcuts: AppShortcutsProvider {
             ],
             shortTitle: "Export Timeline",
             systemImageName: "square.and.arrow.up"
+        )
+        AppShortcut(
+            intent: GetVisitsIntent(),
+            phrases: [
+                "Get my visits with \(.applicationName)",
+                "Get visits for \(\.$period) with \(.applicationName)",
+            ],
+            shortTitle: "Get Visits",
+            systemImageName: "mappin.and.ellipse"
+        )
+        AppShortcut(
+            intent: GetMovesIntent(),
+            phrases: [
+                "Get my moves with \(.applicationName)",
+                "Get moves for \(\.$period) with \(.applicationName)",
+            ],
+            shortTitle: "Get Moves",
+            systemImageName: "point.topleft.down.to.point.bottomright.curvepath"
+        )
+        AppShortcut(
+            intent: WhereWasIAtIntent(),
+            phrases: [
+                "Where was I with \(.applicationName)",
+                "Where was I in \(.applicationName)",
+            ],
+            shortTitle: "Where Was I",
+            systemImageName: "clock"
         )
     }
 

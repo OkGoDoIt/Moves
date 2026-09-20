@@ -166,7 +166,7 @@ enum TimelineArchiveFileParser {
         var skipped: [String] = []
         var warnings: [String] = []
 
-        for file in files {
+        for file in expandZipMembers(in: files) {
             switch parse(fileName: file.name, data: file.data) {
             case .success(let archive):
                 if archive.isEmpty {
@@ -181,6 +181,31 @@ enum TimelineArchiveFileParser {
         }
 
         return (TimelineArchiveMerger.merge(archives), skipped, warnings)
+    }
+
+    /// Unwraps `.zip` members so a single archive export can be restored.
+    static func expandZipMembers(in files: [(name: String, data: Data)]) -> [(name: String, data: Data)] {
+        var expanded: [(name: String, data: Data)] = []
+        for file in files {
+            let lowercased = file.name.lowercased()
+            guard lowercased.hasSuffix(".zip") || MovesZipArchive.isZip(file.data) else {
+                expanded.append(file)
+                continue
+            }
+            guard let members = try? MovesZipArchive.unpack(file.data) else {
+                expanded.append(file)
+                continue
+            }
+            for member in members {
+                let name = (member.path as NSString).lastPathComponent
+                let memberName = name.lowercased()
+                if memberName == "places.json" || memberName == "photos.csv" {
+                    continue
+                }
+                expanded.append((name, member.data))
+            }
+        }
+        return expanded
     }
 
     private static func parseGeoJSON(_ data: Data) -> Result<TimelineArchive, TimelineArchiveParseError> {
@@ -859,7 +884,7 @@ struct TimelineArchiveImportSettingsView: View {
                         }
                     }
 
-                    Text("In the other Moves app, export All Days as GPX, GeoJSON, and CSV, then select every file here at once. GeoJSON and CSV restore names, notes, and transport modes. GPX restores the original GPS times and elevation. Nightly iCloud Drive backups of those same formats work too.")
+                    Text("In the other Moves app, export All Days as GPX, GeoJSON, and CSV — or the Everything zip — then select those files here. GeoJSON and CSV restore names, notes, and transport modes. GPX restores the original GPS times and elevation. Nightly iCloud Drive backups of those same formats work too.")
                         .font(.system(size: 12, weight: .medium, design: .rounded))
                         .foregroundStyle(.secondary)
                 }
@@ -932,9 +957,11 @@ private enum TimelineArchiveImportContentTypes {
         .xml,
         .json,
         .commaSeparatedText,
+        .zip,
         UTType(filenameExtension: "gpx") ?? .xml,
         UTType(filenameExtension: "geojson") ?? .json,
-        UTType(filenameExtension: "csv") ?? .commaSeparatedText
+        UTType(filenameExtension: "csv") ?? .commaSeparatedText,
+        UTType(filenameExtension: "zip") ?? .zip,
     ]
 }
 

@@ -111,6 +111,9 @@
 		C10000013000000100000006 /* MovesRouteTrackingAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000013000000100000004 /* MovesRouteTrackingAttributes.swift */; };
 		D10000013010000100000001 /* DawarichSync.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10000013010000100000000 /* DawarichSync.swift */; };
 		D10000013010000100000003 /* DawarichSyncTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10000013010000100000002 /* DawarichSyncTests.swift */; };
+		W110000130B0000100000001 /* WebhookSync.swift in Sources */ = {isa = PBXBuildFile; fileRef = W110000130B0000100000000 /* WebhookSync.swift */; };
+		W110000130B0000100000003 /* MovesZipArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = W110000130B0000100000002 /* MovesZipArchive.swift */; };
+		W110000130B0000100000005 /* WebhookSyncTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = W110000130B0000100000004 /* WebhookSyncTests.swift */; };
 		E10000013020000100000001 /* MovesStatisticsSearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10000013020000100000000 /* MovesStatisticsSearchView.swift */; };
 		E20000013020000100000001 /* MovesStatisticsSearchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000013020000100000000 /* MovesStatisticsSearchTests.swift */; };
 		F10000013030000100000001 /* TimelineArchiveImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000013030000100000000 /* TimelineArchiveImport.swift */; };
@@ -325,6 +328,9 @@
 		C10000013000000100000004 /* MovesRouteTrackingAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesRouteTrackingAttributes.swift; sourceTree = "<group>"; };
 		D10000013010000100000000 /* DawarichSync.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DawarichSync.swift; sourceTree = "<group>"; };
 		D10000013010000100000002 /* DawarichSyncTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DawarichSyncTests.swift; sourceTree = "<group>"; };
+		W110000130B0000100000000 /* WebhookSync.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebhookSync.swift; sourceTree = "<group>"; };
+		W110000130B0000100000002 /* MovesZipArchive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesZipArchive.swift; sourceTree = "<group>"; };
+		W110000130B0000100000004 /* WebhookSyncTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebhookSyncTests.swift; sourceTree = "<group>"; };
 		E10000013020000100000000 /* MovesStatisticsSearchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesStatisticsSearchView.swift; sourceTree = "<group>"; };
 		E20000013020000100000000 /* MovesStatisticsSearchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesStatisticsSearchTests.swift; sourceTree = "<group>"; };
 		F10000013030000100000000 /* TimelineArchiveImport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineArchiveImport.swift; sourceTree = "<group>"; };
@@ -451,6 +457,8 @@
 				48F91DF0305A5FD70011EEA3 /* Icons */,
 				C0F16000000000000000004A /* MovesAppIdentity.swift */,
 				D10000013010000100000000 /* DawarichSync.swift */,
+				W110000130B0000100000000 /* WebhookSync.swift */,
+				W110000130B0000100000002 /* MovesZipArchive.swift */,
 				48A8FC0E2F8CCC7E000EAECA /* CreatedByView.swift */,
 				48A8FC102F8CCD27000EAECA /* VersionNumberView.swift */,
 				48A8FACE2F85166D000EAECA /* AppIcon.icon */,
@@ -605,6 +613,7 @@
 			isa = PBXGroup;
 			children = (
 				D10000013010000100000002 /* DawarichSyncTests.swift */,
+				W110000130B0000100000004 /* WebhookSyncTests.swift */,
 				E20000013020000100000000 /* MovesStatisticsSearchTests.swift */,
 				F10000013030000100000002 /* TimelineArchiveImportTests.swift */,
 				F10000013030000100000006 /* LocationLogImportTests.swift */,
@@ -925,6 +934,8 @@
 			files = (
 				C0F16000000000000000005A /* MovesAppIdentity.swift in Sources */,
 				D10000013010000100000001 /* DawarichSync.swift in Sources */,
+				W110000130B0000100000001 /* WebhookSync.swift in Sources */,
+				W110000130B0000100000003 /* MovesZipArchive.swift in Sources */,
 				489A76492C4FDE1E00F43B69 /* VisitedLocation.swift in Sources */,
 				A20000012FA0000100000001 /* HealthWorkoutRouteImporter.swift in Sources */,
 				A40000012FC0000100000001 /* RouteFileImport.swift in Sources */,
@@ -989,6 +1000,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				D10000013010000100000003 /* DawarichSyncTests.swift in Sources */,
+				W110000130B0000100000005 /* WebhookSyncTests.swift in Sources */,
 				E20000013020000100000001 /* MovesStatisticsSearchTests.swift in Sources */,
 				F10000013030000100000003 /* TimelineArchiveImportTests.swift in Sources */,
 				F10000013030000100000007 /* LocationLogImportTests.swift in Sources */,

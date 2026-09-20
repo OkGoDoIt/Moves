@@ -96,8 +96,8 @@ Optional: `DEVICE_UDID=... ./Scripts/install-iphone.sh`.
 | Place learning | `Moves/PlaceLearningEngine.swift` (resolve / learn / negatives / merge / clampRadius); hooked from `DefaultTimelineAssembler.ingestVisit` and `SwiftDataTimelineRepository`. Places tab occupancy, merge, and shrink consume these APIs. |
 | Timeline lookup / schema upgrade | `Moves/TimelineLocator.swift`, `Moves/TimelineSchemaUpgrader.swift` |
 | Route rendering / speed shading | `Moves/RouteRendering.swift`, `Moves/SpeedProfileBuilder.swift` |
-| Settings, export, integrations | `Moves/MovesSettingsView.swift`, `Moves/DawarichSync.swift` |
-| Imports | `Moves/TimelineArchiveImport.swift` (Moves GPX+GeoJSON+CSV), `Moves/LocationLogImport.swift` + `Moves/RouteFileImport.swift` (any timestamped GPX/TCX/KML log → stays, moves, speed-based modes, geocoded names; bulk writer is `importLocationLog` in `VisitedLocation.swift`). Real-file fixtures live in gitignored `import-staging/` and `MovesTests/Fixtures/`; tests skip when absent. |
+| Settings, export, integrations | `Moves/MovesSettingsView.swift`, `Moves/DawarichSync.swift`, `Moves/WebhookSync.swift` (generic webhook), `Moves/MovesZipArchive.swift` (zip export/import) |
+| Imports | `Moves/TimelineArchiveImport.swift` (Moves GPX+GeoJSON+CSV+zip), `Moves/LocationLogImport.swift` + `Moves/RouteFileImport.swift` (any timestamped GPX/TCX/KML log → stays, moves, speed-based modes, geocoded names; bulk writer is `importLocationLog` in `VisitedLocation.swift`). Real-file fixtures live in gitignored `import-staging/` and `MovesTests/Fixtures/`; tests skip when absent. |
 | Location capture, motion, route tracking | `Moves/LocationChange.swift` (`MovesLocationCaptureManager`) |
 | Timeline assembly / transport inference | `DefaultTimelineAssembler` in the location/timeline sources; tests in `MovesTests/TimelineAssemblerTests.swift` |
 | App Intents / Siri / Action button | `Moves/MovesAppIntents.swift` |
