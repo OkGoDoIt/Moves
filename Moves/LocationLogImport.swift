@@ -73,6 +73,30 @@ struct LocationLogStay: Sendable {
     let radius: CLLocationDistance
     /// Fixes recorded while the device stayed here.
     let points: [LocationLogPoint]
+    /// Place name from a semantic source such as Google Timeline. Never a street address.
+    let name: String?
+    /// True when the source marked this visit as user-confirmed.
+    let isUserConfirmed: Bool
+
+    init(
+        arrivalDate: Date,
+        departureDate: Date,
+        latitude: Double,
+        longitude: Double,
+        radius: CLLocationDistance,
+        points: [LocationLogPoint],
+        name: String? = nil,
+        isUserConfirmed: Bool = false
+    ) {
+        self.arrivalDate = arrivalDate
+        self.departureDate = departureDate
+        self.latitude = latitude
+        self.longitude = longitude
+        self.radius = radius
+        self.points = points
+        self.name = name
+        self.isUserConfirmed = isUserConfirmed
+    }
 
     var coordinate: CLLocationCoordinate2D {
         CLLocationCoordinate2D(latitude: latitude, longitude: longitude)

@@ -1377,15 +1377,22 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                 let (place, isNew) = try upsertLogStay(stay, source: source, report: &report)
                 if isNew {
                     report.placeCount += 1
-                    report.newPlaces.append(
-                        LocationLogPlaceNamer.Candidate(placeID: place.id, coordinate: place.coordinate, dwell: stay.duration)
-                    )
+                    if stay.name?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
+                        report.newPlaces.append(
+                            LocationLogPlaceNamer.Candidate(placeID: place.id, coordinate: place.coordinate, dwell: stay.duration)
+                        )
+                    }
                 } else {
                     report.mergedPlaceCount += 1
                 }
 
                 if let move = pendingMove {
-                    let start = try previousPlace ?? logEndpointPlace(at: move.points.first, fallback: place, report: &report)
+                    let start = try previousPlace ?? logEndpointPlace(
+                        at: move.points.first,
+                        fallback: place,
+                        source: source,
+                        report: &report
+                    )
                     try insertLogMove(
                         move,
                         from: start,
@@ -1402,8 +1409,18 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                 if let orphan = pendingMove {
                     // Two moves in a row only happen at the log edges; give the
                     // first one a point-shaped destination so it still renders.
-                    let start = try previousPlace ?? logEndpointPlace(at: orphan.points.first, fallback: nil, report: &report)
-                    let end = try logEndpointPlace(at: orphan.points.last, fallback: start, report: &report)
+                    let start = try previousPlace ?? logEndpointPlace(
+                        at: orphan.points.first,
+                        fallback: nil,
+                        source: source,
+                        report: &report
+                    )
+                    let end = try logEndpointPlace(
+                        at: orphan.points.last,
+                        fallback: start,
+                        source: source,
+                        report: &report
+                    )
                     try insertLogMove(orphan, from: start, to: end, source: source, transportModeOverride: transportModeOverride, report: &report)
                     previousPlace = end
                 }
@@ -1416,8 +1433,18 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         }
 
         if let move = pendingMove {
-            let start = try previousPlace ?? logEndpointPlace(at: move.points.first, fallback: nil, report: &report)
-            let end = try logEndpointPlace(at: move.points.last, fallback: start, report: &report)
+            let start = try previousPlace ?? logEndpointPlace(
+                at: move.points.first,
+                fallback: nil,
+                source: source,
+                report: &report
+            )
+            let end = try logEndpointPlace(
+                at: move.points.last,
+                fallback: start,
+                source: source,
+                report: &report
+            )
             try insertLogMove(move, from: start, to: end, source: source, transportModeOverride: transportModeOverride, report: &report)
         }
 
@@ -1531,6 +1558,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             if match.dayTimeline == nil {
                 match.dayTimeline = try timeline(for: match.arrivalDate)
             }
+            applyGoogleStayMetadata(stay, to: match, source: source)
             return (match, false)
         }
 
@@ -1544,6 +1572,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         place.dayTimeline = try timeline(for: stay.arrivalDate)
         modelContext.insert(place)
         try applyPlaceLearning(to: place)
+        applyGoogleStayMetadata(stay, to: place, source: source)
         bulkCreatedPlaceIDs?.insert(place.id)
         return (place, true)
     }
@@ -1557,6 +1586,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
     private func logEndpointPlace(
         at point: LocationLogPoint?,
         fallback: VisitPlace?,
+        source: LocationSampleSource,
         report: inout LocationLogImportReport
     ) throws -> VisitPlace {
         guard let point else {
@@ -1573,6 +1603,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             report.newPlaces.append(
                 LocationLogPlaceNamer.Candidate(placeID: place.id, coordinate: place.coordinate, dwell: 0)
             )
+            applyImportedOrigin(to: place, source: source)
         }
         return place
     }
@@ -1614,6 +1645,9 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                     sample.moveSegment = existing
                 }
             }
+            if existing.transportModeSource == .auto, source == .googleTimelineImport, mode != .unknown {
+                existing.transportModeSource = .imported
+            }
             report.mergedMoveCount += 1
             return
         }
@@ -1634,11 +1668,65 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         segment.startPlace = startPlace
         segment.endPlace = endPlace
         segment.dayTimeline = try timeline(for: startDate)
+        applyImportedMoveProvenance(
+            to: segment,
+            source: source,
+            pointCount: move.points.count,
+            distanceMeters: move.distanceMeters
+        )
         modelContext.insert(segment)
         for sample in samples where sample.moveSegment == nil {
             sample.moveSegment = segment
         }
         report.moveCount += 1
+    }
+
+    /// Marks a Google Timeline visit as imported and copies its semantic name.
+    private func applyGoogleStayMetadata(
+        _ stay: LocationLogStay,
+        to place: VisitPlace,
+        source: LocationSampleSource
+    ) {
+        applyImportedOrigin(to: place, source: source)
+        if let name = stay.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+            place.autoLabel = name
+        }
+    }
+
+    private func applyImportedOrigin(to place: VisitPlace, source: LocationSampleSource) {
+        guard source == .googleTimelineImport else { return }
+        if place.origin == .sensor {
+            place.origin = .imported
+        }
+    }
+
+    /// Tags a Google Timeline move as imported and sets path honesty from density.
+    private func applyImportedMoveProvenance(
+        to move: MoveSegment,
+        source: LocationSampleSource,
+        pointCount: Int,
+        distanceMeters: Double
+    ) {
+        guard source == .googleTimelineImport else { return }
+        move.origin = .imported
+        move.transportModeSource = .imported
+        move.routeMatchConfidence = Self.importedRouteConfidence(
+            pointCount: pointCount,
+            distanceMeters: distanceMeters
+        )
+    }
+
+    /// WS4 density gate applied to imported paths: ≥5 fixes/km is high, 1–5 medium, otherwise estimated.
+    private static func importedRouteConfidence(
+        pointCount: Int,
+        distanceMeters: Double
+    ) -> RouteMatchConfidence {
+        let intermediates = max(pointCount - 2, 0)
+        let kilometres = max(distanceMeters, 1) / 1_000
+        let density = Double(intermediates) / kilometres
+        if density >= 5 { return .high }
+        if density >= 1 { return .medium }
+        return .estimated
     }
 
     /// A move already in the store that covers the same trip: same endpoints

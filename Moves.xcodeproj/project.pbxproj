@@ -155,6 +155,12 @@
 		F10000013030000100000003 /* TimelineArchiveImportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000013030000100000002 /* TimelineArchiveImportTests.swift */; };
 		F10000013030000100000005 /* LocationLogImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000013030000100000004 /* LocationLogImport.swift */; };
 		F10000013030000100000007 /* LocationLogImportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000013030000100000006 /* LocationLogImportTests.swift */; };
+		F80000013080000100000001 /* GoogleTimelineDocument.swift in Sources */ = {isa = PBXBuildFile; fileRef = F80000013080000100000000 /* GoogleTimelineDocument.swift */; };
+		F80000013080000100000003 /* GoogleTimelineImporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = F80000013080000100000002 /* GoogleTimelineImporter.swift */; };
+		F80000013080000100000005 /* GoogleTimelineRecordsScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = F80000013080000100000004 /* GoogleTimelineRecordsScanner.swift */; };
+		F80000013080000100000007 /* GoogleTimelineZipReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = F80000013080000100000006 /* GoogleTimelineZipReader.swift */; };
+		F80000013080000100000009 /* OnboardingFlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = F80000013080000100000008 /* OnboardingFlow.swift */; };
+		F8000001308000010000000B /* GoogleTimelineImporterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8000001308000010000000A /* GoogleTimelineImporterTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -369,6 +375,12 @@
 		F70000013070000100000006 /* PlacesIndex.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlacesIndex.swift; sourceTree = "<group>"; };
 		F70000013070000100000008 /* PlaceGeocodeBackfill.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaceGeocodeBackfill.swift; sourceTree = "<group>"; };
 		F7000001307000010000000A /* PlacesIndexTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlacesIndexTests.swift; sourceTree = "<group>"; };
+		F80000013080000100000000 /* GoogleTimelineDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GoogleTimelineDocument.swift; sourceTree = "<group>"; };
+		F80000013080000100000002 /* GoogleTimelineImporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GoogleTimelineImporter.swift; sourceTree = "<group>"; };
+		F80000013080000100000004 /* GoogleTimelineRecordsScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GoogleTimelineRecordsScanner.swift; sourceTree = "<group>"; };
+		F80000013080000100000006 /* GoogleTimelineZipReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GoogleTimelineZipReader.swift; sourceTree = "<group>"; };
+		F80000013080000100000008 /* OnboardingFlow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingFlow.swift; sourceTree = "<group>"; };
+		F8000001308000010000000A /* GoogleTimelineImporterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GoogleTimelineImporterTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -463,6 +475,8 @@
 				A60000012FE0000100000000 /* DailyTimelineBackup.swift */,
 				489A76362C4FC6F300F43B69 /* ContentView.swift */,
 				F20000013040000100000000 /* MovesRootView.swift */,
+				F80000013080000100000008 /* OnboardingFlow.swift */,
+				F8000001308000010000000C /* Import */,
 				F6100001306000010000001F /* MapTab */,
 				F21100013051000100000000 /* TimelineTabView.swift */,
 				F70000013070000100000020 /* PlacesTab */,
@@ -601,6 +615,17 @@
 			path = PlacesTab;
 			sourceTree = "<group>";
 		};
+		F8000001308000010000000C /* Import */ = {
+			isa = PBXGroup;
+			children = (
+				F80000013080000100000000 /* GoogleTimelineDocument.swift */,
+				F80000013080000100000002 /* GoogleTimelineImporter.swift */,
+				F80000013080000100000004 /* GoogleTimelineRecordsScanner.swift */,
+				F80000013080000100000006 /* GoogleTimelineZipReader.swift */,
+			);
+			path = Import;
+			sourceTree = "<group>";
+		};
 		9A1B00012F00000100000003 /* MovesTests */ = {
 			isa = PBXGroup;
 			children = (
@@ -619,6 +644,7 @@
 				F61000013060000100000010 /* MapRangeSelectionTests.swift */,
 				F61000013060000100000012 /* VisitedCellStoreTests.swift */,
 				F7000001307000010000000A /* PlacesIndexTests.swift */,
+				F8000001308000010000000A /* GoogleTimelineImporterTests.swift */,
 			);
 			path = MovesTests;
 			sourceTree = "<group>";
@@ -930,6 +956,11 @@
 				A40000012FC0000100000001 /* RouteFileImport.swift in Sources */,
 				F10000013030000100000001 /* TimelineArchiveImport.swift in Sources */,
 				F10000013030000100000005 /* LocationLogImport.swift in Sources */,
+				F80000013080000100000001 /* GoogleTimelineDocument.swift in Sources */,
+				F80000013080000100000003 /* GoogleTimelineImporter.swift in Sources */,
+				F80000013080000100000005 /* GoogleTimelineRecordsScanner.swift in Sources */,
+				F80000013080000100000007 /* GoogleTimelineZipReader.swift in Sources */,
+				F80000013080000100000009 /* OnboardingFlow.swift in Sources */,
 				A20000012FA0000100000003 /* WatchRouteInbox.swift in Sources */,
 				A30000012FB0000100000001 /* TimelineWidgetSnapshot.swift in Sources */,
 				489A76372C4FC6F300F43B69 /* ContentView.swift in Sources */,
@@ -1003,6 +1034,7 @@
 				F61000013060000100000011 /* MapRangeSelectionTests.swift in Sources */,
 				F61000013060000100000013 /* VisitedCellStoreTests.swift in Sources */,
 				F7000001307000010000000B /* PlacesIndexTests.swift in Sources */,
+				F8000001308000010000000B /* GoogleTimelineImporterTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -1,0 +1,43 @@
+{
+  "locations": [
+    {
+      "latitudeE7": 525200000,
+      "longitudeE7": 134000000,
+      "accuracy": 45,
+      "source": "wifi",
+      "timestamp": "2020-01-02T08:00:00.000Z"
+    },
+    {
+      "latitudeE7": 525201000,
+      "longitudeE7": 134001000,
+      "accuracy": 21,
+      "activity": [
+        {
+          "activity": [
+            { "type": "STILL", "confidence": 80 },
+            { "type": "ON_FOOT", "confidence": 15 }
+          ],
+          "timestamp": "2020-01-02T08:05:00.000Z"
+        }
+      ],
+      "source": "WIFI",
+      "deviceTag": 12345,
+      "timestamp": "2020-01-02T08:05:10.000Z"
+    },
+    {
+      "latitudeE7": 525210000,
+      "longitudeE7": 134050000,
+      "accuracy": 18,
+      "source": "WIFI",
+      "deviceTag": 12345,
+      "timestamp": "2020-01-02T08:20:00.500Z"
+    },
+    {
+      "latitudeE7": 525300000,
+      "longitudeE7": 134100000,
+      "accuracy": 16,
+      "deviceTag": -1532718246,
+      "timestamp": "2020-01-02T21:30:00Z"
+    }
+  ]
+}
