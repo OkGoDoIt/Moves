@@ -294,6 +294,7 @@ struct MapTabView: View {
         ForEach(loader.visits) { visit in
             Annotation(visit.title, coordinate: visit.coordinate, anchor: .center) {
                 MapLocationDot(tint: MovesPalette.place, isSelected: false)
+                    .accessibilityLabel(visit.title)
             }
         }
     }
@@ -327,6 +328,8 @@ struct MapTabView: View {
                 .stroke(MovesPalette.border, lineWidth: 0.5)
         }
         .shadow(color: .black.opacity(0.1), radius: 10, y: 3)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(calloutSubtitle(route))
     }
 
     private func calloutSubtitle(_ route: MapDisplayedRoute) -> String {

@@ -114,7 +114,7 @@ struct InsightsTabView: View {
                 yearInReviewButton
             }
             .padding(.horizontal, 16)
-            .padding(.bottom, 28)
+            .padding(.bottom, MovesChromeMetrics.floatingTabBarClearance)
         }
     }
 
@@ -202,34 +202,35 @@ struct InsightsTabView: View {
 
     private var geographyCard: some View {
         InsightsCard(title: String(localized: "Places")) {
-            HStack(spacing: 10) {
-                Button {
-                    path.append(InsightsRoute.countries)
-                } label: {
-                    InsightsMetric(
-                        title: String(localized: "Countries"),
-                        value: store.snapshot.countries.count.formatted()
-                    )
-                }
-                .buttonStyle(.plain)
-                .disabled(store.snapshot.countries.isEmpty)
-
-                Button {
-                    path.append(InsightsRoute.cities)
-                } label: {
-                    InsightsMetric(
-                        title: String(localized: "Cities"),
-                        value: store.snapshot.cities.count.formatted()
-                    )
-                }
-                .buttonStyle(.plain)
-                .disabled(store.snapshot.cities.isEmpty)
-            }
-
-            if store.snapshot.countries.isEmpty {
-                Text(String(localized: "Country and city counts appear after visits are named."))
+            if store.snapshot.countries.isEmpty && store.snapshot.cities.isEmpty {
+                Text(String(localized: "Cities appear after places are named"))
                     .font(.system(.footnote, design: .rounded))
                     .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                HStack(spacing: 10) {
+                    Button {
+                        path.append(InsightsRoute.countries)
+                    } label: {
+                        InsightsMetric(
+                            title: String(localized: "Countries"),
+                            value: store.snapshot.countries.count.formatted()
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(store.snapshot.countries.isEmpty)
+
+                    Button {
+                        path.append(InsightsRoute.cities)
+                    } label: {
+                        InsightsMetric(
+                            title: String(localized: "Cities"),
+                            value: store.snapshot.cities.count.formatted()
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(store.snapshot.cities.isEmpty)
+                }
             }
         }
     }
@@ -872,6 +873,7 @@ private struct InsightsHourChart: View {
         .chartYAxis(.hidden)
         .chartLegend(.hidden)
         .frame(height: 120)
+        .accessibilityChartDescriptor(InsightsHourDescriptor(durations: durations))
         .accessibilityLabel(String(localized: "Moving time by hour"))
     }
 
@@ -922,6 +924,7 @@ private struct InsightsWeekdayChart: View {
         .chartYAxis(.hidden)
         .chartLegend(.hidden)
         .frame(height: 120)
+        .accessibilityChartDescriptor(InsightsWeekdayDescriptor(rows: rows))
         .accessibilityLabel(String(localized: "Moving time by weekday"))
     }
 }
@@ -932,4 +935,63 @@ private struct WeekdayRow: Identifiable {
     let sundayIndex: Int
     let label: String
     let duration: TimeInterval
+}
+
+private struct InsightsHourDescriptor: AXChartDescriptorRepresentable {
+    let durations: [TimeInterval]
+
+    func makeChartDescriptor() -> AXChartDescriptor {
+        AXChartDescriptor(
+            title: String(localized: "Moving time by hour"),
+            summary: String(localized: "Minutes moving"),
+            xAxis: AXNumericDataAxisDescriptor(
+                title: String(localized: "Hour"),
+                range: 0...23,
+                gridlinePositions: [0, 6, 12, 18]
+            ) { "\(Int($0))" },
+            yAxis: AXNumericDataAxisDescriptor(
+                title: String(localized: "Minutes"),
+                range: 0...max((durations.max() ?? 1) / 60, 1),
+                gridlinePositions: []
+            ) { String(format: "%.0f", $0) },
+            series: [
+                AXDataSeriesDescriptor(
+                    name: String(localized: "Moving"),
+                    isContinuous: false,
+                    dataPoints: durations.enumerated().map { hour, duration in
+                        AXDataPoint(x: Double(hour), y: duration / 60)
+                    }
+                )
+            ]
+        )
+    }
+}
+
+private struct InsightsWeekdayDescriptor: AXChartDescriptorRepresentable {
+    let rows: [WeekdayRow]
+
+    func makeChartDescriptor() -> AXChartDescriptor {
+        AXChartDescriptor(
+            title: String(localized: "Moving time by weekday"),
+            summary: String(localized: "Hours moving"),
+            xAxis: AXCategoricalDataAxisDescriptor(
+                title: String(localized: "Day"),
+                categoryOrder: rows.map(\.label)
+            ),
+            yAxis: AXNumericDataAxisDescriptor(
+                title: String(localized: "Hours"),
+                range: 0...max((rows.map(\.duration).max() ?? 1) / 3600, 1),
+                gridlinePositions: []
+            ) { String(format: "%.1f", $0) },
+            series: [
+                AXDataSeriesDescriptor(
+                    name: String(localized: "Moving"),
+                    isContinuous: false,
+                    dataPoints: rows.map { row in
+                        AXDataPoint(x: row.label, y: row.duration / 3600)
+                    }
+                )
+            ]
+        )
+    }
 }

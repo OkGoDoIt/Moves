@@ -112,7 +112,10 @@ enum DailyTimelineBackup {
         guard let payload = TimelineExporter.makePayload(
             days: [day],
             format: format.timelineExportFormat,
-            fileStem: "Moves-\(dayKey)"
+            fileStem: "Moves-\(dayKey)",
+            privacyZones: PrivacyZoneResolver.exportZones(
+                from: (try? context.fetch(FetchDescriptor<KnownPlace>())) ?? []
+            )
         ) else {
             throw DailyTimelineBackupError.couldNotCreateExport
         }

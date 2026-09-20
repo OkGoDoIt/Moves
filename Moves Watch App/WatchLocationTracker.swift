@@ -37,9 +37,14 @@ private struct WatchTimelineWidgetSnapshot: Codable {
     let routePoints: [WatchTimelineRoutePoint]?
 }
 
-private struct WatchTimelineRoutePoint: Codable {
+struct WatchTimelineRoutePoint: Codable {
     let latitude: Double
     let longitude: Double
+    let colorAssetName: String?
+
+    var coordinate: CLLocationCoordinate2D {
+        CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+    }
 }
 
 struct WatchDaySummary {
@@ -54,6 +59,48 @@ struct WatchDaySummary {
         visitedLocationCount: 0,
         moveCount: 0
     )
+}
+
+/// One same-color polyline on the Watch map.
+struct WatchRouteSegment: Identifiable {
+    let id: String
+    let colorAssetName: String
+    let coordinates: [CLLocationCoordinate2D]
+
+    static func make(from points: [WatchTimelineRoutePoint]) -> [WatchRouteSegment] {
+        guard !points.isEmpty else { return [] }
+        var segments: [WatchRouteSegment] = []
+        var currentColor = points[0].colorAssetName ?? "MovesTransportWalking"
+        var current: [CLLocationCoordinate2D] = [points[0].coordinate]
+        for point in points.dropFirst() {
+            let color = point.colorAssetName ?? currentColor
+            if color == currentColor {
+                current.append(point.coordinate)
+            } else {
+                if current.count > 1 {
+                    segments.append(
+                        WatchRouteSegment(
+                            id: "\(segments.count)-\(currentColor)",
+                            colorAssetName: currentColor,
+                            coordinates: current
+                        )
+                    )
+                }
+                currentColor = color
+                current = [point.coordinate]
+            }
+        }
+        if current.count > 1 {
+            segments.append(
+                WatchRouteSegment(
+                    id: "\(segments.count)-\(currentColor)",
+                    colorAssetName: currentColor,
+                    coordinates: current
+                )
+            )
+        }
+        return segments
+    }
 }
 
 private enum WatchWidgetSharedStore {
@@ -73,6 +120,7 @@ final class WatchLocationTracker: NSObject, ObservableObject {
     @Published private(set) var statusText = "Ready"
     @Published private(set) var daySummary = WatchDaySummary.placeholder
     @Published private(set) var todayRouteCoordinates: [CLLocationCoordinate2D] = []
+    @Published private(set) var todayRouteSegments: [WatchRouteSegment] = []
 
     private let manager = CLLocationManager()
     private let encoder = JSONEncoder()
@@ -80,6 +128,7 @@ final class WatchLocationTracker: NSObject, ObservableObject {
     private var activeSamples: [CLLocation] = []
     private var activeStartedAt: Date?
     private var syncedRouteCoordinates: [CLLocationCoordinate2D] = []
+    private var syncedRoutePoints: [WatchTimelineRoutePoint] = []
 
     override init() {
         super.init()
@@ -230,6 +279,7 @@ final class WatchLocationTracker: NSObject, ObservableObject {
               let snapshot = try? decoder.decode(WatchTimelineWidgetSnapshot.self, from: data) else {
             daySummary = .placeholder
             syncedRouteCoordinates = []
+            syncedRoutePoints = []
             return
         }
 
@@ -239,9 +289,8 @@ final class WatchLocationTracker: NSObject, ObservableObject {
             visitedLocationCount: max(snapshot.visitedLocationCount, 0),
             moveCount: max(snapshot.moveCount, 0)
         )
-        syncedRouteCoordinates = (snapshot.routePoints ?? []).map {
-            CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude)
-        }
+        syncedRoutePoints = snapshot.routePoints ?? []
+        syncedRouteCoordinates = syncedRoutePoints.map(\.coordinate)
     }
 
     private func refreshTodayRouteCoordinates() {
@@ -267,6 +316,25 @@ final class WatchLocationTracker: NSObject, ObservableObject {
 
         coordinates.append(contentsOf: activeSamples.map(\.coordinate))
         todayRouteCoordinates = coordinates
+
+        var points = syncedRoutePoints
+        points.append(contentsOf: activeSamples.map {
+            WatchTimelineRoutePoint(
+                latitude: $0.coordinate.latitude,
+                longitude: $0.coordinate.longitude,
+                colorAssetName: "MovesRouteTracking"
+            )
+        })
+        let segments = WatchRouteSegment.make(from: points)
+        todayRouteSegments = segments.isEmpty && coordinates.count > 1
+            ? [
+                WatchRouteSegment(
+                    id: "fallback",
+                    colorAssetName: "MovesTransportWalking",
+                    coordinates: coordinates
+                )
+            ]
+            : segments
     }
 }
 

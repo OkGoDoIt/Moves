@@ -10,6 +10,9 @@ enum MovesChromeMetrics {
     /// Extra space under activity bubbles so they are not flush with the tab bar.
     static let timelineTabBarBreathingRoom: CGFloat = 8
 
+    /// Extra list/scroll padding so the last row sits above the floating tab pill.
+    static let floatingTabBarClearance: CGFloat = 108
+
     /// Minimum overlay lift when a full-screen map does not inherit TabView's inset.
     static let detailOverlayTabBarClearance: CGFloat = 64
 }
@@ -179,11 +182,11 @@ struct DayHeaderView: View {
 // MARK: - Activity bubbles
 
 /// Diameter math for original-Moves-style activity bubbles. Sized by moving
-/// time, clamped to 44…88 pt so a short walk stays tappable and a long drive
-/// does not dominate the row.
+/// time, clamped to 44…64 pt so a short walk stays tappable and a long drive
+/// does not steal the storyline.
 enum ActivityBubbleSizing {
     static let minimumDiameter: CGFloat = 44
-    static let maximumDiameter: CGFloat = 88
+    static let maximumDiameter: CGFloat = 64
 
     /// Linear interpolation from `minimumDiameter` to `maximumDiameter`.
     static func diameter(duration: TimeInterval, maximumDuration: TimeInterval) -> CGFloat {
@@ -238,6 +241,14 @@ struct ActivityBubblesView: View {
         metrics.map(\.duration).max() ?? 0
     }
 
+    private var rowHeight: CGFloat {
+        let diameter = ActivityBubbleSizing.diameter(
+            duration: maximumDuration,
+            maximumDuration: max(maximumDuration, 1)
+        )
+        return diameter + 46
+    }
+
     var body: some View {
         if metrics.isEmpty {
             EmptyView()
@@ -248,10 +259,10 @@ struct ActivityBubblesView: View {
                         bubble(for: metric)
                     }
                 }
-                .frame(maxWidth: .infinity)
                 .padding(.horizontal, 8)
-                .padding(.vertical, 4)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(height: rowHeight)
             .accessibilityElement(children: .contain)
             .accessibilityLabel(String(localized: "Day activity"))
         }

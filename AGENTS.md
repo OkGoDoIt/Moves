@@ -100,12 +100,13 @@ Optional: `DEVICE_UDID=... ./Scripts/install-iphone.sh`.
 | Timeline lookup / schema upgrade | `Moves/TimelineLocator.swift`, `Moves/TimelineSchemaUpgrader.swift` |
 | Route rendering / speed shading | `Moves/RouteRendering.swift`, `Moves/SpeedProfileBuilder.swift` |
 | Settings, export, integrations | `Moves/MovesSettingsView.swift`, `Moves/DawarichSync.swift`, `Moves/WebhookSync.swift` (generic webhook), `Moves/MovesZipArchive.swift` (zip export/import) |
+| iCloud status, privacy zones | `Moves/CloudDataPresencePublisher.swift` (Settings → iCloud), `Moves/PrivacyZones.swift` (Home/Work circles on share cards and exports) |
 | Imports | `Moves/Import/` (Google Timeline: `GoogleTimelineImporter`, `GoogleTimelineDocument`, streaming `Records.json` scanner, zip reader); `Moves/OnboardingFlow.swift`; `Moves/TimelineArchiveImport.swift` (Moves GPX+GeoJSON+CSV+zip); `Moves/LocationLogImport.swift` + `Moves/RouteFileImport.swift` (any timestamped GPX/TCX/KML log → stays, moves, speed-based modes, geocoded names; bulk writer is `importLocationLog` in `VisitedLocation.swift`). Real-file fixtures live in gitignored `import-staging/` and `MovesTests/Fixtures/`; Google Timeline unit fixtures are `MovesTests/Fixtures/GoogleTimeline/`. |
 | Location capture, motion, route tracking | `Moves/LocationChange.swift` (`MovesLocationCaptureManager`) |
 | Timeline assembly / transport inference | `DefaultTimelineAssembler` in the location/timeline sources; tests in `MovesTests/TimelineAssemblerTests.swift` |
 | App Intents / Siri / Action button | `Moves/MovesAppIntents.swift` |
-| Widgets + Live Activity | `Moves Widgets/` |
-| Watch companion GPS | `Moves Watch App/` |
+| Widgets + Live Activity | `Moves Widgets/` (route Canvas from `TimelineWidgetSnapshot.routePoints`; Live Activity uses the mode palette) |
+| Watch companion GPS | `Moves Watch App/` (today’s route uses mode color assets) |
 | iPhone Duo layout notes (not implemented) | `duo.md` |
 
 Keep capture, Live Activity, uploads, and SwiftData writes **independent of view identity**. Fold/open/rotation must not tear down `MovesLocationCaptureManager`.

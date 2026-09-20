@@ -26,7 +26,9 @@ final class TimelineTabTests: XCTestCase {
 
     func testBubbleDiameterInterpolatesLinearly() {
         let diameter = ActivityBubbleSizing.diameter(duration: 1800, maximumDuration: 3600)
-        XCTAssertEqual(diameter, 66, accuracy: 0.01)
+        let expected = ActivityBubbleSizing.minimumDiameter
+            + (ActivityBubbleSizing.maximumDiameter - ActivityBubbleSizing.minimumDiameter) * 0.5
+        XCTAssertEqual(diameter, expected, accuracy: 0.01)
     }
 
     func testBubbleDiameterClampsAboveTheMaximum() {

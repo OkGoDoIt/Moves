@@ -413,6 +413,7 @@ struct DayTimelinePageContent: View {
                     .padding(.horizontal, 14)
 
                     storylineList(usesSelection: false)
+                        .frame(maxHeight: .infinity, alignment: .top)
 
                     if !activityBubbleMetrics.isEmpty {
                         ActivityBubblesView(
@@ -420,10 +421,11 @@ struct DayTimelinePageContent: View {
                             filteredModes: $filteredModes
                         )
                         .padding(.horizontal, 8)
+                        .padding(.top, 2)
+                        .padding(.bottom, MovesChromeMetrics.timelineTabBarBreathingRoom)
                     }
                 }
             }
-            .padding(.bottom, MovesChromeMetrics.timelineTabBarBreathingRoom)
 
             if isMapExpanded {
                 DayMapStrip(
@@ -506,8 +508,15 @@ struct DayTimelinePageContent: View {
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
             .scrollIndicators(.hidden)
-            .scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
-            .contentMargins(.bottom, 20, for: .scrollContent)
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .scrollIndicators(.hidden)
+            .scrollEdgeEffectStyle(.soft, for: .top)
+            .contentMargins(
+                .bottom,
+                usesSelection ? 12 : 8,
+                for: .scrollContent
+            )
             .onChange(of: highlightedEntryID) { _, entryID in
                 guard let entryID else { return }
                 withAnimation(.easeInOut(duration: 0.28)) {
@@ -1121,6 +1130,8 @@ struct DayMapStrip: View {
             mapContent
         }
         .mapStyle(.standard(elevation: .flat, emphasis: .muted))
+        .accessibilityLabel(String(localized: "Day map"))
+        .accessibilityHint(String(localized: "Shows today’s places and how you moved"))
     }
 
     private var collapsedMapSnapshotView: some View {
@@ -1232,6 +1243,7 @@ struct DayMapStrip: View {
                         tint: liveRouteSnapshot == nil ? MovesPalette.start : MovesPalette.routeTracking,
                         isSelected: isSampleSelected
                     )
+                    .accessibilityLabel(String(localized: "Captured location"))
                 }
             }
         }
@@ -1798,6 +1810,7 @@ struct StorylineRow: View {
 
 private struct StorylineTimeColumn: View {
     let date: Date
+    @ScaledMetric(relativeTo: .caption2) private var columnWidth: CGFloat = 50
 
     var body: some View {
         let period = StorylineClock.periodText(from: date)
@@ -1807,18 +1820,18 @@ private struct StorylineTimeColumn: View {
                 .font(.system(size: 12, weight: .semibold, design: .rounded).width(.condensed))
                 .monospacedDigit()
                 .lineLimit(1)
-                .minimumScaleFactor(0.85)
+                .minimumScaleFactor(0.75)
 
             if let period {
                 Text(period)
                     .font(.system(size: 10, weight: .bold, design: .rounded).width(.condensed))
                     .textCase(.uppercase)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.8)
+                    .minimumScaleFactor(0.7)
             }
         }
         .foregroundStyle(.secondary)
-        .frame(width: 38, alignment: .trailing)
+        .frame(width: columnWidth, alignment: .trailing)
         .padding(.trailing, 4)
         .padding(.top, 6)
         .accessibilityElement(children: .ignore)

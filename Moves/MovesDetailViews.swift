@@ -669,13 +669,15 @@ struct MoveMapDetailView: View {
 
     private static func makeGPXShareFile(
         for segment: MoveSegment,
-        coordinates: [CLLocationCoordinate2D]
+        coordinates: [CLLocationCoordinate2D],
+        privacyZones: [PrivacyZone] = []
     ) -> GPXShareFile? {
         let timestamp = Self.exportFilenameDateFormatter.string(from: segment.timelineStartDate)
         guard let payload = TimelineExporter.makeMoveGPXPayload(
             move: segment,
             coordinates: coordinates,
-            fileStem: "moves-\(timestamp)-\(segment.transportMode.rawValue)"
+            fileStem: "moves-\(timestamp)-\(segment.transportMode.rawValue)",
+            privacyZones: privacyZones
         ) else {
             return nil
         }
@@ -684,7 +686,13 @@ struct MoveMapDetailView: View {
     }
 
     private func refreshMoveGPXShareFile() {
-        moveGPXShareFile = Self.makeGPXShareFile(for: segment, coordinates: routeCoordinates)
+        moveGPXShareFile = Self.makeGPXShareFile(
+            for: segment,
+            coordinates: routeCoordinates,
+            privacyZones: PrivacyZoneResolver.exportZones(
+                from: PrivacyZoneResolver.loadPlaces(from: modelContext)
+            )
+        )
     }
 
     private func openAppleHealth() {

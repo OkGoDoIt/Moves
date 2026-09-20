@@ -1001,6 +1001,84 @@
     },
     "Choose a day, week, month, or year. Menu saves the range as a trip." : {
 
+    },
+    "Cities appear after places are named" : {
+
+    },
+    "Daily Backup" : {
+
+    },
+    "Hide Home and Work" : {
+
+    },
+    "iCloud" : {
+
+    },
+    "Leave out exact GPS points near Home and Work when you export" : {
+
+    },
+    "On this iPhone" : {
+
+    },
+    "Privacy" : {
+
+    },
+    "Private iCloud" : {
+
+    },
+    "Set Home or Work" : {
+
+    },
+    "Today's route" : {
+
+    },
+    "This install keeps your timeline on this iPhone. It isn’t mirroring to iCloud. Daily Backup can still copy yesterday to iCloud Drive." : {
+
+    },
+    "This simulator keeps your timeline on this device. Daily Backup can still copy yesterday to iCloud Drive." : {
+
+    },
+    "Your timeline stays in your private iCloud when you’re signed in. A nightly copy can also go to iCloud Drive." : {
+
+    },
+    "Keeps the streets around Home and Work off share cards and optional exports. Off until you set Home or Work." : {
+
+    },
+    "A 200 m circle around %@ is blurred on share cards." : {
+
+    },
+    "Confirm a place in the Places tab first, then come back." : {
+
+    },
+    "Day activity" : {
+
+    },
+    "Day map" : {
+
+    },
+    "Filters the map to this way of moving" : {
+
+    },
+    "Privacy uses a 200 m circle around Home and Work. Choose a place, or cancel to leave this off." : {
+
+    },
+    "Scrolls to nightly iCloud Drive backup" : {
+
+    },
+    "Shows today’s places and how you moved" : {
+
+    },
+    "Turned on, but no Home or Work yet. Share cards stay as they are until you set one in Places." : {
+
+    },
+    "Untitled place" : {
+
+    },
+    "Your places" : {
+
+    },
+    "Your timeline stays in your private iCloud. Last updated %@." : {
+
     }
   },
   "version" : "1.2"

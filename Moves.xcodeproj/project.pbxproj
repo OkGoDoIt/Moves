@@ -96,9 +96,12 @@
 		A30000012FB0000100000016 /* TimelineWidgetViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A30000012FB0000100000014 /* TimelineWidgetViews.swift */; };
 		A30000012FB0000100000018 /* TimelineWidgetSnapshotShared.swift in Sources */ = {isa = PBXBuildFile; fileRef = A30000012FB0000100000017 /* TimelineWidgetSnapshotShared.swift */; };
 		A30000012FB0000100000019 /* TimelineWidgetSnapshotShared.swift in Sources */ = {isa = PBXBuildFile; fileRef = A30000012FB0000100000017 /* TimelineWidgetSnapshotShared.swift */; };
+		A30000012FB000010000001C /* TimelineWidgetSnapshotShared.swift in Sources */ = {isa = PBXBuildFile; fileRef = A30000012FB0000100000017 /* TimelineWidgetSnapshotShared.swift */; };
 		A30000012FB0000100000021 /* Moves Widgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A30000012FB0000100000020 /* Moves Widgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		A40000012FC0000100000001 /* RouteFileImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A40000012FC0000100000000 /* RouteFileImport.swift */; };
 		A50000012FD0000100000001 /* CloudDataPresencePublisher.swift in Sources */ = {isa = PBXBuildFile; fileRef = A50000012FD0000100000000 /* CloudDataPresencePublisher.swift */; };
+		C120000130C0000100000001 /* PrivacyZones.swift in Sources */ = {isa = PBXBuildFile; fileRef = C120000130C0000100000000 /* PrivacyZones.swift */; };
+		C120000130C0000100000003 /* PrivacyZoneTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C120000130C0000100000002 /* PrivacyZoneTests.swift */; };
 		A50000012FD0000100000002 /* CloudDataPresence in Frameworks */ = {isa = PBXBuildFile; productRef = A50000012FD0000100000004 /* CloudDataPresence */; };
 		A60000012FE0000100000001 /* DailyTimelineBackup.swift in Sources */ = {isa = PBXBuildFile; fileRef = A60000012FE0000100000000 /* DailyTimelineBackup.swift */; };
 		A70000012FF0000100000001 /* MovesShareViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A70000012FF0000100000000 /* MovesShareViews.swift */; };
@@ -342,6 +345,8 @@
 		A30000012FB0000100000022 /* Moves Watch Widgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "Moves Watch Widgets.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
 		A40000012FC0000100000000 /* RouteFileImport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteFileImport.swift; sourceTree = "<group>"; };
 		A50000012FD0000100000000 /* CloudDataPresencePublisher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudDataPresencePublisher.swift; sourceTree = "<group>"; };
+		C120000130C0000100000000 /* PrivacyZones.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivacyZones.swift; sourceTree = "<group>"; };
+		C120000130C0000100000002 /* PrivacyZoneTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivacyZoneTests.swift; sourceTree = "<group>"; };
 		A60000012FE0000100000000 /* DailyTimelineBackup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DailyTimelineBackup.swift; sourceTree = "<group>"; };
 		A70000012FF0000100000000 /* MovesShareViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesShareViews.swift; sourceTree = "<group>"; };
 		A80000012FF0000100000000 /* MovesJumpToDateView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesJumpToDateView.swift; sourceTree = "<group>"; };
@@ -516,6 +521,7 @@
 				B10000013000000100000000 /* MovesAppIntents.swift */,
 				C10000013000000100000000 /* RouteTrackingLiveActivity.swift */,
 				A50000012FD0000100000000 /* CloudDataPresencePublisher.swift */,
+				C120000130C0000100000000 /* PrivacyZones.swift */,
 				A60000012FE0000100000000 /* DailyTimelineBackup.swift */,
 				489A76362C4FC6F300F43B69 /* ContentView.swift */,
 				F20000013040000100000000 /* MovesRootView.swift */,
@@ -732,6 +738,7 @@
 				F90000013090000100000008 /* NamedTripTests.swift */,
 				FA00000130A000010000000A /* PhotoHistoryImporterTests.swift */,
 				FB00000130B000010000000A /* GoogleTimelineImporterTests.swift */,
+				C120000130C0000100000002 /* PrivacyZoneTests.swift */,
 			);
 			path = MovesTests;
 			sourceTree = "<group>";
@@ -1052,6 +1059,8 @@
 				FB00000130B0000100000009 /* OnboardingFlow.swift in Sources */,
 				A20000012FA0000100000003 /* WatchRouteInbox.swift in Sources */,
 				A30000012FB0000100000001 /* TimelineWidgetSnapshot.swift in Sources */,
+				A30000012FB000010000001C /* TimelineWidgetSnapshotShared.swift in Sources */,
+				C120000130C0000100000001 /* PrivacyZones.swift in Sources */,
 				489A76372C4FC6F300F43B69 /* ContentView.swift in Sources */,
 				F20000013040000100000001 /* MovesRootView.swift in Sources */,
 				F61000013060000100000001 /* MapTabView.swift in Sources */,
@@ -1143,6 +1152,7 @@
 				F90000013090000100000009 /* NamedTripTests.swift in Sources */,
 				FA00000130A000010000000B /* PhotoHistoryImporterTests.swift in Sources */,
 				FB00000130B000010000000B /* GoogleTimelineImporterTests.swift in Sources */,
+				C120000130C0000100000003 /* PrivacyZoneTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

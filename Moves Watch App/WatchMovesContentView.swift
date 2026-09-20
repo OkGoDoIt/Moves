@@ -50,9 +50,11 @@ struct WatchMovesContentView: View {
     var body: some View {
         ZStack(alignment: .bottom) {
             Map(position: $camera, interactionModes: [.pan, .zoom]) {
-                if tracker.todayRouteCoordinates.count > 1 {
-                    MapPolyline(coordinates: tracker.todayRouteCoordinates)
-                        .stroke(Color("MovesTransportWalking"), lineWidth: 4)
+                ForEach(tracker.todayRouteSegments) { segment in
+                    if segment.coordinates.count > 1 {
+                        MapPolyline(coordinates: segment.coordinates)
+                            .stroke(Color(segment.colorAssetName), lineWidth: 4)
+                    }
                 }
                 if let liveCoordinate {
                     Annotation("Current location", coordinate: liveCoordinate) {
@@ -61,7 +63,7 @@ struct WatchMovesContentView: View {
                                 .fill(.white.opacity(0.28))
                                 .frame(width: 20, height: 20)
                             Circle()
-                                .fill(Color("MovesTransportWalking"))
+                                .fill(Color(tracker.todayRouteSegments.last?.colorAssetName ?? "MovesTransportWalking"))
                                 .frame(width: 10, height: 10)
                         }
                     }
