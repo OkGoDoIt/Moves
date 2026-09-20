@@ -87,7 +87,8 @@ Optional: `DEVICE_UDID=... ./Scripts/install-iphone.sh`.
 |---|---|
 | Bundle IDs, App Group, iCloud container, team | `Config/Moves.xcconfig`, `Moves/MovesAppIdentity.swift` |
 | App entry, SwiftData / CloudKit container | `Moves/MovesApp.swift` |
-| Timeline UI, maps, day paging | `Moves/ContentView.swift`, `Moves/MovesRootView.swift`, `Moves/TimelineTabView.swift`, `Moves/TimelineItemActions.swift`, `Moves/MovesTimelineViews.swift`, `Moves/MovesJumpToDateView.swift`, `Moves/MovesDetailViews.swift` |
+| Timeline UI, maps, day paging | `Moves/ContentView.swift`, `Moves/MovesRootView.swift`, `Moves/TimelineTabView.swift`, `Moves/MovesTimelineViews.swift`, `Moves/MovesJumpToDateView.swift`, `Moves/MovesDetailViews.swift` |
+| Corrections, Review inbox, undo pill | `Moves/TimelineItemActions.swift`, `Moves/TimelineEditController.swift`, `Moves/PlaceRenameSheet.swift`, `Moves/EditTimesSheet.swift`, `Moves/SplitSheet.swift`, `Moves/ReviewInboxView.swift`, `Moves/UndoToast.swift`, `Moves/NearbyPlaceSuggester.swift` |
 | Models + repository | `Moves/VisitedLocation.swift` (`DayTimeline`, `VisitPlace`, `MoveSegment`, `LocationSample`, `KnownPlace`, `PhotoAttachment`, `PlaceCorrectionEvent`, `VisitedCell`) |
 | Timeline lookup / schema upgrade | `Moves/TimelineLocator.swift`, `Moves/TimelineSchemaUpgrader.swift` |
 | Route rendering / speed shading | `Moves/RouteRendering.swift`, `Moves/SpeedProfileBuilder.swift` |

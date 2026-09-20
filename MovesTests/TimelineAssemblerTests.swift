@@ -616,8 +616,10 @@ final class TimelineAssemblerTests: XCTestCase {
             makeLocation(latitude: 52.5300, longitude: 13.4150, speed: 13.5, timestamp: end),
         ]
 
-        let mode = await classifier.classifyTransport(start: start, end: end, locations: locations)
-        XCTAssertEqual(mode, .automotive)
+        let result = await classifier.classifyTransport(start: start, end: end, locations: locations)
+        XCTAssertEqual(result.mode, .automotive)
+        XCTAssertGreaterThan(result.confidence, 0)
+        XCTAssertLessThanOrEqual(result.confidence, 1)
     }
 
     func testClassifierInfersTrainFromHigherSustainedSpeed() async {
@@ -632,8 +634,8 @@ final class TimelineAssemblerTests: XCTestCase {
             makeLocation(latitude: 52.7200, longitude: 13.6050, speed: 29.0, timestamp: end),
         ]
 
-        let mode = await classifier.classifyTransport(start: start, end: end, locations: locations)
-        XCTAssertEqual(mode, .train)
+        let result = await classifier.classifyTransport(start: start, end: end, locations: locations)
+        XCTAssertEqual(result.mode, .train)
     }
 
     func testClassifierInfersPlaneFromVeryHighSpeed() async {
@@ -648,8 +650,8 @@ final class TimelineAssemblerTests: XCTestCase {
             makeLocation(latitude: 52.3086, longitude: 4.7639, speed: 95.0, timestamp: end),
         ]
 
-        let mode = await classifier.classifyTransport(start: start, end: end, locations: locations)
-        XCTAssertEqual(mode, .plane)
+        let result = await classifier.classifyTransport(start: start, end: end, locations: locations)
+        XCTAssertEqual(result.mode, .plane)
     }
 
     func testClassifierDoesNotMarkLongDistanceAsStationaryWhenSpeedIsZero() async {
@@ -664,8 +666,88 @@ final class TimelineAssemblerTests: XCTestCase {
             makeLocation(latitude: 52.5900, longitude: 13.5150, speed: 0, timestamp: end),
         ]
 
-        let mode = await classifier.classifyTransport(start: start, end: end, locations: locations)
-        XCTAssertNotEqual(mode, .stationary)
+        let result = await classifier.classifyTransport(start: start, end: end, locations: locations)
+        XCTAssertNotEqual(result.mode, .stationary)
+    }
+
+    func testSpeedBasedConfidenceIsHighestAtBucketCenter() {
+        let start = Date(timeIntervalSince1970: 1_710_000_000)
+        let center = [
+            makeLocation(latitude: 52.52, longitude: 13.405, speed: 1.35, timestamp: start),
+            makeLocation(latitude: 52.521, longitude: 13.406, speed: 1.35, timestamp: start.addingTimeInterval(60)),
+        ]
+        let edge = [
+            makeLocation(latitude: 52.52, longitude: 13.405, speed: 1.95, timestamp: start),
+            makeLocation(latitude: 52.521, longitude: 13.406, speed: 1.95, timestamp: start.addingTimeInterval(60)),
+        ]
+
+        let centerConfidence = CoreMotionTransportClassifier.speedBasedConfidence(mode: .walking, locations: center)
+        let edgeConfidence = CoreMotionTransportClassifier.speedBasedConfidence(mode: .walking, locations: edge)
+
+        XCTAssertGreaterThan(centerConfidence, edgeConfidence)
+        XCTAssertLessThan(edgeConfidence, TimelineReviewHeuristics.uncertainModeConfidence)
+        XCTAssertGreaterThanOrEqual(centerConfidence, TimelineReviewHeuristics.uncertainModeConfidence)
+    }
+
+    func testClassifierReportsLowConfidenceNearModeBoundary() async {
+        let classifier = CoreMotionTransportClassifier()
+        let start = Date(timeIntervalSince1970: 1_710_000_000)
+        let end = start.addingTimeInterval(120)
+        let locations = [
+            makeLocation(latitude: 52.52, longitude: 13.405, speed: 1.95, timestamp: start),
+            makeLocation(latitude: 52.521, longitude: 13.406, speed: 1.95, timestamp: start.addingTimeInterval(60)),
+            makeLocation(latitude: 52.522, longitude: 13.407, speed: 1.95, timestamp: end),
+        ]
+
+        let result = await classifier.classifyTransport(start: start, end: end, locations: locations)
+        XCTAssertEqual(result.mode, .walking)
+        XCTAssertLessThan(result.confidence, TimelineReviewHeuristics.uncertainModeConfidence)
+    }
+
+    func testIngestMarksLowConfidenceMovesAndShortStopsForReview() async throws {
+        let container = try makeInMemoryContainer()
+        let repository = SwiftDataTimelineRepository(modelContainer: container)
+        let assembler = DefaultTimelineAssembler(
+            repository: repository,
+            motionClassifier: StubMotionClassifier(mode: .cycling, confidence: 0.4),
+            placeNameResolver: StubPlaceNameResolver()
+        )
+
+        let t0 = Date(timeIntervalSince1970: 1_710_000_000)
+        await assembler.ingestVisit(
+            MockVisit(
+                coordinate: CLLocationCoordinate2D(latitude: 52.50, longitude: 13.40),
+                horizontalAccuracy: 15,
+                arrivalDate: t0,
+                departureDate: t0.addingTimeInterval(30 * 60)
+            )
+        )
+        await assembler.ingestVisit(
+            MockVisit(
+                coordinate: CLLocationCoordinate2D(latitude: 52.505, longitude: 13.408),
+                horizontalAccuracy: 15,
+                arrivalDate: t0.addingTimeInterval(32 * 60),
+                departureDate: t0.addingTimeInterval(34 * 60)
+            )
+        )
+        await assembler.ingestVisit(
+            MockVisit(
+                coordinate: CLLocationCoordinate2D(latitude: 52.52, longitude: 13.42),
+                horizontalAccuracy: 15,
+                arrivalDate: t0.addingTimeInterval(50 * 60),
+                departureDate: t0.addingTimeInterval(80 * 60)
+            )
+        )
+
+        let context = ModelContext(container)
+        let moves = try context.fetch(FetchDescriptor<MoveSegment>())
+        let places = try context.fetch(FetchDescriptor<VisitPlace>())
+
+        XCTAssertGreaterThanOrEqual(moves.count, 1)
+        XCTAssertTrue(moves.contains { $0.reviewState == .pending })
+        XCTAssertTrue(places.contains { place in
+            TimelineReviewHeuristics.isShortTransitStop(place) && place.reviewState == .pending
+        })
     }
 
     func testMoveUpsertUpdatesExistingSegmentForSamePlacePairWhenWindowChanges() throws {
@@ -1585,6 +1667,21 @@ final class TimelineAssemblerTests: XCTestCase {
             timestamp: timestamp
         )
     }
+}
+
+private struct StubMotionClassifier: MotionClassifier {
+    let mode: TransportMode
+    let confidence: Double
+
+    func classifyTransport(start: Date, end: Date, locations: [CLLocation]) async -> (mode: TransportMode, confidence: Double) {
+        (mode, confidence)
+    }
+
+    func stepCount(start: Date, end: Date) async -> Int? { nil }
+}
+
+private struct StubPlaceNameResolver: PlaceNameResolver {
+    func resolveName(for coordinate: CLLocationCoordinate2D) async -> String? { nil }
 }
 
 private extension Array {

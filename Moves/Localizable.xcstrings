@@ -803,6 +803,69 @@
     },
     "You will see when you traveled between them, plus minimum, average, and maximum journey times." : {
 
+    },
+    "Rename" : {
+
+    },
+    "Rename…" : {
+
+    },
+    "Nearby" : {
+
+    },
+    "Nearby places" : {
+
+    },
+    "Not a stop" : {
+
+    },
+    "Pick nearby place…" : {
+
+    },
+    "Edit times" : {
+
+    },
+    "Review" : {
+
+    },
+    "Undo" : {
+
+    },
+    "Ambiguous places" : {
+
+    },
+    "Possible false stops" : {
+
+    },
+    "Uncertain modes" : {
+
+    },
+    "Approximate imports" : {
+
+    },
+    "All clear" : {
+
+    },
+    "Nothing needs a review right now." : {
+
+    },
+    "Couldn’t update the timeline" : {
+
+    },
+    "This stay was longer than an hour. You can undo afterwards." : {
+
+    },
+    "Change mode" : {
+
+    },
+    "Split here…" : {
+
+    },
+    "Merge with previous" : {
+
+    },
+    "Merge with next" : {
+
     }
   },
   "version" : "1.2"

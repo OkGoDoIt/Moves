@@ -124,6 +124,14 @@
 		F30000013050000100000001 /* RouteRendering.swift in Sources */ = {isa = PBXBuildFile; fileRef = F30000013050000100000000 /* RouteRendering.swift */; };
 		F30000013050000100000003 /* SpeedProfileBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = F30000013050000100000002 /* SpeedProfileBuilder.swift */; };
 		F30000013050000100000005 /* SpeedProfileBuilderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F30000013050000100000004 /* SpeedProfileBuilderTests.swift */; };
+		F21000013050000100000003 /* TimelineEditController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F21000013050000100000002 /* TimelineEditController.swift */; };
+		F21000013050000100000005 /* PlaceRenameSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = F21000013050000100000004 /* PlaceRenameSheet.swift */; };
+		F21000013050000100000007 /* EditTimesSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = F21000013050000100000006 /* EditTimesSheet.swift */; };
+		F21000013050000100000009 /* SplitSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = F21000013050000100000008 /* SplitSheet.swift */; };
+		F2100001305000010000000B /* ReviewInboxView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2100001305000010000000A /* ReviewInboxView.swift */; };
+		F2100001305000010000000D /* UndoToast.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2100001305000010000000C /* UndoToast.swift */; };
+		F2100001305000010000000F /* NearbyPlaceSuggester.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2100001305000010000000E /* NearbyPlaceSuggester.swift */; };
+		F21000013050000100000011 /* NearbyPlaceSuggesterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F21000013050000100000010 /* NearbyPlaceSuggesterTests.swift */; };
 		F10000013030000100000003 /* TimelineArchiveImportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000013030000100000002 /* TimelineArchiveImportTests.swift */; };
 		F10000013030000100000005 /* LocationLogImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000013030000100000004 /* LocationLogImport.swift */; };
 		F10000013030000100000007 /* LocationLogImportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000013030000100000006 /* LocationLogImportTests.swift */; };
@@ -313,6 +321,14 @@
 		F30000013050000100000000 /* RouteRendering.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteRendering.swift; sourceTree = "<group>"; };
 		F30000013050000100000002 /* SpeedProfileBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeedProfileBuilder.swift; sourceTree = "<group>"; };
 		F30000013050000100000004 /* SpeedProfileBuilderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeedProfileBuilderTests.swift; sourceTree = "<group>"; };
+		F21000013050000100000002 /* TimelineEditController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineEditController.swift; sourceTree = "<group>"; };
+		F21000013050000100000004 /* PlaceRenameSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaceRenameSheet.swift; sourceTree = "<group>"; };
+		F21000013050000100000006 /* EditTimesSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditTimesSheet.swift; sourceTree = "<group>"; };
+		F21000013050000100000008 /* SplitSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplitSheet.swift; sourceTree = "<group>"; };
+		F2100001305000010000000A /* ReviewInboxView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewInboxView.swift; sourceTree = "<group>"; };
+		F2100001305000010000000C /* UndoToast.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UndoToast.swift; sourceTree = "<group>"; };
+		F2100001305000010000000E /* NearbyPlaceSuggester.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NearbyPlaceSuggester.swift; sourceTree = "<group>"; };
+		F21000013050000100000010 /* NearbyPlaceSuggesterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NearbyPlaceSuggesterTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -413,6 +429,13 @@
 				F30000013050000100000002 /* SpeedProfileBuilder.swift */,
 				F20000013040000100000002 /* TimelineSchemaUpgrader.swift */,
 				F20000013040000100000004 /* TimelineLocator.swift */,
+				F21000013050000100000002 /* TimelineEditController.swift */,
+				F21000013050000100000004 /* PlaceRenameSheet.swift */,
+				F21000013050000100000006 /* EditTimesSheet.swift */,
+				F21000013050000100000008 /* SplitSheet.swift */,
+				F2100001305000010000000A /* ReviewInboxView.swift */,
+				F2100001305000010000000C /* UndoToast.swift */,
+				F2100001305000010000000E /* NearbyPlaceSuggester.swift */,
 				A70000012FF0000100000000 /* MovesShareViews.swift */,
 				A80000012FF0000100000000 /* MovesJumpToDateView.swift */,
 				A90000012FF0000100000000 /* ShareMapAggregate.swift */,
@@ -519,6 +542,7 @@
 				F20000013040000100000008 /* TimelineLocatorTests.swift */,
 				F21100013051000100000002 /* TimelineTabTests.swift */,
 				F30000013050000100000004 /* SpeedProfileBuilderTests.swift */,
+				F21000013050000100000010 /* NearbyPlaceSuggesterTests.swift */,
 			);
 			path = MovesTests;
 			sourceTree = "<group>";
@@ -840,6 +864,13 @@
 				F30000013050000100000003 /* SpeedProfileBuilder.swift in Sources */,
 				F20000013040000100000003 /* TimelineSchemaUpgrader.swift in Sources */,
 				F20000013040000100000005 /* TimelineLocator.swift in Sources */,
+				F21000013050000100000003 /* TimelineEditController.swift in Sources */,
+				F21000013050000100000005 /* PlaceRenameSheet.swift in Sources */,
+				F21000013050000100000007 /* EditTimesSheet.swift in Sources */,
+				F21000013050000100000009 /* SplitSheet.swift in Sources */,
+				F2100001305000010000000B /* ReviewInboxView.swift in Sources */,
+				F2100001305000010000000D /* UndoToast.swift in Sources */,
+				F2100001305000010000000F /* NearbyPlaceSuggester.swift in Sources */,
 				A70000012FF0000100000001 /* MovesShareViews.swift in Sources */,
 				A80000012FF0000100000001 /* MovesJumpToDateView.swift in Sources */,
 				A90000012FF0000100000001 /* ShareMapAggregate.swift in Sources */,
@@ -875,6 +906,7 @@
 				F20000013040000100000009 /* TimelineLocatorTests.swift in Sources */,
 				F21100013051000100000003 /* TimelineTabTests.swift in Sources */,
 				F30000013050000100000005 /* SpeedProfileBuilderTests.swift in Sources */,
+				F21000013050000100000011 /* NearbyPlaceSuggesterTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

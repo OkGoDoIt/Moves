@@ -3,16 +3,11 @@ import SwiftUI
 
 /// Correction actions for a storyline row.
 ///
-/// WS2 injects `TimelineEditController` from `MovesRootView`:
+/// WS1 should wrap `StorylineRow` with swipe and a context menu using this
+/// environment value:
 ///
 /// ```
 /// .environment(\.timelineItemActions, editController)
-/// .environment(\.timelineEditController, editController)
-/// ```
-///
-/// Wrap `StorylineRow` in a `List` (swipe actions only fire on List):
-///
-/// ```
 /// StorylineRow(...)
 ///     .timelinePlaceActions(visit)   // or .timelineMoveActions(move)
 /// ```
@@ -21,9 +16,6 @@ import SwiftUI
 /// Context menu: place = Rename, Pick nearby, Not a stop, Merge prev/next,
 /// Split, Edit times, Delete. Move = Change mode, Split, Merge prev/next,
 /// Delete. Path is WS4 — omitted here so WS1 does not need a no-op menu.
-///
-/// When the environment is nil, swipe and menu content stay empty so there
-/// is no blank chrome until WS2 lands.
 @MainActor
 protocol TimelineItemActions: AnyObject {
     func requestRename(_ visit: VisitPlace)
@@ -45,7 +37,7 @@ protocol TimelineItemActions: AnyObject {
 
 extension EnvironmentValues {
     @Entry var timelineItemActions: (any TimelineItemActions)? = nil
-    // WS2 adds: @Entry var timelineEditController: TimelineEditController? = nil
+    @Entry var timelineEditController: TimelineEditController? = nil
 }
 
 extension View {
@@ -65,25 +57,27 @@ private struct TimelinePlaceActionsModifier: ViewModifier {
     @Environment(\.timelineItemActions) private var actions
 
     func body(content: Content) -> some View {
-        if let actions {
-            content
-                .swipeActions(edge: .leading, allowsFullSwipe: true) {
+        content
+            .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                if let actions {
                     Button(String(localized: "Rename")) {
                         actions.requestRename(visit)
                     }
                     .tint(.blue)
                 }
-                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            }
+            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                if let actions {
                     Button(String(localized: "Delete"), role: .destructive) {
                         actions.requestDeletePlace(visit)
                     }
                 }
-                .contextMenu {
+            }
+            .contextMenu {
+                if let actions {
                     TimelinePlaceContextMenu(visit: visit, actions: actions)
                 }
-        } else {
-            content
-        }
+            }
     }
 }
 
@@ -92,25 +86,27 @@ private struct TimelineMoveActionsModifier: ViewModifier {
     @Environment(\.timelineItemActions) private var actions
 
     func body(content: Content) -> some View {
-        if let actions {
-            content
-                .swipeActions(edge: .leading, allowsFullSwipe: true) {
+        content
+            .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                if let actions {
                     Button(String(localized: "Mode")) {
                         actions.requestChangeMode(move)
                     }
                     .tint(.indigo)
                 }
-                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            }
+            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                if let actions {
                     Button(String(localized: "Delete"), role: .destructive) {
                         actions.requestDeleteMove(move)
                     }
                 }
-                .contextMenu {
+            }
+            .contextMenu {
+                if let actions {
                     TimelineMoveContextMenu(move: move, actions: actions)
                 }
-        } else {
-            content
-        }
+            }
     }
 }
 
@@ -189,24 +185,4 @@ struct TimelineMoveContextMenu: View {
     private static let selectableModes: [TransportMode] = [
         .walking, .running, .cycling, .automotive, .train, .plane, .boat, .swimming, .unknown,
     ]
-}
-
-/// Neighbors used by swipe/context menus. `fileprivate` so it does not clash
-/// with WS2's copy in `NearbyPlaceSuggester.swift` after merge.
-fileprivate enum TimelineNeighbors {
-    static func previousVisit(for visit: VisitPlace) -> VisitPlace? {
-        visit.incomingMoves.sorted { $0.endDate < $1.endDate }.last?.startPlace
-    }
-
-    static func nextVisit(for visit: VisitPlace) -> VisitPlace? {
-        visit.outgoingMoves.sorted { $0.startDate < $1.startDate }.first?.endPlace
-    }
-
-    static func previousMove(for move: MoveSegment) -> MoveSegment? {
-        move.startPlace?.incomingMoves.sorted { $0.endDate < $1.endDate }.last
-    }
-
-    static func nextMove(for move: MoveSegment) -> MoveSegment? {
-        move.endPlace?.outgoingMoves.sorted { $0.startDate < $1.startDate }.first
-    }
 }
