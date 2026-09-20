@@ -17,6 +17,22 @@ enum MovesChromeMetrics {
     static let detailOverlayTabBarClearance: CGFloat = 64
 }
 
+extension View {
+    /// Keeps List and ScrollView content out from under the iOS 26 floating tab pill.
+    ///
+    /// TabView’s liquid-glass bar overlays the tab. `safeAreaInset` / `contentMargins`
+    /// only add extra scroll range, so mid-list rows still draw through the pill.
+    /// A layout sibling shrinks the viewport instead.
+    func movesFloatingTabBarClearance() -> some View {
+        VStack(spacing: 0) {
+            self
+            Color.clear
+                .frame(height: MovesChromeMetrics.floatingTabBarClearance)
+                .accessibilityHidden(true)
+        }
+    }
+}
+
 /// Compact storyline clock that never wraps “AM” / “PM” onto a second glyph.
 enum StorylineClock {
     /// Whether `locale` displays a 12-hour period (AM/PM) next to the time.

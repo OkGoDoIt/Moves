@@ -47,6 +47,9 @@ struct MovesSettingsView: View {
     @State private var isShowingDailyBackupMessage = false
     @State private var isRunningDailyBackup = false
     @State private var dailyBackupDidFail = false
+    /// Screenshot flag `MOVES_OPEN_WEBHOOK=1` pushes the webhook destination.
+    @State private var isShowingWebhookScreenshot =
+        ProcessInfo.processInfo.environment["MOVES_OPEN_WEBHOOK"] == "1"
 
     init(
         dayTimelines: [DayTimeline],
@@ -220,12 +223,12 @@ struct MovesSettingsView: View {
                             )
                         }
                         .buttonStyle(.plain)
-                        .id(SettingsScreenshotAnchor.webhookRow)
 
                         Text("Optionally upload recorded points to one or more supported cloud or self-hosted location servers, or to any HTTPS webhook.")
                             .font(.system(size: 12, weight: .medium, design: .rounded))
                             .foregroundStyle(.secondary)
                     }
+                    .id(SettingsScreenshotAnchor.webhookRow)
 
                     SettingsCard(title: "GPX Export") {
                         SettingsActionRow(
@@ -395,6 +398,9 @@ struct MovesSettingsView: View {
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
+            .navigationDestination(isPresented: $isShowingWebhookScreenshot) {
+                WebhookSettingsView()
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") {

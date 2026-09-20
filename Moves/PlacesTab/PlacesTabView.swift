@@ -147,7 +147,7 @@ struct PlacesTabView: View {
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
-        .contentMargins(.bottom, MovesChromeMetrics.floatingTabBarClearance, for: .scrollContent)
+        .movesFloatingTabBarClearance()
     }
 
     private var emptyState: some View {

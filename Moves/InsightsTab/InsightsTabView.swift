@@ -114,8 +114,8 @@ struct InsightsTabView: View {
                 yearInReviewButton
             }
             .padding(.horizontal, 16)
-            .padding(.bottom, MovesChromeMetrics.floatingTabBarClearance)
         }
+        .movesFloatingTabBarClearance()
     }
 
     private var emptyState: some View {
@@ -626,6 +626,7 @@ private struct InsightsPlaceListView: View {
                     .foregroundStyle(.secondary)
             }
         }
+        .movesFloatingTabBarClearance()
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
     }

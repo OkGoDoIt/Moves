@@ -24,6 +24,7 @@ struct TripListView: View {
                 }
                 .listStyle(.insetGrouped)
                 .scrollContentBackground(.hidden)
+                .movesFloatingTabBarClearance()
             }
         }
         .background {
