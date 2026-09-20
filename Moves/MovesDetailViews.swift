@@ -60,11 +60,9 @@ struct PlaceMapDetailView: View {
                 .safeAreaPadding(.bottom, 8)
             } else {
                 placeMap
-                    .overlay(alignment: .bottom) {
+                    .safeAreaBar(edge: .bottom, spacing: 0) {
                         placeControls
-                            .padding(.horizontal, 12)
-                            .padding(.top, 12)
-                            .safeAreaPadding(.bottom, 12)
+                            .detailMapOverlayChrome(bottomInset: proxy.safeAreaInsets.bottom)
                     }
             }
         }
@@ -165,7 +163,7 @@ struct PlaceMapDetailView: View {
                 HStack(alignment: .bottom, spacing: 8) {
                     TextField("Remarks", text: $draftComment, axis: .vertical)
                         .textInputAutocapitalization(.sentences)
-                        .lineLimit(2...5)
+                        .lineLimit(1...4)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 8)
                         .background(
@@ -181,7 +179,6 @@ struct PlaceMapDetailView: View {
                 }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
         .panelSurface()
     }
 
@@ -346,11 +343,9 @@ struct MoveMapDetailView: View {
                 .safeAreaPadding(.bottom, 8)
             } else {
                 moveMap
-                    .overlay(alignment: .bottom) {
+                    .safeAreaBar(edge: .bottom, spacing: 0) {
                         moveControls
-                            .padding(.horizontal, 12)
-                            .padding(.top, 12)
-                            .safeAreaPadding(.bottom, 12)
+                            .detailMapOverlayChrome(bottomInset: proxy.safeAreaInsets.bottom)
                     }
             }
         }
@@ -542,7 +537,7 @@ struct MoveMapDetailView: View {
                 HStack(alignment: .bottom, spacing: 8) {
                     TextField("Remarks", text: $draftComment, axis: .vertical)
                         .textInputAutocapitalization(.sentences)
-                        .lineLimit(2...5)
+                        .lineLimit(1...4)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 8)
                         .background(
@@ -558,7 +553,6 @@ struct MoveMapDetailView: View {
                 }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
         .panelSurface()
     }
 
@@ -618,6 +612,7 @@ struct MoveMapDetailView: View {
                 }
             }
             .pickerStyle(.segmented)
+            .controlSize(.small)
             .disabled(isSavingManualRoute)
 
             if let summary = segment.routeMatchSummary, !summary.isEmpty {
@@ -1222,5 +1217,16 @@ private struct DeletedMoveUndoPayload {
             print("Failed to inspect move undo state: \(error.localizedDescription)")
             return false
         }
+    }
+}
+
+private extension View {
+    /// Insets a map overlay card and lifts it when TabView's bottom safe area
+    /// is missing (full-bleed Map) so Path / remarks stay above the tab pill.
+    func detailMapOverlayChrome(bottomInset: CGFloat) -> some View {
+        let tabBarLift = max(0, MovesChromeMetrics.detailOverlayTabBarClearance - bottomInset)
+        return padding(.horizontal, 12)
+            .padding(.top, 8)
+            .padding(.bottom, 8 + tabBarLift)
     }
 }

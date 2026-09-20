@@ -136,6 +136,42 @@ final class TimelineTabTests: XCTestCase {
         XCTAssertNil(TimelineDeepLink.moment(from: url))
     }
 
+    func testStorylineClockKeepsPeriodOffTheHourMinuteLine() {
+        var components = Locale.Components(identifier: "en_US")
+        components.hourCycle = .oneToTwelve
+        let locale = Locale(components: components)
+        let timeZone = TimeZone(secondsFromGMT: 0)!
+        let morning = date(6, 54)
+
+        XCTAssertTrue(StorylineClock.usesTwelveHourClock(locale: locale))
+        let hourMinute = StorylineClock.hourMinuteText(from: morning, locale: locale, timeZone: timeZone)
+        XCTAssertFalse(hourMinute.localizedCaseInsensitiveContains("am"))
+        XCTAssertFalse(hourMinute.localizedCaseInsensitiveContains("pm"))
+        XCTAssertTrue(hourMinute.contains("6"))
+        XCTAssertTrue(hourMinute.contains("54"))
+        XCTAssertEqual(
+            StorylineClock.periodText(from: morning, locale: locale, timeZone: timeZone)?.uppercased(),
+            "AM"
+        )
+        XCTAssertEqual(
+            StorylineClock.periodText(from: date(15, 20), locale: locale, timeZone: timeZone)?.uppercased(),
+            "PM"
+        )
+    }
+
+    func testStorylineClockOmitsPeriodOnATwentyFourHourLocale() {
+        var components = Locale.Components(identifier: "en_GB")
+        components.hourCycle = .zeroToTwentyThree
+        let locale = Locale(components: components)
+        let timeZone = TimeZone(secondsFromGMT: 0)!
+
+        XCTAssertFalse(StorylineClock.usesTwelveHourClock(locale: locale))
+        XCTAssertNil(StorylineClock.periodText(from: date(6, 54), locale: locale, timeZone: timeZone))
+        let hourMinute = StorylineClock.hourMinuteText(from: date(6, 54), locale: locale, timeZone: timeZone)
+        XCTAssertTrue(hourMinute.contains("6") || hourMinute.contains("06"))
+        XCTAssertTrue(hourMinute.contains("54"))
+    }
+
     func testCollapsedHeroGradientStaysSolidModeColor() {
         let coordinates = [
             CLLocationCoordinate2D(latitude: 52.50, longitude: 13.40),

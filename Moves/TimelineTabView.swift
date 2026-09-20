@@ -1,6 +1,64 @@
 import CoreLocation
 import SwiftUI
 
+/// Shared measurements for the iOS 26 floating tab bar.
+///
+/// TabView already contributes a bottom safe-area inset. Timeline content only
+/// needs a few points of breathing room; map overlays ignore that inset and
+/// need an explicit lift so Path / remarks stay above the tab pill.
+enum MovesChromeMetrics {
+    /// Extra space under activity bubbles so they are not flush with the tab bar.
+    static let timelineTabBarBreathingRoom: CGFloat = 8
+
+    /// Minimum overlay lift when a full-screen map does not inherit TabView's inset.
+    static let detailOverlayTabBarClearance: CGFloat = 64
+}
+
+/// Compact storyline clock that never wraps “AM” / “PM” onto a second glyph.
+enum StorylineClock {
+    /// Whether `locale` displays a 12-hour period (AM/PM) next to the time.
+    static func usesTwelveHourClock(locale: Locale = .autoupdatingCurrent) -> Bool {
+        switch locale.hourCycle {
+        case .oneToTwelve, .zeroToEleven:
+            return true
+        case .oneToTwentyFour, .zeroToTwentyThree:
+            return false
+        @unknown default:
+            return DateFormatter.dateFormat(fromTemplate: "j", options: 0, locale: locale)?
+                .contains("a") ?? false
+        }
+    }
+
+    /// Hour and minute only, so the period can sit on its own line.
+    static func hourMinuteText(
+        from date: Date,
+        locale: Locale = .autoupdatingCurrent,
+        timeZone: TimeZone = .autoupdatingCurrent
+    ) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = locale
+        formatter.timeZone = timeZone
+        formatter.setLocalizedDateFormatFromTemplate("Jmm")
+        return formatter.string(from: date)
+    }
+
+    /// Locale AM/PM symbol when the locale uses a 12-hour clock; otherwise `nil`.
+    static func periodText(
+        from date: Date,
+        locale: Locale = .autoupdatingCurrent,
+        timeZone: TimeZone = .autoupdatingCurrent
+    ) -> String? {
+        guard usesTwelveHourClock(locale: locale) else { return nil }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.locale = locale
+        calendar.timeZone = timeZone
+        let hour = calendar.component(.hour, from: date)
+        let symbol = hour < 12 ? locale.calendar.amSymbol : locale.calendar.pmSymbol
+        let text = symbol.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
+    }
+}
+
 /// Timeline tab: wraps day paging so capture stays above the tab bar, and
 /// hosts the header, activity bubbles, and moment-jump helpers that WS0
 /// left as a placeholder.
