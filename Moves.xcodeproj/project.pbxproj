@@ -152,6 +152,18 @@
 		F70000013070000100000007 /* PlacesIndex.swift in Sources */ = {isa = PBXBuildFile; fileRef = F70000013070000100000006 /* PlacesIndex.swift */; };
 		F70000013070000100000009 /* PlaceGeocodeBackfill.swift in Sources */ = {isa = PBXBuildFile; fileRef = F70000013070000100000008 /* PlaceGeocodeBackfill.swift */; };
 		F7000001307000010000000B /* PlacesIndexTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F7000001307000010000000A /* PlacesIndexTests.swift */; };
+		F80000013080000100000001 /* InsightsTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F80000013080000100000000 /* InsightsTabView.swift */; };
+		F80000013080000100000003 /* InsightsSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = F80000013080000100000002 /* InsightsSnapshot.swift */; };
+		F80000013080000100000005 /* InsightsConnectionsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F80000013080000100000004 /* InsightsConnectionsView.swift */; };
+		F80000013080000100000007 /* MovesSearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F80000013080000100000006 /* MovesSearchView.swift */; };
+		F80000013080000100000009 /* SearchQueryParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = F80000013080000100000008 /* SearchQueryParser.swift */; };
+		F8000001308000010000000B /* InsightsSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8000001308000010000000A /* InsightsSnapshotTests.swift */; };
+		F8000001308000010000000D /* SearchQueryParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8000001308000010000000C /* SearchQueryParserTests.swift */; };
+		F90000013090000100000001 /* TripListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F90000013090000100000000 /* TripListView.swift */; };
+		F90000013090000100000003 /* TripDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F90000013090000100000002 /* TripDetailView.swift */; };
+		F90000013090000100000005 /* SaveTripSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = F90000013090000100000004 /* SaveTripSheet.swift */; };
+		F90000013090000100000007 /* TripRangeStats.swift in Sources */ = {isa = PBXBuildFile; fileRef = F90000013090000100000006 /* TripRangeStats.swift */; };
+		F90000013090000100000009 /* NamedTripTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F90000013090000100000008 /* NamedTripTests.swift */; };
 		F10000013030000100000003 /* TimelineArchiveImportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000013030000100000002 /* TimelineArchiveImportTests.swift */; };
 		F10000013030000100000005 /* LocationLogImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000013030000100000004 /* LocationLogImport.swift */; };
 		F10000013030000100000007 /* LocationLogImportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000013030000100000006 /* LocationLogImportTests.swift */; };
@@ -369,6 +381,18 @@
 		F70000013070000100000006 /* PlacesIndex.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlacesIndex.swift; sourceTree = "<group>"; };
 		F70000013070000100000008 /* PlaceGeocodeBackfill.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaceGeocodeBackfill.swift; sourceTree = "<group>"; };
 		F7000001307000010000000A /* PlacesIndexTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlacesIndexTests.swift; sourceTree = "<group>"; };
+		F80000013080000100000000 /* InsightsTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InsightsTabView.swift; sourceTree = "<group>"; };
+		F80000013080000100000002 /* InsightsSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InsightsSnapshot.swift; sourceTree = "<group>"; };
+		F80000013080000100000004 /* InsightsConnectionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InsightsConnectionsView.swift; sourceTree = "<group>"; };
+		F80000013080000100000006 /* MovesSearchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesSearchView.swift; sourceTree = "<group>"; };
+		F80000013080000100000008 /* SearchQueryParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchQueryParser.swift; sourceTree = "<group>"; };
+		F8000001308000010000000A /* InsightsSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InsightsSnapshotTests.swift; sourceTree = "<group>"; };
+		F8000001308000010000000C /* SearchQueryParserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchQueryParserTests.swift; sourceTree = "<group>"; };
+		F90000013090000100000000 /* TripListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TripListView.swift; sourceTree = "<group>"; };
+		F90000013090000100000002 /* TripDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TripDetailView.swift; sourceTree = "<group>"; };
+		F90000013090000100000004 /* SaveTripSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SaveTripSheet.swift; sourceTree = "<group>"; };
+		F90000013090000100000006 /* TripRangeStats.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TripRangeStats.swift; sourceTree = "<group>"; };
+		F90000013090000100000008 /* NamedTripTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NamedTripTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -466,6 +490,10 @@
 				F6100001306000010000001F /* MapTab */,
 				F21100013051000100000000 /* TimelineTabView.swift */,
 				F70000013070000100000020 /* PlacesTab */,
+				F8000001308000010000001F /* InsightsTab */,
+				F90000013090000100000020 /* Trips */,
+				F80000013080000100000006 /* MovesSearchView.swift */,
+				F80000013080000100000008 /* SearchQueryParser.swift */,
 				F70000013070000100000008 /* PlaceGeocodeBackfill.swift */,
 				F21000013050000100000000 /* TimelineItemActions.swift */,
 				F30000013050000100000000 /* RouteRendering.swift */,
@@ -601,6 +629,27 @@
 			path = PlacesTab;
 			sourceTree = "<group>";
 		};
+		F8000001308000010000001F /* InsightsTab */ = {
+			isa = PBXGroup;
+			children = (
+				F80000013080000100000000 /* InsightsTabView.swift */,
+				F80000013080000100000002 /* InsightsSnapshot.swift */,
+				F80000013080000100000004 /* InsightsConnectionsView.swift */,
+			);
+			path = InsightsTab;
+			sourceTree = "<group>";
+		};
+		F90000013090000100000020 /* Trips */ = {
+			isa = PBXGroup;
+			children = (
+				F90000013090000100000000 /* TripListView.swift */,
+				F90000013090000100000002 /* TripDetailView.swift */,
+				F90000013090000100000004 /* SaveTripSheet.swift */,
+				F90000013090000100000006 /* TripRangeStats.swift */,
+			);
+			path = Trips;
+			sourceTree = "<group>";
+		};
 		9A1B00012F00000100000003 /* MovesTests */ = {
 			isa = PBXGroup;
 			children = (
@@ -619,6 +668,9 @@
 				F61000013060000100000010 /* MapRangeSelectionTests.swift */,
 				F61000013060000100000012 /* VisitedCellStoreTests.swift */,
 				F7000001307000010000000A /* PlacesIndexTests.swift */,
+				F8000001308000010000000A /* InsightsSnapshotTests.swift */,
+				F8000001308000010000000C /* SearchQueryParserTests.swift */,
+				F90000013090000100000008 /* NamedTripTests.swift */,
 			);
 			path = MovesTests;
 			sourceTree = "<group>";
@@ -948,6 +1000,15 @@
 				F70000013070000100000005 /* OccupancyChartView.swift in Sources */,
 				F70000013070000100000007 /* PlacesIndex.swift in Sources */,
 				F70000013070000100000009 /* PlaceGeocodeBackfill.swift in Sources */,
+				F80000013080000100000001 /* InsightsTabView.swift in Sources */,
+				F80000013080000100000003 /* InsightsSnapshot.swift in Sources */,
+				F80000013080000100000005 /* InsightsConnectionsView.swift in Sources */,
+				F80000013080000100000007 /* MovesSearchView.swift in Sources */,
+				F80000013080000100000009 /* SearchQueryParser.swift in Sources */,
+				F90000013090000100000001 /* TripListView.swift in Sources */,
+				F90000013090000100000003 /* TripDetailView.swift in Sources */,
+				F90000013090000100000005 /* SaveTripSheet.swift in Sources */,
+				F90000013090000100000007 /* TripRangeStats.swift in Sources */,
 				F21000013050000100000001 /* TimelineItemActions.swift in Sources */,
 				F30000013050000100000001 /* RouteRendering.swift in Sources */,
 				F30000013050000100000003 /* SpeedProfileBuilder.swift in Sources */,
@@ -1003,6 +1064,9 @@
 				F61000013060000100000011 /* MapRangeSelectionTests.swift in Sources */,
 				F61000013060000100000013 /* VisitedCellStoreTests.swift in Sources */,
 				F7000001307000010000000B /* PlacesIndexTests.swift in Sources */,
+				F8000001308000010000000B /* InsightsSnapshotTests.swift in Sources */,
+				F8000001308000010000000D /* SearchQueryParserTests.swift in Sources */,
+				F90000013090000100000009 /* NamedTripTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

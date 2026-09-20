@@ -443,8 +443,8 @@ struct ContentView: View {
                     } label: {
                         Image(systemName: "magnifyingglass")
                     }
-                    .help("Statistics & Search")
-                    .accessibilityLabel("Statistics & Search")
+                    .help("Search")
+                    .accessibilityLabel("Search")
                 }
 
                 ToolbarItem(placement: .topBarTrailing) {
