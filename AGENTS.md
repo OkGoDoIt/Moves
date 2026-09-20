@@ -87,9 +87,10 @@ Optional: `DEVICE_UDID=... ./Scripts/install-iphone.sh`.
 |---|---|
 | Bundle IDs, App Group, iCloud container, team | `Config/Moves.xcconfig`, `Moves/MovesAppIdentity.swift` |
 | App entry, SwiftData / CloudKit container | `Moves/MovesApp.swift` |
-| Timeline UI, maps, day paging | `Moves/ContentView.swift`, `Moves/MovesRootView.swift`, `Moves/MovesTimelineViews.swift`, `Moves/MovesDetailViews.swift` |
+| Timeline UI, maps, day paging | `Moves/ContentView.swift`, `Moves/MovesRootView.swift`, `Moves/TimelineTabView.swift`, `Moves/TimelineItemActions.swift`, `Moves/MovesTimelineViews.swift`, `Moves/MovesJumpToDateView.swift`, `Moves/MovesDetailViews.swift` |
 | Models + repository | `Moves/VisitedLocation.swift` (`DayTimeline`, `VisitPlace`, `MoveSegment`, `LocationSample`, `KnownPlace`, `PhotoAttachment`, `PlaceCorrectionEvent`, `VisitedCell`) |
 | Timeline lookup / schema upgrade | `Moves/TimelineLocator.swift`, `Moves/TimelineSchemaUpgrader.swift` |
+| Route rendering / speed shading | `Moves/RouteRendering.swift`, `Moves/SpeedProfileBuilder.swift` |
 | Settings, export, integrations | `Moves/MovesSettingsView.swift`, `Moves/DawarichSync.swift` |
 | Imports | `Moves/TimelineArchiveImport.swift` (Moves GPX+GeoJSON+CSV), `Moves/LocationLogImport.swift` + `Moves/RouteFileImport.swift` (any timestamped GPX/TCX/KML log → stays, moves, speed-based modes, geocoded names; bulk writer is `importLocationLog` in `VisitedLocation.swift`). Real-file fixtures live in gitignored `import-staging/` and `MovesTests/Fixtures/`; tests skip when absent. |
 | Location capture, motion, route tracking | `Moves/LocationChange.swift` (`MovesLocationCaptureManager`) |

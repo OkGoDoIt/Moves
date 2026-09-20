@@ -380,7 +380,16 @@ struct ContentView: View {
             ZStack {
                 background
 
-                VStack(spacing: 12) {
+                VStack(spacing: 10) {
+                    if dayTimelines.isEmpty {
+                        emptyState
+                            .safeAreaPadding(.horizontal, 14)
+                    } else {
+                        dayHeader
+                            .safeAreaPadding(.horizontal, 14)
+                            .padding(.top, 4)
+                    }
+
                     if let trackingPermissionPrompt {
                         trackingPermissionBanner(trackingPermissionPrompt)
                             .safeAreaPadding(.horizontal, 14)
@@ -399,14 +408,7 @@ struct ContentView: View {
                         .safeAreaPadding(.horizontal, 14)
                     }
 
-                    if dayTimelines.isEmpty {
-                        emptyState
-                            .safeAreaPadding(.horizontal, 14)
-                    } else {
-                        dayHeader
-                            .safeAreaPadding(.horizontal, 14)
-                            .padding(.top, 10)
-
+                    if !dayTimelines.isEmpty {
                         TabView(selection: $selectedPageIndex) {
                             ForEach(Array(dayTimelines.enumerated()), id: \.element.dayKey) { index, day in
                                 DayTimelinePage(
@@ -423,7 +425,7 @@ struct ContentView: View {
                 
             }
             
-            .navigationTitle("Moves")
+            .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -524,9 +526,10 @@ struct ContentView: View {
             rootController.requestedPlaceID = nil
         }
         .onChange(of: rootController.requestedJumpDate) { _, date in
-            guard let date else { return }
-            jumpToDate(date)
-            rootController.requestedJumpDate = nil
+            consumeRequestedJumpDateIfPossible()
+        }
+        .onChange(of: dayTimelines.count) { _, _ in
+            consumeRequestedJumpDateIfPossible()
         }
     }
 
@@ -568,46 +571,17 @@ struct ContentView: View {
     }
 
     private var dayHeader: some View {
-        HStack(spacing: 10) {
-            Button {
-                selectOlderDay()
-            } label: {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 14, weight: .semibold))
-                    .frame(width: 30, height: 30)
+        Group {
+            if let selectedDay {
+                DayHeaderView(
+                    day: selectedDay,
+                    canGoOlder: canGoOlder,
+                    canGoNewer: canGoNewer,
+                    onOlder: selectOlderDay,
+                    onNewer: selectNewerDay,
+                    onJumpToDate: { rootController.isShowingDatePicker = true }
+                )
             }
-            .buttonStyle(.plain)
-            .frostedCircle(enabled: canGoOlder)
-            .disabled(!canGoOlder)
-
-            VStack(spacing: 2) {
-                if let selectedDay {
-                    Button {
-                        rootController.isShowingDatePicker = true
-                    } label: {
-                        Text(selectedDay.dayStart, format: .dateTime.weekday(.wide).day().month(.wide))
-                            .font(.system(size: 18, weight: .bold, design: .rounded))
-                            .foregroundStyle(Color.primary.opacity(0.92))
-                    }
-                    .buttonStyle(.plain)
-
-                    Text("\(selectedDay.uniqueLocationCount) places   \(selectedDay.moves.count) moves")
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .frame(maxWidth: .infinity)
-
-            Button {
-                selectNewerDay()
-            } label: {
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 14, weight: .semibold))
-                    .frame(width: 30, height: 30)
-            }
-            .buttonStyle(.plain)
-            .frostedCircle(enabled: canGoNewer)
-            .disabled(!canGoNewer)
         }
         .padding(.horizontal, 4)
     }
@@ -621,7 +595,7 @@ struct ContentView: View {
             Text("No timeline yet")
                 .font(.system(size: 18, weight: .bold, design: .rounded))
 
-            Text("Keep Moves running in the background. Visits and movement segments appear as iOS records them.")
+            Text("Keep Moves running in the background. Today’s story appears as visits and moves are recorded.")
                 .font(.system(size: 14, weight: .medium, design: .rounded))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -789,6 +763,14 @@ struct ContentView: View {
         let nextIndex = selectedPageIndex + 1
         guard dayTimelines.indices.contains(nextIndex) else { return }
         selectedPageIndex = nextIndex
+    }
+
+    /// Holds a launch or deep-link jump until demo days (or imported days) exist.
+    private func consumeRequestedJumpDateIfPossible() {
+        guard let date = rootController.requestedJumpDate else { return }
+        guard !dayTimelines.isEmpty else { return }
+        jumpToDate(date)
+        rootController.requestedJumpDate = nil
     }
 
     private func jumpToDate(_ date: Date) {

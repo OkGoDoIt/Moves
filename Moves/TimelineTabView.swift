@@ -1,0 +1,387 @@
+import CoreLocation
+import SwiftUI
+
+/// Timeline tab: wraps day paging so capture stays above the tab bar, and
+/// hosts the header, activity bubbles, and moment-jump helpers that WS0
+/// left as a placeholder.
+struct TimelineTabView: View {
+    var body: some View {
+        ContentView()
+    }
+}
+
+// MARK: - Day header
+
+/// Weekday, date, live-now, and the day’s place / move / distance summary.
+struct DayHeaderView: View {
+    let day: DayTimeline
+    let canGoOlder: Bool
+    let canGoNewer: Bool
+    let onOlder: () -> Void
+    let onNewer: () -> Void
+    let onJumpToDate: () -> Void
+
+    private var isToday: Bool {
+        Calendar.autoupdatingCurrent.isDateInToday(day.dayStart)
+    }
+
+    private var totalDistanceMeters: CLLocationDistance {
+        day.moves.reduce(0) { $0 + max($1.distanceMeters, 0) }
+    }
+
+    private var statsText: String {
+        let places = String(localized: "\(day.uniqueLocationCount) places")
+        let moves = String(localized: "\(day.moves.count) moves")
+        guard totalDistanceMeters > 1 else {
+            return "\(places) · \(moves)"
+        }
+        let distance = Measurement(value: totalDistanceMeters, unit: UnitLength.meters)
+            .formatted(.measurement(width: .abbreviated, usage: .road))
+        return "\(places) · \(moves) · \(distance)"
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Button(action: onOlder) {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 15, weight: .semibold))
+                    .frame(width: 32, height: 32)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .frostedCircle(enabled: canGoOlder)
+            .disabled(!canGoOlder)
+            .accessibilityLabel(String(localized: "Previous day"))
+
+            Button(action: onJumpToDate) {
+                VStack(spacing: 3) {
+                    HStack(spacing: 8) {
+                        Text(day.dayStart, format: .dateTime.weekday(.wide).day().month(.wide))
+                            .font(.system(size: 18, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+
+                        if isToday {
+                            liveNowBadge
+                        }
+                    }
+
+                    Text(statsText)
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(String(localized: "Jump to Date & Time"))
+            .accessibilityHint(String(localized: "Opens the date and time picker"))
+
+            Button(action: onNewer) {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 15, weight: .semibold))
+                    .frame(width: 32, height: 32)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .frostedCircle(enabled: canGoNewer)
+            .disabled(!canGoNewer)
+            .accessibilityLabel(String(localized: "Next day"))
+        }
+    }
+
+    private var liveNowBadge: some View {
+        TimelineView(.periodic(from: .now, by: 30)) { context in
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(MovesPalette.routeTracking)
+                    .frame(width: 7, height: 7)
+                    .accessibilityHidden(true)
+
+                Text(String(localized: "Now"))
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.secondary)
+
+                Text(context.date, format: .dateTime.hour().minute())
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(.thinMaterial, in: Capsule())
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(String(localized: "Live now"))
+    }
+}
+
+// MARK: - Activity bubbles
+
+/// Diameter math for original-Moves-style activity bubbles. Sized by moving
+/// time, clamped to 44…88 pt so a short walk stays tappable and a long drive
+/// does not dominate the row.
+enum ActivityBubbleSizing {
+    static let minimumDiameter: CGFloat = 44
+    static let maximumDiameter: CGFloat = 88
+
+    /// Linear interpolation from `minimumDiameter` to `maximumDiameter`.
+    static func diameter(duration: TimeInterval, maximumDuration: TimeInterval) -> CGFloat {
+        guard maximumDuration > 0 else { return minimumDiameter }
+        let fraction = min(max(duration / maximumDuration, 0), 1)
+        return minimumDiameter + (maximumDiameter - minimumDiameter) * fraction
+    }
+}
+
+/// One transport mode’s moving time and distance for the bubble row.
+struct ActivityBubbleMetric: Identifiable, Equatable {
+    let mode: TransportMode
+    let duration: TimeInterval
+    let distanceMeters: CLLocationDistance
+
+    var id: String { mode.rawValue }
+
+    var title: String { mode.title }
+    var symbolName: String { mode.symbolName }
+    var tint: Color { MovesPalette.transport(mode) }
+}
+
+enum ActivityBubbleMetrics {
+    /// Groups a day’s moves by `TransportMode`, skipping stationary / unknown.
+    static func make(from dayTimeline: DayTimeline) -> [ActivityBubbleMetric] {
+        var durationByMode: [TransportMode: TimeInterval] = [:]
+        var distanceByMode: [TransportMode: CLLocationDistance] = [:]
+
+        for move in dayTimeline.moves {
+            let mode = move.transportMode
+            guard mode != .stationary, mode != .unknown else { continue }
+            durationByMode[mode, default: 0] += move.timelineDuration
+            distanceByMode[mode, default: 0] += max(move.distanceMeters, 0)
+        }
+
+        return TransportMode.allCases.compactMap { mode in
+            let duration = durationByMode[mode] ?? 0
+            let distance = distanceByMode[mode] ?? 0
+            guard duration > 0 || distance > 0 else { return nil }
+            return ActivityBubbleMetric(mode: mode, duration: duration, distanceMeters: distance)
+        }
+    }
+}
+
+/// Horizontal row of mode bubbles. Tap filters the day map to that mode;
+/// tapping the active bubble again clears the filter.
+struct ActivityBubblesView: View {
+    let metrics: [ActivityBubbleMetric]
+    @Binding var filteredModes: Set<TransportMode>
+
+    private var maximumDuration: TimeInterval {
+        metrics.map(\.duration).max() ?? 0
+    }
+
+    var body: some View {
+        if metrics.isEmpty {
+            EmptyView()
+        } else {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .bottom, spacing: 18) {
+                    ForEach(metrics) { metric in
+                        bubble(for: metric)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel(String(localized: "Day activity"))
+        }
+    }
+
+    private func bubble(for metric: ActivityBubbleMetric) -> some View {
+        let diameter = ActivityBubbleSizing.diameter(
+            duration: metric.duration,
+            maximumDuration: maximumDuration
+        )
+        let isSelected = filteredModes.contains(metric.mode)
+
+        return Button {
+            withAnimation(.snappy(duration: 0.22)) {
+                if filteredModes == [metric.mode] {
+                    filteredModes = []
+                } else {
+                    filteredModes = [metric.mode]
+                }
+            }
+        } label: {
+            VStack(spacing: 6) {
+                ZStack {
+                    Circle()
+                        .fill(metric.tint.opacity(isSelected ? 0.28 : 0.16))
+                    Circle()
+                        .stroke(metric.tint.opacity(isSelected ? 1 : 0.55), lineWidth: isSelected ? 2.5 : 1)
+                    Image(systemName: metric.symbolName)
+                        .font(.system(size: max(16, diameter * 0.28), weight: .semibold))
+                        .foregroundStyle(metric.tint)
+                }
+                .frame(width: diameter, height: diameter)
+
+                Text(DurationFormatter.text(for: metric.duration))
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.primary)
+
+                Text(
+                    Measurement(value: max(metric.distanceMeters, 0), unit: UnitLength.meters)
+                        .formatted(.measurement(width: .abbreviated, usage: .road))
+                )
+                .font(.system(size: 11, weight: .medium, design: .rounded))
+                .foregroundStyle(.secondary)
+            }
+            .frame(minWidth: 56)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(metric.title)
+        .accessibilityValue("\(DurationFormatter.text(for: metric.duration)), \(Measurement(value: max(metric.distanceMeters, 0), unit: UnitLength.meters).formatted(.measurement(width: .abbreviated, usage: .road)))")
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+        .accessibilityHint(String(localized: "Filters the map to this way of moving"))
+    }
+}
+
+// MARK: - Moment jump
+
+/// Maps a `TimelineLocator` result onto a storyline row id and map selection
+/// so Jump to Time can scroll and highlight.
+enum TimelineMomentJump {
+    struct Target: Equatable {
+        let entryID: String
+        let mapSelection: TimelineMapSelection
+        let visitID: UUID?
+        let moveID: UUID?
+    }
+
+    /// Visit and move results highlight that item; gaps fall back to the
+    /// nearest neighbour (the last known item, then the next).
+    static func target(from result: TimelineLocator.Result) -> Target? {
+        switch result {
+        case .visit(let visit):
+            return target(forVisit: visit)
+        case .move(let move, _, _):
+            return target(forMove: move)
+        case .gap(let before, let after):
+            if let before {
+                return target(from: before)
+            }
+            if let after {
+                return target(from: after)
+            }
+            return nil
+        }
+    }
+
+    static func target(from item: TimelineLocator.Item) -> Target {
+        switch item {
+        case .visit(let visit):
+            return target(forVisit: visit)
+        case .move(let move):
+            return target(forMove: move)
+        }
+    }
+
+    static func target(forVisit visit: VisitPlace) -> Target {
+        Target(
+            entryID: "place-\(visit.id.uuidString)",
+            mapSelection: .place(visit.id),
+            visitID: visit.id,
+            moveID: nil
+        )
+    }
+
+    static func target(forMove move: MoveSegment) -> Target {
+        Target(
+            entryID: "move-\(move.id.uuidString)",
+            mapSelection: .move(move.id),
+            visitID: nil,
+            moveID: move.id
+        )
+    }
+}
+
+/// Parses `moves://at/ISO8601` (and `moves://at?t=`) into a moment.
+enum TimelineDeepLink {
+    static func moment(from url: URL) -> Date? {
+        guard url.scheme?.lowercased() == "moves" else { return nil }
+        guard url.host?.lowercased() == "at" else { return nil }
+
+        var raw = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if raw.isEmpty {
+            let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            raw = items.first(where: { $0.name == "t" || $0.name == "at" })?.value ?? ""
+        }
+        raw = raw.replacingOccurrences(of: " ", with: "+")
+        guard !raw.isEmpty else { return nil }
+        return parseTimestamp(raw)
+    }
+
+    static func parseTimestamp(_ raw: String) -> Date? {
+        if !raw.contains("T"), raw.count == 10 {
+            let formatter = DateFormatter()
+            formatter.calendar = Calendar(identifier: .gregorian)
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = Calendar.autoupdatingCurrent.timeZone
+            formatter.dateFormat = "yyyy-MM-dd"
+            return formatter.date(from: raw).map { Calendar.autoupdatingCurrent.startOfDay(for: $0) }
+        }
+
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: raw) {
+            return date
+        }
+
+        let internet = ISO8601DateFormatter()
+        internet.formatOptions = [.withInternetDateTime]
+        if let date = internet.date(from: raw) {
+            return date
+        }
+
+        let local = ISO8601DateFormatter()
+        local.formatOptions = [.withFullDate, .withTime, .withColonSeparatorInTime]
+        local.timeZone = Calendar.autoupdatingCurrent.timeZone
+        return local.date(from: raw)
+    }
+}
+
+// MARK: - Compact map callout
+
+/// Small capsule shown on the hero map when a place or move is selected.
+struct TimelineMapCallout: View {
+    let title: String
+    let subtitle: String
+    let tint: Color
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(tint)
+                .frame(width: 8, height: 8)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .lineLimit(1)
+                Text(subtitle)
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: Capsule())
+        .overlay {
+            Capsule()
+                .stroke(MovesPalette.border, lineWidth: 0.5)
+        }
+        .shadow(color: .black.opacity(0.08), radius: 8, y: 2)
+    }
+}

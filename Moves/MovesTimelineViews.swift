@@ -85,16 +85,15 @@ struct DayTimelinePage: View {
                 .tint(MovesPalette.routeTracking)
 
             Text(loadErrorMessage ?? "Loading day")
-                .font(.system(size: 14, weight: .semibold, design: .rounded))
+                .font(.system(size: 14, weight: .medium, design: .rounded))
                 .foregroundStyle(.secondary)
         }
-        .frame(maxWidth: .infinity, minHeight: 420)
-        .panelSurface()
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var inactiveState: some View {
         Color.clear
-            .frame(maxWidth: .infinity, minHeight: 420)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .onAppear {
                 releaseLoadedDay()
             }
@@ -137,6 +136,7 @@ struct DayTimelinePage: View {
 
 struct DayTimelinePageContent: View {
     @EnvironmentObject private var captureManager: MovesLocationCaptureManager
+    @EnvironmentObject private var rootController: MovesRootController
     let dayTimeline: DayTimeline
     let isActive: Bool
     private static let provisionalPlaceNameResolver = CLGeocoderPlaceNameResolver()
@@ -145,6 +145,10 @@ struct DayTimelinePageContent: View {
     @State private var provisionalSampleResolvedKey: String?
     @State private var presentationCache: DayTimelinePresentationCache
     @State private var mapSelection: TimelineMapSelection?
+    @State private var filteredModes: Set<TransportMode> = []
+    @State private var expandedHiddenStopIDs: Set<String> = []
+    @State private var highlightedEntryID: String?
+    @State private var isMapExpanded = false
 
     init(dayTimeline: DayTimeline, isActive: Bool) {
         self.dayTimeline = dayTimeline
@@ -177,12 +181,11 @@ struct DayTimelinePageContent: View {
     }
 
     private static func makePresentationCache(for dayTimeline: DayTimeline) -> DayTimelinePresentationCache {
-        let places = dayTimeline.places
-            .filter { !shouldHidePlaceFromTimeline($0) }
-            .map(TimelineEntry.place)
+        let places = dayTimeline.places.map(TimelineEntry.place)
         let moves = dayTimeline.moves.map(TimelineEntry.move)
         let samples = dayTimeline.samples.sorted(by: { $0.timestamp < $1.timestamp })
         var entries = (places + moves).sorted { $0.startDate < $1.startDate }
+        entries = collapseHiddenStops(in: entries)
 
         if let firstMove = dayTimeline.moves.min(by: { $0.timelineStartDate < $1.timelineStartDate }),
            let startPlace = firstMove.startPlace {
@@ -214,11 +217,38 @@ struct DayTimelinePageContent: View {
         return DayTimelinePresentationCache(
             timelineEntries: entries,
             transportSummaryMetrics: transportSummaryMetrics(for: dayTimeline),
+            activityBubbleMetrics: ActivityBubbleMetrics.make(from: dayTimeline),
             sortedSamples: samples
         )
     }
 
+    /// Consecutive short stops become one expander row so the storyline stays readable.
+    private static func collapseHiddenStops(in entries: [TimelineEntry]) -> [TimelineEntry] {
+        var result: [TimelineEntry] = []
+        var pending: [VisitPlace] = []
+
+        func flushPending() {
+            guard !pending.isEmpty else { return }
+            result.append(.hiddenStops(HiddenStopsCluster(places: pending)))
+            pending.removeAll(keepingCapacity: true)
+        }
+
+        for entry in entries {
+            if case .place(let place) = entry, shouldHidePlaceFromTimeline(place) {
+                pending.append(place)
+            } else {
+                flushPending()
+                result.append(entry)
+            }
+        }
+        flushPending()
+        return result
+    }
+
     private static func shouldHidePlaceFromTimeline(_ place: VisitPlace) -> Bool {
+        if place.isHiddenAsShortStop {
+            return true
+        }
         guard let dayTimeline = place.dayTimeline else { return false }
         return place.matchesShortStopHeuristic(in: dayTimeline)
     }
@@ -238,7 +268,9 @@ struct DayTimelinePageContent: View {
             .joined(separator: ",")
     }
 
-    private static func transportSummaryMetrics(for dayTimeline: DayTimeline) -> [DayTransportSummaryMetric] {
+    /// Shared with activity bubbles and Insights. Bucketed walking+running stays
+    /// available; the bubble row uses per-mode `ActivityBubbleMetrics` instead.
+    static func transportSummaryMetrics(for dayTimeline: DayTimeline) -> [DayTransportSummaryMetric] {
         var durationByBucket: [DayTransportBucket: TimeInterval] = [:]
         var distanceByBucket: [DayTransportBucket: CLLocationDistance] = [:]
 
@@ -264,8 +296,22 @@ struct DayTimelinePageContent: View {
         }
     }
 
-    private var hasTransportSummaryData: Bool {
-        !transportSummaryMetrics.isEmpty
+    private var activityBubbleMetrics: [ActivityBubbleMetric] {
+        presentationCache.activityBubbleMetrics
+    }
+
+    /// Storyline rows including expanded short-stop children.
+    private var displayedTimelineEntries: [TimelineEntry] {
+        var items: [TimelineEntry] = []
+        items.reserveCapacity(timelineEntries.count)
+        for entry in timelineEntries {
+            items.append(entry)
+            if case .hiddenStops(let cluster) = entry,
+               expandedHiddenStopIDs.contains(cluster.id) {
+                items.append(contentsOf: cluster.places.map(TimelineEntry.place))
+            }
+        }
+        return items
     }
 
     var body: some View {
@@ -273,43 +319,74 @@ struct DayTimelinePageContent: View {
             if LandscapeLayoutSettings.isLandscapePhone(proxy.size) {
                 landscapeContent
             } else {
-                portraitContent
+                portraitContent(pageSize: proxy.size)
             }
         }
-        .ignoresSafeArea(.container, edges: .bottom)
         .task(id: provisionalSampleLookupKey) {
             await resolveProvisionalSampleTitle()
+        }
+        .task(id: momentJumpTaskID) {
+            applyMomentJumpIfNeeded()
         }
         .onChange(of: dayTimeline.dayKey) { _, _ in
             presentationCache = Self.makePresentationCache(for: dayTimeline)
             mapSelection = nil
+            filteredModes = []
+            expandedHiddenStopIDs = []
+            highlightedEntryID = nil
+            isMapExpanded = false
         }
         .onChange(of: transportSummaryRefreshKey) { _, _ in
             presentationCache = Self.makePresentationCache(for: dayTimeline)
         }
+        .onChange(of: mapSelection) { _, selection in
+            guard let selection else { return }
+            if let match = displayedTimelineEntries.first(where: { $0.mapSelection == selection }) {
+                highlightedEntryID = match.id
+            }
+        }
     }
 
-    private var portraitContent: some View {
-        ScrollView {
-            VStack(spacing: 10) {
+    private var momentJumpTaskID: String {
+        let moment = rootController.requestedJumpMoment?.timeIntervalSinceReferenceDate ?? 0
+        return "\(dayTimeline.dayKey)|\(isActive ? 1 : 0)|\(moment)"
+    }
+
+    private func portraitContent(pageSize: CGSize) -> some View {
+        let heroHeight = max(260, pageSize.height * 0.42)
+
+        return ZStack {
+            VStack(spacing: 8) {
+                if !isMapExpanded {
+                    DayMapStrip(
+                        dayTimeline: dayTimeline,
+                        isActive: isActive,
+                        selection: $mapSelection,
+                        collapsedMapHeight: heroHeight,
+                        filteredModes: filteredModes,
+                        isExpanded: $isMapExpanded
+                    )
+                    .padding(.horizontal, 14)
+
+                    storylineList(usesSelection: false)
+                }
+            }
+
+            if isMapExpanded {
                 DayMapStrip(
                     dayTimeline: dayTimeline,
                     isActive: isActive,
-                    selection: $mapSelection
+                    selection: $mapSelection,
+                    fillsAvailableSpace: true,
+                    collapsedMapHeight: heroHeight,
+                    filteredModes: filteredModes,
+                    showsCollapseControl: true,
+                    isExpanded: $isMapExpanded
                 )
-
-                timelinePanel(usesSelection: false)
-
-                DayTransportSummaryView(
-                    metrics: transportSummaryMetrics,
-                    hasData: hasTransportSummaryData
-                )
-                .panelSurface()
+                .padding(.horizontal, 10)
+                .padding(.bottom, 8)
             }
-            .safeAreaPadding(.horizontal, 14)
-            .safeAreaPadding(.bottom, 24)
         }
-        .scrollEdgeEffectStyle(.soft, for: .top)
     }
 
     private var landscapeContent: some View {
@@ -318,120 +395,160 @@ struct DayTimelinePageContent: View {
                 dayTimeline: dayTimeline,
                 isActive: isActive,
                 selection: $mapSelection,
-                fillsAvailableSpace: true
+                fillsAvailableSpace: true,
+                filteredModes: filteredModes,
+                isExpanded: .constant(true)
             )
         } controlPane: {
-            ScrollView {
-                VStack(spacing: 10) {
-                    HStack {
-                        Text("Places & Moves")
-                            .font(.system(size: 17, weight: .bold, design: .rounded))
+            VStack(spacing: 8) {
+                HStack {
+                    Text("Places & Moves")
+                        .font(.system(size: 17, weight: .semibold, design: .rounded))
 
-                        Spacer()
+                    Spacer()
 
-                        LandscapePaneSideButton()
-                    }
-                    .padding(.horizontal, 4)
-
-                    timelinePanel(usesSelection: true)
-
-                    DayTransportSummaryView(
-                        metrics: transportSummaryMetrics,
-                        hasData: hasTransportSummaryData
-                    )
-                    .panelSurface()
+                    LandscapePaneSideButton()
                 }
-                .safeAreaPadding(.bottom, 12)
+                .padding(.horizontal, 4)
+
+                storylineList(usesSelection: true)
             }
-            .scrollIndicators(.hidden)
-            .scrollEdgeEffectStyle(.soft, for: .top)
         }
         .safeAreaPadding(.horizontal, 14)
     }
 
+    private func storylineList(usesSelection: Bool) -> some View {
+        ScrollViewReader { proxy in
+            List {
+                if displayedTimelineEntries.isEmpty {
+                    emptyTimelinePanel
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets(top: 8, leading: 4, bottom: 8, trailing: 4))
+                        .listRowBackground(Color.clear)
+                } else {
+                    ForEach(Array(displayedTimelineEntries.enumerated()), id: \.element.id) { index, entry in
+                        storylineListRow(
+                            for: entry,
+                            isFirst: index == 0,
+                            isLast: index == displayedTimelineEntries.count - 1,
+                            usesSelection: usesSelection
+                        )
+                        .id(entry.id)
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets(top: 0, leading: 4, bottom: 0, trailing: 4))
+                        .listRowBackground(rowBackground(for: entry))
+                    }
+                }
+
+                if !activityBubbleMetrics.isEmpty {
+                    ActivityBubblesView(
+                        metrics: activityBubbleMetrics,
+                        filteredModes: $filteredModes
+                    )
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 10, leading: 4, bottom: 18, trailing: 4))
+                    .listRowBackground(Color.clear)
+                }
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .scrollIndicators(.hidden)
+            .scrollEdgeEffectStyle(.soft, for: .top)
+            .onChange(of: highlightedEntryID) { _, entryID in
+                guard let entryID else { return }
+                withAnimation(.easeInOut(duration: 0.28)) {
+                    proxy.scrollTo(entryID, anchor: .center)
+                }
+            }
+        }
+    }
+
     @ViewBuilder
-    private func timelinePanel(usesSelection: Bool) -> some View {
-        if timelineEntries.isEmpty {
-            emptyTimelinePanel
-        } else if usesSelection {
-            selectableTimelineList
-                .panelSurface()
+    private func rowBackground(for entry: TimelineEntry) -> some View {
+        if highlightedEntryID == entry.id || mapSelection == entry.mapSelection {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(entry.iconTint.opacity(0.12))
         } else {
-            timelineList
-                .panelSurface()
+            Color.clear
         }
     }
 
     private var emptyTimelinePanel: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("No segments for this day yet.")
-                .font(.system(size: 14, weight: .semibold, design: .rounded))
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Nothing recorded yet")
+                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
 
             if dayTimeline.samples.count > 0 {
-                Text("\(dayTimeline.samples.count) location sample\(dayTimeline.samples.count == 1 ? "" : "s") captured. Waiting for the next visit or move.")
+                Text("Waiting for the next visit or move.")
                     .font(.system(size: 13, weight: .medium, design: .rounded))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.tertiary)
             } else {
-                Text("Grant location access above to start recording visits and movement.")
+                Text("Visits and moves will appear as you go.")
                     .font(.system(size: 13, weight: .medium, design: .rounded))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.tertiary)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .panelSurface()
+        .padding(.vertical, 8)
     }
 
-    private var timelineList: some View {
-        VStack(spacing: 0) {
-            ForEach(Array(timelineEntries.enumerated()), id: \.element.id) { index, entry in
-                timelineRow(
-                    for: entry,
-                    isFirst: index == 0,
-                    isLast: index == timelineEntries.count - 1
-                )
-
-                if index < timelineEntries.count - 1 {
-                    Divider()
-                        .padding(.leading, 82)
-                }
+    @ViewBuilder
+    private func storylineListRow(
+        for entry: TimelineEntry,
+        isFirst: Bool,
+        isLast: Bool,
+        usesSelection: Bool
+    ) -> some View {
+        let row = StorylineRow(
+            entry: entry,
+            isFirst: isFirst,
+            isLast: isLast,
+            isHighlighted: highlightedEntryID == entry.id,
+            onSelect: {
+                select(entry)
             }
-        }
-    }
+        )
 
-    private var selectableTimelineList: some View {
-        VStack(spacing: 0) {
-            ForEach(Array(timelineEntries.enumerated()), id: \.element.id) { index, entry in
+        Group {
+            if usesSelection {
                 HStack(spacing: 0) {
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            mapSelection = entry.mapSelection
-                        }
-                    } label: {
-                        StorylineRow(
-                            entry: entry,
-                            isFirst: index == 0,
-                            isLast: index == timelineEntries.count - 1
-                        )
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-
+                    row
                     timelineDetailLink(for: entry)
                 }
-                .background {
-                    if mapSelection == entry.mapSelection {
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(entry.iconTint.opacity(0.15))
-                            .padding(.horizontal, 3)
-                            .padding(.vertical, 2)
-                    }
-                }
-
-                if index < timelineEntries.count - 1 {
-                    Divider()
-                        .padding(.leading, 82)
-                }
+                .applyTimelineItemActions(for: entry)
+            } else {
+                timelineNavigationRow(entry: entry, row: row)
             }
+        }
+        .contentShape(Rectangle())
+    }
+
+    @ViewBuilder
+    private func timelineNavigationRow(entry: TimelineEntry, row: StorylineRow) -> some View {
+        switch entry {
+        case .place(let place):
+            NavigationLink {
+                PlaceMapDetailView(place: place)
+            } label: {
+                row
+            }
+            .buttonStyle(.plain)
+            .timelinePlaceActions(place)
+
+        case .move(let segment):
+            NavigationLink {
+                MoveMapDetailView(segment: segment)
+            } label: {
+                row
+            }
+            .buttonStyle(.plain)
+            .timelineMoveActions(segment)
+
+        case .hiddenStops:
+            row
+        case .liveRoute, .start, .sample:
+            row
         }
     }
 
@@ -454,48 +571,62 @@ struct DayTimelinePageContent: View {
             }
             .buttonStyle(.plain)
 
-        case .liveRoute, .start, .sample:
+        case .hiddenStops, .liveRoute, .start, .sample:
             EmptyView()
         }
     }
 
     private var detailChevron: some View {
         Image(systemName: "chevron.right")
-            .font(.system(size: 12, weight: .bold))
+            .font(.system(size: 12, weight: .semibold))
             .foregroundStyle(.secondary)
-            .frame(width: 36, height: 44)
+            .frame(width: 32, height: 40)
             .contentShape(Rectangle())
             .accessibilityLabel("Open details")
     }
 
-    @ViewBuilder
-    private func timelineRow(for entry: TimelineEntry, isFirst: Bool, isLast: Bool) -> some View {
-        switch entry {
-        case .place(let place):
-            NavigationLink {
-                PlaceMapDetailView(place: place)
-            } label: {
-                StorylineRow(entry: entry, isFirst: isFirst, isLast: isLast)
+    private func select(_ entry: TimelineEntry) {
+        withAnimation(.easeInOut(duration: 0.2)) {
+            if case .hiddenStops(let cluster) = entry {
+                if expandedHiddenStopIDs.contains(cluster.id) {
+                    expandedHiddenStopIDs.remove(cluster.id)
+                } else {
+                    expandedHiddenStopIDs.insert(cluster.id)
+                }
+                return
             }
-            .buttonStyle(.plain)
-
-        case .move(let segment):
-            NavigationLink {
-                MoveMapDetailView(segment: segment)
-            } label: {
-                StorylineRow(entry: entry, isFirst: isFirst, isLast: isLast)
-            }
-            .buttonStyle(.plain)
-
-        case .liveRoute:
-            StorylineRow(entry: entry, isFirst: isFirst, isLast: isLast)
-
-        case .start:
-            StorylineRow(entry: entry, isFirst: isFirst, isLast: isLast)
-
-        case .sample:
-            StorylineRow(entry: entry, isFirst: isFirst, isLast: isLast)
+            mapSelection = entry.mapSelection
+            highlightedEntryID = entry.id
         }
+    }
+
+    private func applyMomentJumpIfNeeded() {
+        guard isActive, let moment = rootController.requestedJumpMoment else { return }
+        let calendar = Calendar.autoupdatingCurrent
+        guard calendar.isDate(moment, inSameDayAs: dayTimeline.dayStart) else { return }
+
+        let result = TimelineLocator.locate(
+            at: moment,
+            visits: dayTimeline.places,
+            moves: dayTimeline.moves
+        )
+        guard let target = TimelineMomentJump.target(from: result) else {
+            rootController.requestedJumpMoment = nil
+            return
+        }
+
+        if let visitID = target.visitID {
+            for entry in timelineEntries {
+                if case .hiddenStops(let cluster) = entry,
+                   cluster.places.contains(where: { $0.id == visitID }) {
+                    expandedHiddenStopIDs.insert(cluster.id)
+                }
+            }
+        }
+
+        mapSelection = target.mapSelection
+        highlightedEntryID = target.entryID
+        rootController.requestedJumpMoment = nil
     }
 
     private var provisionalSampleLookupKey: String {
@@ -540,6 +671,7 @@ struct DayTimelinePageContent: View {
 private struct DayTimelinePresentationCache {
     let timelineEntries: [TimelineEntry]
     let transportSummaryMetrics: [DayTransportSummaryMetric]
+    let activityBubbleMetrics: [ActivityBubbleMetric]
     let sortedSamples: [LocationSample]
 
     var latestSample: LocationSample? {
@@ -778,20 +910,22 @@ struct DayMapStrip: View {
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var captureManager: MovesLocationCaptureManager
     @AppStorage(MapMarkerDisplaySettings.showsBigMarkersKey) private var showsBigMarkers = false
+    @AppStorage(MapRouteShadingSettings.shadeRoutesBySpeedKey) private var shadeRoutesBySpeed = true
     let dayTimeline: DayTimeline
     let isActive: Bool
     @Binding var selection: TimelineMapSelection?
     let fillsAvailableSpace: Bool
-    private static let collapsedMapHeight: CGFloat = 180
-    private static let collapsedMapCornerRadius: CGFloat = 14
+    let collapsedMapHeight: CGFloat
+    let filteredModes: Set<TransportMode>
+    let showsCollapseControl: Bool
+    @Binding var isExpanded: Bool
+    private static let collapsedMapCornerRadius: CGFloat = 20
     private static let fullScreenMapAnimation = Animation.spring(response: 0.42, dampingFraction: 0.86)
-    private static let expandedMapVerticalMargin: CGFloat = 150
 
     @State private var camera: MapCameraPosition
     @State private var mapRegion: MKCoordinateRegion
     @State private var historicalRoutes: [RenderedRoute]
     @State private var presentationCache: DayMapPresentationCache
-    @State private var isShowingFullScreenMap = false
     @State private var collapsedSnapshotImage: UIImage?
 
     private var placeMarkers: [PlaceMarker] {
@@ -806,8 +940,23 @@ struct DayMapStrip: View {
         presentationCache.latestSampleCoordinate
     }
 
+    private var displayedRoutes: [RenderedRoute] {
+        guard !filteredModes.isEmpty else { return historicalRoutes }
+        return historicalRoutes.filter { filteredModes.contains($0.transportMode) }
+    }
+
     private var historicalRouteCoordinates: [CLLocationCoordinate2D] {
-        historicalRoutes.flatMap { $0.coordinates }
+        displayedRoutes.flatMap { $0.coordinates }
+    }
+
+    private var usesLiveMap: Bool {
+        fillsAvailableSpace || isExpanded
+    }
+
+    /// Expanded / landscape live map may shade by speed when the Map setting
+    /// is on. Collapsed hero snapshots stay solid mode color.
+    private var allowsSpeedShading: Bool {
+        usesLiveMap && shadeRoutesBySpeed
     }
 
     private var historicalRouteRefreshKey: String {
@@ -823,12 +972,20 @@ struct DayMapStrip: View {
         dayTimeline: DayTimeline,
         isActive: Bool,
         selection: Binding<TimelineMapSelection?> = .constant(nil),
-        fillsAvailableSpace: Bool = false
+        fillsAvailableSpace: Bool = false,
+        collapsedMapHeight: CGFloat = 260,
+        filteredModes: Set<TransportMode> = [],
+        showsCollapseControl: Bool = false,
+        isExpanded: Binding<Bool> = .constant(false)
     ) {
         self.dayTimeline = dayTimeline
         self.isActive = isActive
         _selection = selection
         self.fillsAvailableSpace = fillsAvailableSpace
+        self.collapsedMapHeight = collapsedMapHeight
+        self.filteredModes = filteredModes
+        self.showsCollapseControl = showsCollapseControl
+        _isExpanded = isExpanded
 
         let cache = Self.makePresentationCache(for: dayTimeline)
         let cachedRoutes = DayMapRouteCache.routes(for: cache.routeRefreshKey)
@@ -854,20 +1011,33 @@ struct DayMapStrip: View {
                 maxWidth: .infinity,
                 maxHeight: fillsAvailableSpace ? .infinity : nil
             )
-            .frame(height: fillsAvailableSpace ? nil : (isShowingFullScreenMap ? Self.expandedMapHeight : Self.collapsedMapHeight))
+            .frame(height: fillsAvailableSpace ? nil : collapsedMapHeight)
             .clipShape(RoundedRectangle(cornerRadius: Self.collapsedMapCornerRadius, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: Self.collapsedMapCornerRadius, style: .continuous)
                     .stroke(MovesPalette.border.opacity(0.8), lineWidth: 1)
             }
-            .overlay(alignment: .bottomTrailing) {
-                if !fillsAvailableSpace {
-                    fullScreenToggleButton(isFullScreen: isShowingFullScreenMap)
-                        .padding(isShowingFullScreenMap ? 18 : 10)
+            .overlay(alignment: .topLeading) {
+                if let callout {
+                    TimelineMapCallout(title: callout.title, subtitle: callout.subtitle, tint: callout.tint)
+                        .padding(12)
                 }
             }
-            .shadow(color: .black.opacity(isShowingFullScreenMap ? 0.12 : 0), radius: 18, x: 0, y: 8)
-            .animation(Self.fullScreenMapAnimation, value: isShowingFullScreenMap)
+            .overlay(alignment: .bottom) {
+                if !fillsAvailableSpace {
+                    expandHandle
+                        .padding(.bottom, 8)
+                }
+            }
+            .overlay(alignment: .bottomTrailing) {
+                if showsCollapseControl {
+                    fullScreenToggleButton(isFullScreen: true)
+                        .padding(16)
+                }
+            }
+            .shadow(color: .black.opacity(fillsAvailableSpace && showsCollapseControl ? 0.12 : 0), radius: 18, x: 0, y: 8)
+            .animation(Self.fullScreenMapAnimation, value: isExpanded)
+            .modifier(DayMapExpandDragModifier(isEnabled: !usesLiveMap, isExpanded: $isExpanded))
             .task(id: "\(historicalRouteRefreshKey)|\(isActive ? 1 : 0)") {
                 guard isActive else { return }
                 await refreshHistoricalRouteCoordinates()
@@ -885,7 +1055,7 @@ struct DayMapStrip: View {
 
     @ViewBuilder
     private var activeMapView: some View {
-        if fillsAvailableSpace || isShowingFullScreenMap {
+        if usesLiveMap {
             mapView
         } else {
             collapsedMapSnapshotView
@@ -903,7 +1073,7 @@ struct DayMapStrip: View {
         GeometryReader { proxy in
             let size = CGSize(
                 width: max(proxy.size.width, 1),
-                height: Self.collapsedMapHeight
+                height: collapsedMapHeight
             )
 
             ZStack {
@@ -929,24 +1099,36 @@ struct DayMapStrip: View {
 
     @MapContentBuilder
     private var mapContent: some MapContent {
-        ForEach(historicalRoutes) { route in
+        ForEach(displayedRoutes) { route in
             let isSelected = isSelectedRoute(route)
             let dimsForOtherSelection = selection != nil && !isSelected
 
             if route.shadowCoordinates.count > 1 {
                 MapPolyline(coordinates: route.shadowCoordinates)
                     .stroke(
-                        route.shadowTint.opacity(dimsForOtherSelection ? 0.2 : 1),
+                        route.shadowTint,
                         lineWidth: isSelected ? route.shadowLineWidth + 4 : route.shadowLineWidth
                     )
             }
 
             if route.coordinates.count > 1 {
+                let emphasis = dimsForOtherSelection ? 0.28 : 1.0
+                let width = isSelected ? route.lineWidth + 4 : route.lineWidth
                 MapPolyline(coordinates: route.coordinates)
                     .stroke(
-                        route.tint.opacity(dimsForOtherSelection ? 0.28 : 0.95),
-                        lineWidth: isSelected ? route.lineWidth + 4 : route.lineWidth
+                        route.strokeGradient(shadeBySpeed: allowsSpeedShading, emphasis: emphasis),
+                        style: RouteStrokeStyle.make(for: route, lineWidth: width)
                     )
+                if let overlayTint = route.recordedOverlayTint {
+                    MapPolyline(coordinates: route.coordinates)
+                        .stroke(
+                            MovesPalette.opaqueRouteColor(overlayTint, opacity: emphasis),
+                            style: RouteStrokeStyle.make(
+                                for: route,
+                                lineWidth: max(width - 2.25, 1.25)
+                            )
+                        )
+                }
             }
         }
 
@@ -954,7 +1136,10 @@ struct DayMapStrip: View {
            liveRouteSnapshot.coordinates.count > 1 {
             MapPolyline(coordinates: liveRouteSnapshot.coordinates)
                 .stroke(
-                    MovesPalette.routeTracking.opacity(selection != nil && !isLiveRouteSelected ? 0.28 : 0.95),
+                    MovesPalette.opaqueRouteColor(
+                        MovesPalette.routeTracking,
+                        opacity: selection != nil && !isLiveRouteSelected ? 0.28 : 1
+                    ),
                     lineWidth: isLiveRouteSelected ? 9 : 5
                 )
         }
@@ -998,6 +1183,50 @@ struct DayMapStrip: View {
         }
     }
 
+    private var callout: (title: String, subtitle: String, tint: Color)? {
+        switch selection {
+        case .place(let id):
+            guard let marker = placeMarkers.first(where: { $0.id == id }) else { return nil }
+            let place = dayTimeline.places.first(where: { $0.id == id })
+            let subtitle = place.map { Self.timeString(from: $0.arrivalDate) } ?? marker.title
+            return (marker.title, subtitle, MovesPalette.place)
+        case .move(let id):
+            guard let route = displayedRoutes.first(where: { $0.id == id.uuidString }) else { return nil }
+            let move = dayTimeline.moves.first(where: { $0.id == id })
+            let subtitle = move.map { DurationFormatter.text(for: $0.timelineDuration) } ?? route.transportMode.title
+            return (route.transportMode.title, subtitle, route.tint)
+        case .liveRoute:
+            return (String(localized: "Live route tracking"), String(localized: "Now"), MovesPalette.routeTracking)
+        case .sample:
+            return (String(localized: "Captured location"), String(localized: "Now"), MovesPalette.start)
+        case nil:
+            return nil
+        }
+    }
+
+    private static func timeString(from date: Date) -> String {
+        date.formatted(.dateTime.hour().minute())
+    }
+
+    private var expandHandle: some View {
+        Button {
+            withAnimation(Self.fullScreenMapAnimation) {
+                isExpanded = true
+            }
+        } label: {
+            VStack(spacing: 4) {
+                Capsule()
+                    .fill(.white.opacity(0.92))
+                    .frame(width: 36, height: 5)
+                    .shadow(color: .black.opacity(0.18), radius: 2, y: 1)
+            }
+            .frame(width: 56, height: 22)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(String(localized: "Expand map"))
+    }
+
     private func isSelectedRoute(_ route: RenderedRoute) -> Bool {
         guard case .move(let id) = selection else { return false }
         return route.id == id.uuidString
@@ -1016,7 +1245,7 @@ struct DayMapStrip: View {
     private func fullScreenToggleButton(isFullScreen: Bool) -> some View {
         Button {
             withAnimation(Self.fullScreenMapAnimation) {
-                isShowingFullScreenMap = !isFullScreen
+                isExpanded = !isFullScreen
             }
         } label: {
             Image(systemName: isFullScreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
@@ -1030,12 +1259,8 @@ struct DayMapStrip: View {
         .help(isFullScreen ? "Shrink map" : "Expand map")
     }
 
-    private static var expandedMapHeight: CGFloat {
-        max(360, screenBounds.height - expandedMapVerticalMargin)
-    }
-
     private var collapsedSnapshotRouteKey: String {
-        historicalRoutes.map { route in
+        displayedRoutes.map { route in
             let first = route.coordinates.first
             let last = route.coordinates.last
             let firstKey = first.map { "\(Int(($0.latitude * 10_000).rounded())):\(Int(($0.longitude * 10_000).rounded()))" } ?? "none"
@@ -1054,6 +1279,7 @@ struct DayMapStrip: View {
             presentationCache.latestSampleKey,
             liveRouteSnapshot?.id ?? "none",
             showsBigMarkers ? "big" : "small",
+            filteredModes.map(\.rawValue).sorted().joined(separator: ","),
             collapsedSnapshotRouteKey
         ]
         .joined(separator: "|")
@@ -1061,14 +1287,14 @@ struct DayMapStrip: View {
 
     @MainActor
     private func refreshCollapsedSnapshot(size: CGSize) async {
-        guard !isShowingFullScreenMap, size.width > 1, size.height > 1 else { return }
+        guard !usesLiveMap, size.width > 1, size.height > 1 else { return }
 
         do {
             let image = try await Self.makeCollapsedSnapshot(
                 region: mapRegion,
                 size: size,
                 scale: Self.screenScale,
-                routes: historicalRoutes,
+                routes: displayedRoutes,
                 liveRouteSnapshot: liveRouteSnapshot,
                 placeMarkers: placeMarkers,
                 latestSampleCoordinate: latestSampleCoordinate,
@@ -1135,26 +1361,21 @@ struct DayMapStrip: View {
             snapshot.image.draw(at: .zero)
 
             for route in routes {
-                strokeRoute(
-                    route.shadowCoordinates,
+                RouteSnapshotStroke.draw(
+                    route,
                     in: snapshot,
-                    color: UIColor(route.shadowTint),
-                    lineWidth: route.shadowLineWidth
-                )
-                strokeRoute(
-                    route.coordinates,
-                    in: snapshot,
-                    color: UIColor(route.tint).withAlphaComponent(0.95),
-                    lineWidth: route.lineWidth
+                    shadeBySpeed: false,
+                    emphasis: 1
                 )
             }
 
             if let liveRouteSnapshot {
-                strokeRoute(
-                    liveRouteSnapshot.coordinates,
+                RouteSnapshotStroke.strokePath(
+                    coordinates: liveRouteSnapshot.coordinates,
                     in: snapshot,
-                    color: UIColor(MovesPalette.routeTracking).withAlphaComponent(0.95),
-                    lineWidth: 5
+                    color: UIColor(MovesPalette.routeTracking),
+                    lineWidth: 5,
+                    dash: []
                 )
             }
 
@@ -1179,32 +1400,6 @@ struct DayMapStrip: View {
                 )
             }
         }
-    }
-
-    private static func strokeRoute(
-        _ coordinates: [CLLocationCoordinate2D],
-        in snapshot: MKMapSnapshotter.Snapshot,
-        color: UIColor,
-        lineWidth: CGFloat
-    ) {
-        guard coordinates.count > 1 else { return }
-
-        let path = UIBezierPath()
-        path.lineCapStyle = .round
-        path.lineJoinStyle = .round
-        path.lineWidth = lineWidth
-
-        for (index, coordinate) in coordinates.enumerated() {
-            let point = snapshot.point(for: coordinate)
-            if index == 0 {
-                path.move(to: point)
-            } else {
-                path.addLine(to: point)
-            }
-        }
-
-        color.setStroke()
-        path.stroke()
     }
 
     private static func drawMarker(
@@ -1272,14 +1467,9 @@ struct DayMapStrip: View {
 
         for move in sortedMoves {
             let matched = await RoadRouteMatcher.matchedCoordinates(for: move)
+            let fractions = await SpeedProfileBuilder.buildAndCache(for: move, coordinates: matched)
             renderedRoutes.append(
-                RenderedRoute(
-                    id: move.id.uuidString,
-                    coordinates: matched,
-                    usesHighAccuracyRouteTracking: move.usesHighAccuracyRouteTracking,
-                    usesHealthWorkoutRoute: move.usesHealthWorkoutRoute,
-                    transportMode: move.transportMode
-                )
+                RenderedRoute.make(from: move, coordinates: matched, speedFractions: fractions)
             )
         }
 
@@ -1345,12 +1535,9 @@ struct DayMapStrip: View {
                 let fallback = MoveRouteGeometry.rawCoordinates(for: move)
                 let signature = MoveRouteGeometry.cacheSignature(for: move, fallback: fallback)
 
-                return RenderedRoute(
-                    id: move.id.uuidString,
-                    coordinates: move.manualRouteCoordinates ?? move.cachedRouteCoordinates(for: signature) ?? fallback,
-                    usesHighAccuracyRouteTracking: move.usesHighAccuracyRouteTracking,
-                    usesHealthWorkoutRoute: move.usesHealthWorkoutRoute,
-                    transportMode: move.transportMode
+                return RenderedRoute.make(
+                    from: move,
+                    coordinates: move.manualRouteCoordinates ?? move.cachedRouteCoordinates(for: signature) ?? fallback
                 )
             }
         DayMapRouteCache.store(
@@ -1379,8 +1566,10 @@ struct DayMapStrip: View {
 
     private static func makePresentationCache(for dayTimeline: DayTimeline) -> DayMapPresentationCache {
         let sortedPlaces = mapPlaces(for: dayTimeline)
-        let placeMarkers = sortedPlaces.map {
-            PlaceMarker(id: $0.id, title: $0.displayTitle, coordinate: $0.coordinate)
+        let placeMarkers = sortedPlaces.map { place in
+            let knownName = place.knownPlace?.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let title = knownName.isEmpty ? place.displayTitle : knownName
+            return PlaceMarker(id: place.id, title: title, coordinate: place.coordinate)
         }
         let placeRefreshKey = sortedPlaces.map { place in
             let arrival = Int(place.arrivalDate.timeIntervalSince1970.rounded())
@@ -1456,71 +1645,215 @@ struct DayMapStrip: View {
     }
 }
 
+private extension View {
+    /// Swipe / context menu on the list wrapper around `StorylineRow`.
+    @ViewBuilder
+    func applyTimelineItemActions(for entry: TimelineEntry) -> some View {
+        switch entry {
+        case .place(let visit):
+            timelinePlaceActions(visit)
+        case .move(let move):
+            timelineMoveActions(move)
+        default:
+            self
+        }
+    }
+}
+
+private struct DayMapExpandDragModifier: ViewModifier {
+    let isEnabled: Bool
+    @Binding var isExpanded: Bool
+
+    func body(content: Content) -> some View {
+        if isEnabled {
+            content.gesture(
+                DragGesture(minimumDistance: 16)
+                    .onEnded { value in
+                        if value.translation.height < -36 {
+                            withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) {
+                                isExpanded = true
+                            }
+                        }
+                    }
+            )
+        } else {
+            content
+        }
+    }
+}
+
+/// Visual variant of a storyline row. WS2 keys swipe/menu off this plus the entry.
+enum TimelineRowStyle: Equatable {
+    case place
+    case move
+    case hiddenStops
+    case carryOver
+    case live
+    case sample
+}
+
+/// Consecutive short stops collapsed into one expander.
+struct HiddenStopsCluster: Identifiable {
+    let places: [VisitPlace]
+
+    var id: String {
+        places.map(\.id.uuidString).joined(separator: "-")
+    }
+
+    var startDate: Date {
+        places.map(\.arrivalDate).min() ?? .now
+    }
+}
+
+/// One storyline item. Layout lives here; swipe/menu chrome is applied by
+/// `.timelinePlaceActions` / `.timelineMoveActions` on the list wrapper so WS2
+/// does not rewrite rows.
 struct StorylineRow: View {
     let entry: TimelineEntry
     let isFirst: Bool
     let isLast: Bool
+    var isHighlighted: Bool = false
+    var onSelect: (() -> Void)? = nil
+
+    var style: TimelineRowStyle { entry.rowStyle }
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
-            Text(entry.clockText)
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                .foregroundStyle(.secondary)
-                .frame(width: 56, alignment: .leading)
-                .padding(.top, 10)
-
-            VStack(spacing: 0) {
-                Rectangle()
-                    .fill(isFirst ? Color.clear : MovesPalette.rail)
-                    .frame(width: 2, height: 12)
-
-                ZStack {
-                    Circle()
-                        .fill(entry.iconTint.opacity(0.18))
-                        .frame(width: 24, height: 24)
-                    Image(systemName: entry.iconName)
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(entry.iconTint)
-                    if entry.showsHealthSourceBadge {
-                        Circle()
-                            .fill(MovesPalette.healthRoute)
-                            .frame(width: 8, height: 8)
-                            .overlay {
-                                Circle()
-                                    .stroke(MovesPalette.card, lineWidth: 1)
-                            }
-                            .offset(x: 8, y: -8)
-                    }
-                }
-
-                Rectangle()
-                    .fill(isLast ? Color.clear : MovesPalette.rail)
-                    .frame(width: 2)
-                    .frame(minHeight: 28, maxHeight: .infinity, alignment: .top)
-            }
-            .frame(width: 26)
-            .frame(maxHeight: .infinity, alignment: .top)
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text(entry.titleText)
-                    .font(.system(size: 16, weight: .bold, design: .rounded))
-                    .foregroundStyle(Color.primary.opacity(0.92))
-
-                Text(entry.subtitleText)
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    .foregroundStyle(Color.primary.opacity(0.72))
-
-                if let tertiary = entry.tertiaryText {
-                    Text(tertiary)
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .padding(.leading, 8)
-            .padding(.top, 8)
-            .padding(.bottom, 6)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            StorylineTimeColumn(text: entry.clockText)
+            StorylineRail(
+                tint: entry.iconTint,
+                iconName: entry.iconName,
+                isFirst: isFirst,
+                isLast: isLast,
+                showsHealthBadge: entry.showsHealthSourceBadge,
+                showsEstimatedGlyph: entry.showsEstimatedGlyph
+            )
+            StorylineRowBody(entry: entry)
         }
+        .padding(.vertical, 2)
+        .contentShape(Rectangle())
+        .simultaneousGesture(
+            TapGesture().onEnded {
+                onSelect?()
+            }
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(isHighlighted ? [.isSelected] : [])
+    }
+}
+
+private struct StorylineTimeColumn: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 12, weight: .semibold, design: .rounded))
+            .foregroundStyle(.secondary)
+            .monospacedDigit()
+            .frame(width: 48, alignment: .leading)
+            .padding(.top, 8)
+    }
+}
+
+private struct StorylineRail: View {
+    let tint: Color
+    let iconName: String
+    let isFirst: Bool
+    let isLast: Bool
+    let showsHealthBadge: Bool
+    let showsEstimatedGlyph: Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Rectangle()
+                .fill(isFirst ? Color.clear : MovesPalette.rail)
+                .frame(width: 2, height: 10)
+
+            ZStack {
+                Circle()
+                    .fill(tint.opacity(0.16))
+                    .frame(width: 22, height: 22)
+                Image(systemName: iconName)
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(tint)
+                if showsHealthBadge {
+                    Circle()
+                        .fill(MovesPalette.healthRoute)
+                        .frame(width: 7, height: 7)
+                        .overlay {
+                            Circle()
+                                .stroke(MovesPalette.card, lineWidth: 1)
+                        }
+                        .offset(x: 8, y: -8)
+                }
+                if showsEstimatedGlyph {
+                    Image(systemName: "line.diagonal")
+                        .font(.system(size: 7, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .offset(x: 8, y: 8)
+                }
+            }
+
+            Rectangle()
+                .fill(isLast ? Color.clear : MovesPalette.rail)
+                .frame(width: 2)
+                .frame(minHeight: 22, maxHeight: .infinity, alignment: .top)
+        }
+        .frame(width: 24)
+        .frame(maxHeight: .infinity, alignment: .top)
+    }
+}
+
+private struct StorylineRowBody: View {
+    let entry: TimelineEntry
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Text(entry.titleText)
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Color.primary.opacity(0.92))
+                    .lineLimit(2)
+
+                if entry.showsAutoAssignmentMark {
+                    Text("Auto")
+                        .font(.system(size: 10, weight: .bold, design: .rounded))
+                        .foregroundStyle(MovesPalette.place)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(MovesPalette.place.opacity(0.14)))
+                }
+
+                if entry.showsAmbiguousChooser {
+                    Text("Choose")
+                        .font(.system(size: 10, weight: .bold, design: .rounded))
+                        .foregroundStyle(MovesPalette.start)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(MovesPalette.start.opacity(0.14)))
+                }
+
+                if entry.rowStyle == .hiddenStops {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+
+            Text(entry.subtitleText)
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+                .foregroundStyle(Color.primary.opacity(0.68))
+
+            if let tertiary = entry.tertiaryText {
+                Text(tertiary)
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.leading, 8)
+        .padding(.top, 6)
+        .padding(.bottom, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -1530,6 +1863,7 @@ enum TimelineEntry: Identifiable {
     case liveRoute(LiveRouteTrackingSnapshot)
     case start(place: VisitPlace, timestamp: Date)
     case sample(location: LocationSample, sampleCount: Int, resolvedName: String?)
+    case hiddenStops(HiddenStopsCluster)
 
     var id: String {
         switch self {
@@ -1543,6 +1877,19 @@ enum TimelineEntry: Identifiable {
             return "start-\(place.id.uuidString)-\(timestamp.timeIntervalSince1970)"
         case .sample(let location, _, _):
             return "sample-\(location.dedupeKey)-\(location.timestamp.timeIntervalSince1970)"
+        case .hiddenStops(let cluster):
+            return "hidden-\(cluster.id)"
+        }
+    }
+
+    var rowStyle: TimelineRowStyle {
+        switch self {
+        case .place: return .place
+        case .move: return .move
+        case .hiddenStops: return .hiddenStops
+        case .start: return .carryOver
+        case .liveRoute: return .live
+        case .sample: return .sample
         }
     }
 
@@ -1558,6 +1905,11 @@ enum TimelineEntry: Identifiable {
             return .place(place.id)
         case .sample(let location, _, _):
             return .sample(location.dedupeKey)
+        case .hiddenStops(let cluster):
+            if let first = cluster.places.first {
+                return .place(first.id)
+            }
+            return .sample(cluster.id)
         }
     }
 
@@ -1573,6 +1925,8 @@ enum TimelineEntry: Identifiable {
             return timestamp
         case .sample(let location, _, _):
             return location.timestamp
+        case .hiddenStops(let cluster):
+            return cluster.startDate
         }
     }
 
@@ -1588,6 +1942,8 @@ enum TimelineEntry: Identifiable {
             return Self.timeString(from: timestamp)
         case .sample(let location, _, _):
             return Self.timeString(from: location.timestamp)
+        case .hiddenStops(let cluster):
+            return Self.timeString(from: cluster.startDate)
         }
     }
 
@@ -1603,6 +1959,8 @@ enum TimelineEntry: Identifiable {
             return "sunrise.fill"
         case .sample:
             return "mappin.circle.fill"
+        case .hiddenStops:
+            return "minus"
         }
     }
 
@@ -1618,6 +1976,8 @@ enum TimelineEntry: Identifiable {
             return MovesPalette.start
         case .sample:
             return MovesPalette.place
+        case .hiddenStops:
+            return MovesPalette.rail
         }
     }
 
@@ -1630,18 +1990,45 @@ enum TimelineEntry: Identifiable {
         }
     }
 
+    var showsEstimatedGlyph: Bool {
+        switch self {
+        case .move(let segment):
+            return segment.routeMatchConfidence == .estimated
+        default:
+            return false
+        }
+    }
+
+    var showsAutoAssignmentMark: Bool {
+        switch self {
+        case .place(let place):
+            return place.assignmentSource == .auto
+        default:
+            return false
+        }
+    }
+
+    var showsAmbiguousChooser: Bool {
+        switch self {
+        case .place(let place):
+            return place.assignmentSource == .autoAmbiguous
+        default:
+            return false
+        }
+    }
+
     var titleText: String {
         switch self {
         case .start(let place, _):
-            return "Start at \(place.displayTitle)"
+            return "Start at \(Self.placeTitle(place))"
         case .place(let place):
-            return place.displayTitle
+            return Self.placeTitle(place)
         case .move(let segment):
-            let start = segment.startPlace?.displayTitle ?? "Unknown start"
-            let end = segment.endPlace?.displayTitle ?? "Unknown destination"
+            let start = segment.startPlace.map(Self.placeTitle) ?? String(localized: "Unknown start")
+            let end = segment.endPlace.map(Self.placeTitle) ?? String(localized: "Unknown destination")
             return "\(start) to \(end)"
         case .liveRoute:
-            return "Live route tracking"
+            return String(localized: "Live route tracking")
         case .sample(let location, _, let resolvedName):
             if let resolvedName,
                !resolvedName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -1651,19 +2038,25 @@ enum TimelineEntry: Identifiable {
                 latitude: location.latitude,
                 longitude: location.longitude
             )
+        case .hiddenStops(let cluster):
+            let count = cluster.places.count
+            if count == 1 {
+                return String(localized: "1 short stop hidden")
+            }
+            return String(localized: "\(count) short stops hidden")
         }
     }
 
     var subtitleText: String {
         switch self {
         case .start:
-            return "Carried over from previous day"
+            return String(localized: "Carried over from previous day")
 
         case .place(let place):
             guard let departure = place.departureDate else {
-                return "In progress"
+                return String(localized: "In progress")
             }
-            return "Stayed \(DurationFormatter.text(for: departure.timeIntervalSince(place.arrivalDate)))"
+            return String(localized: "Stayed \(DurationFormatter.text(for: departure.timeIntervalSince(place.arrivalDate)))")
 
         case .move(let segment):
             let duration = DurationFormatter.text(for: segment.timelineDuration)
@@ -1671,7 +2064,10 @@ enum TimelineEntry: Identifiable {
                 .formatted(.measurement(width: .abbreviated, usage: .road))
             var details = [segment.transportMode.title, duration, distance]
             if segment.usesHealthWorkoutRoute {
-                details.append("Apple Health")
+                details.append(String(localized: "Apple Health"))
+            }
+            if segment.routeMatchConfidence == .estimated {
+                details.append(String(localized: "Estimated"))
             }
             return details.joined(separator: "   ")
         case .liveRoute(let snapshot):
@@ -1680,12 +2076,14 @@ enum TimelineEntry: Identifiable {
                 .formatted(.measurement(width: .abbreviated, usage: .road))
 
             if snapshot.sampleCount == 0 {
-                return "Waiting for the first live GPS fix"
+                return String(localized: "Waiting for the first live GPS fix")
             }
 
             return "\(snapshot.sampleCount) live fixes   \(duration)   \(distance)"
         case .sample:
-            return "In progress"
+            return String(localized: "In progress")
+        case .hiddenStops:
+            return String(localized: "Tap to show")
         }
     }
 
@@ -1705,17 +2103,25 @@ enum TimelineEntry: Identifiable {
             return details.isEmpty ? nil : details.joined(separator: "   ")
         case .liveRoute(let snapshot):
             if snapshot.sampleCount == 0 {
-                return "Tracking will start as soon as GPS provides the first fix."
+                return String(localized: "Tracking will start as soon as GPS provides the first fix.")
             }
-            return "Last update \(snapshot.latestDate.formatted(date: .omitted, time: .shortened))"
+            return String(localized: "Last update \(snapshot.latestDate.formatted(date: .omitted, time: .shortened))")
         case .sample(_, let sampleCount, _):
             if sampleCount == 1 {
-                return "1 location sample captured"
+                return String(localized: "1 location sample captured")
             }
-            return "\(sampleCount) location samples captured"
+            return String(localized: "\(sampleCount) location samples captured")
         default:
             return nil
         }
+    }
+
+    private static func placeTitle(_ place: VisitPlace) -> String {
+        let known = place.knownPlace?.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !known.isEmpty {
+            return known
+        }
+        return place.displayTitle
     }
 
     private static func averageSpeedText(for segment: MoveSegment) -> String? {

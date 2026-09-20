@@ -41,6 +41,8 @@ final class MovesRootController: ObservableObject {
     @Published var shouldOpenToday = false
     @Published var requestedPlaceID: UUID?
     @Published var requestedJumpDate: Date?
+    /// When set, the Timeline tab locates this instant and highlights the row.
+    @Published var requestedJumpMoment: Date?
 
     /// Honors `MOVES_START_TAB` so agents can screenshot a destination without tapping.
     private static func initialTab() -> MovesTab {
@@ -71,7 +73,7 @@ struct MovesRootView: View {
     var body: some View {
         TabView(selection: $controller.selectedTab) {
             Tab("Timeline", systemImage: "calendar", value: MovesTab.timeline) {
-                ContentView()
+                TimelineTabView()
             }
 
             Tab("Map", systemImage: "map", value: MovesTab.map) {
@@ -102,8 +104,11 @@ struct MovesRootView: View {
             }
         }
         .environmentObject(controller)
+        // WS2 injects `.environment(\.timelineItemActions, editController)` and
+        // `.environment(\.timelineEditController, editController)` here.
         .onAppear {
             modelContext.undoManager = undoController.manager
+            applyLaunchJumpIfNeeded()
         }
         .sheet(isPresented: $controller.isShowingSettings) {
             MovesSettingsView(
@@ -126,10 +131,15 @@ struct MovesRootView: View {
         .sheet(isPresented: $controller.isShowingDatePicker) {
             MovesJumpToDateView(
                 dayTimelines: dayTimelines,
-                selectedDate: selectedDay?.dayStart ?? .now,
+                selectedDate: selectedDay?.dayStart ?? controller.requestedJumpMoment ?? .now,
                 onSelectDate: { date in
                     controller.requestedJumpDate = date
                 },
+                onSelectMoment: { date in
+                    controller.requestedJumpDate = date
+                    controller.requestedJumpMoment = date
+                },
+                includesTime: true,
                 onDismiss: { controller.isShowingDatePicker = false }
             )
         }
@@ -144,6 +154,17 @@ struct MovesRootView: View {
         }
     }
 
+    /// `MOVES_JUMP_DATE` lets screenshot agents open a specific day without tapping.
+    private func applyLaunchJumpIfNeeded() {
+        guard let raw = ProcessInfo.processInfo.environment["MOVES_JUMP_DATE"],
+              let date = TimelineDeepLink.parseTimestamp(raw) else { return }
+        controller.selectedTab = .timeline
+        controller.requestedJumpDate = date
+        if raw.contains("T") {
+            controller.requestedJumpMoment = date
+        }
+    }
+
     private func handleDeepLink(_ url: URL) {
         guard url.scheme?.lowercased() == "moves" else { return }
 
@@ -151,6 +172,11 @@ struct MovesRootView: View {
         case "today":
             controller.selectedTab = .timeline
             controller.shouldOpenToday = true
+        case "at":
+            guard let moment = TimelineDeepLink.moment(from: url) else { return }
+            controller.selectedTab = .timeline
+            controller.requestedJumpDate = moment
+            controller.requestedJumpMoment = moment
         case "tracking":
             controller.selectedTab = .timeline
             controller.isShowingRouteTrackingSettings = true
