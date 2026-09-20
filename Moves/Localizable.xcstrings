@@ -878,6 +878,66 @@
     },
     "Merge with next" : {
 
+    },
+    "This week" : {
+
+    },
+    "Last week" : {
+
+    },
+    "This month" : {
+
+    },
+    "Last month" : {
+
+    },
+    "This year" : {
+
+    },
+    "Presets" : {
+
+    },
+    "Custom" : {
+
+    },
+    "Apply" : {
+
+    },
+    "Map range" : {
+
+    },
+    "Previous range" : {
+
+    },
+    "Next range" : {
+
+    },
+    "Choose a day, week, month, or year" : {
+
+    },
+    "Share" : {
+
+    },
+    "Routes" : {
+
+    },
+    "Heat" : {
+
+    },
+    "Fog" : {
+
+    },
+    "Map layers" : {
+
+    },
+    "How you moved" : {
+
+    },
+    "Time range" : {
+
+    },
+    "Open in Timeline" : {
+
     }
   },
   "version" : "1.2"

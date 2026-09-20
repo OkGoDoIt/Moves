@@ -9,6 +9,29 @@ struct ShareMapAggregateTrack {
     let id: UUID
     let transportMode: TransportMode
     let coordinates: [CLLocationCoordinate2D]
+    /// Calendar day containing the move, used by the Map tab histogram and filters.
+    let dayStart: Date
+    let startDate: Date
+    let endDate: Date
+    let distanceMeters: CLLocationDistance
+
+    init(
+        id: UUID,
+        transportMode: TransportMode,
+        coordinates: [CLLocationCoordinate2D],
+        dayStart: Date = .distantPast,
+        startDate: Date = .distantPast,
+        endDate: Date = .distantPast,
+        distanceMeters: CLLocationDistance = 0
+    ) {
+        self.id = id
+        self.transportMode = transportMode
+        self.coordinates = coordinates
+        self.dayStart = dayStart
+        self.startDate = startDate
+        self.endDate = endDate
+        self.distanceMeters = distanceMeters
+    }
 }
 
 @Model
@@ -43,6 +66,49 @@ enum ShareMapAggregateStore {
         let id: UUID
         let transportModeRawValue: String
         let coordinatesData: Data
+        let dayStart: Date?
+        let startDate: Date?
+        let endDate: Date?
+        let distanceMeters: Double?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case transportModeRawValue
+            case coordinatesData
+            case dayStart
+            case startDate
+            case endDate
+            case distanceMeters
+        }
+
+        init(
+            id: UUID,
+            transportModeRawValue: String,
+            coordinatesData: Data,
+            dayStart: Date?,
+            startDate: Date?,
+            endDate: Date?,
+            distanceMeters: Double?
+        ) {
+            self.id = id
+            self.transportModeRawValue = transportModeRawValue
+            self.coordinatesData = coordinatesData
+            self.dayStart = dayStart
+            self.startDate = startDate
+            self.endDate = endDate
+            self.distanceMeters = distanceMeters
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            id = try container.decode(UUID.self, forKey: .id)
+            transportModeRawValue = try container.decode(String.self, forKey: .transportModeRawValue)
+            coordinatesData = try container.decode(Data.self, forKey: .coordinatesData)
+            dayStart = try container.decodeIfPresent(Date.self, forKey: .dayStart)
+            startDate = try container.decodeIfPresent(Date.self, forKey: .startDate)
+            endDate = try container.decodeIfPresent(Date.self, forKey: .endDate)
+            distanceMeters = try container.decodeIfPresent(Double.self, forKey: .distanceMeters)
+        }
     }
 
     static func supports(_ period: MovesSharePeriod) -> Bool {
@@ -97,9 +163,10 @@ enum ShareMapAggregateStore {
                 return [day.dayKey, moveSignature, placeSignature].joined(separator: "|")
             }
             .joined(separator: ";")
-        return SHA256.hash(data: Data(source.utf8))
+        let digest = SHA256.hash(data: Data(source.utf8))
             .map { String(format: "%02x", $0) }
             .joined()
+        return "tracks-v2:" + digest
     }
 
     static func cachedTracks(
@@ -127,7 +194,11 @@ enum ShareMapAggregateStore {
             StoredTrack(
                 id: $0.id,
                 transportModeRawValue: $0.transportMode.rawValue,
-                coordinatesData: RouteCoordinateStorage.encode($0.coordinates) ?? Data()
+                coordinatesData: RouteCoordinateStorage.encode($0.coordinates) ?? Data(),
+                dayStart: $0.dayStart,
+                startDate: $0.startDate,
+                endDate: $0.endDate,
+                distanceMeters: $0.distanceMeters
             )
         }
         let encoder = PropertyListEncoder()
@@ -145,7 +216,11 @@ enum ShareMapAggregateStore {
             return ShareMapAggregateTrack(
                 id: track.id,
                 transportMode: TransportMode(rawValue: track.transportModeRawValue) ?? .unknown,
-                coordinates: coordinates
+                coordinates: coordinates,
+                dayStart: track.dayStart ?? .distantPast,
+                startDate: track.startDate ?? .distantPast,
+                endDate: track.endDate ?? .distantPast,
+                distanceMeters: track.distanceMeters ?? 0
             )
         }
     }
@@ -254,10 +329,16 @@ enum ShareMapAggregateBuilder {
                     ?? move.cachedRouteCoordinates(for: routeSignature)
                     ?? fallback
                 guard coordinates.count > 1 else { return nil }
+                let dayStart = move.dayTimeline?.dayStart
+                    ?? Calendar.autoupdatingCurrent.startOfDay(for: move.startDate)
                 return ShareMapAggregateTrack(
                     id: move.id,
                     transportMode: move.transportMode,
-                    coordinates: downsampled(coordinates, maximumCount: maximumCoordinateCount)
+                    coordinates: downsampled(coordinates, maximumCount: maximumCoordinateCount),
+                    dayStart: dayStart,
+                    startDate: move.startDate,
+                    endDate: move.endDate,
+                    distanceMeters: move.distanceMeters
                 )
             }
         try Task.checkCancellation()
