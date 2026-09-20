@@ -422,7 +422,28 @@ struct InsightsTabView: View {
     private func openTripsListIfRequested() {
         guard rootController.shouldOpenTripsList else { return }
         rootController.shouldOpenTripsList = false
+        if ProcessInfo.processInfo.environment["MOVES_OPEN_TRIPS"] == "1" {
+            Task { @MainActor in
+                await waitForSeededDays()
+                _ = TripRangeStats.ensureScreenshotTrip(
+                    covering: MapRangeSelection.today().focus,
+                    in: modelContext,
+                    calendar: calendar
+                )
+                path.append(InsightsRoute.trips)
+            }
+            return
+        }
         path.append(InsightsRoute.trips)
+    }
+
+    private func waitForSeededDays() async {
+        for _ in 0..<60 {
+            if dayTimelines.contains(where: { !$0.places.isEmpty || !$0.moves.isEmpty }) {
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(500))
+        }
     }
 
     private func periodTitle(_ period: InsightsPeriod) -> String {

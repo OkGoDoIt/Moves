@@ -114,6 +114,33 @@ enum TripRangeStats {
         PhotoAttachmentQuery.coverPhoto(from: photos)
     }
 
+    /// Screenshot agents reuse or save one trip covering `interval`.
+    @MainActor
+    static func ensureScreenshotTrip(
+        covering interval: DateInterval,
+        in context: ModelContext,
+        calendar: Calendar,
+        notes: String = String(localized: "Saved from the Map range.")
+    ) -> NamedTrip {
+        let existing = (try? context.fetch(FetchDescriptor<NamedTrip>())) ?? []
+        if let match = existing.first(where: {
+            abs($0.startDate.timeIntervalSince(interval.start)) < 2
+                && abs($0.endDate.timeIntervalSince(interval.end)) < 2
+        }) {
+            return match
+        }
+        let visits = (try? SwiftDataTimelineRepository(modelContext: context).visits(in: interval)) ?? []
+        let trip = NamedTrip(
+            name: defaultName(visits: visits, interval: interval, calendar: calendar),
+            startDate: interval.start,
+            endDate: interval.end,
+            notes: notes
+        )
+        context.insert(trip)
+        try? context.save()
+        return trip
+    }
+
     static func summary(
         for trip: NamedTrip,
         in context: ModelContext

@@ -413,24 +413,11 @@ struct MapTabView: View {
 
     /// Reuses an existing trip covering the current range, or saves one for screenshots.
     private func ensureScreenshotTrip() -> NamedTrip {
-        let interval = selection.focus
-        let existing = (try? modelContext.fetch(FetchDescriptor<NamedTrip>())) ?? []
-        if let match = existing.first(where: {
-            abs($0.startDate.timeIntervalSince(interval.start)) < 2
-                && abs($0.endDate.timeIntervalSince(interval.end)) < 2
-        }) {
-            return match
-        }
-        let visits = (try? SwiftDataTimelineRepository(modelContext: modelContext).visits(in: interval)) ?? []
-        let trip = NamedTrip(
-            name: TripRangeStats.defaultName(visits: visits, interval: interval, calendar: calendar),
-            startDate: interval.start,
-            endDate: interval.end,
-            notes: String(localized: "Saved from the Map range.")
+        TripRangeStats.ensureScreenshotTrip(
+            covering: selection.focus,
+            in: modelContext,
+            calendar: calendar
         )
-        modelContext.insert(trip)
-        try? modelContext.save()
-        return trip
     }
 }
 

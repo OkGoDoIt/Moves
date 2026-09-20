@@ -68,6 +68,16 @@ struct MovesSettingsView: View {
             .min()
     }
 
+    /// `MOVES_OPEN_GOOGLE_IMPORT=1` scrolls so the folder-first Google Timeline row is on screen.
+    private func scrollToScreenshotAnchorIfNeeded(_ proxy: ScrollViewProxy) {
+        guard ProcessInfo.processInfo.environment["MOVES_OPEN_GOOGLE_IMPORT"] == "1" else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            withAnimation(.easeInOut(duration: 0.25)) {
+                proxy.scrollTo(SettingsScreenshotAnchor.importCard, anchor: .top)
+            }
+        }
+    }
+
     private var dailyICloudBackupSettings: some View {
         SettingsCard(title: "Daily iCloud Drive Backup") {
             Toggle("Back up yesterday every night", isOn: $dailyBackupIsEnabled)
@@ -116,6 +126,7 @@ struct MovesSettingsView: View {
 
     var body: some View {
         NavigationStack {
+            ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 14) {
                     SettingsCard(title: "Map Appearance") {
@@ -273,6 +284,7 @@ struct MovesSettingsView: View {
                             .font(.system(size: 12, weight: .medium, design: .rounded))
                             .foregroundStyle(.secondary)
                     }
+                    .id(SettingsScreenshotAnchor.importCard)
 
                     PhotosSettingsCard(firstRecordedDayStart: firstProtectedDayStart)
 
@@ -319,7 +331,6 @@ struct MovesSettingsView: View {
                 )
                 .ignoresSafeArea()
             }
-
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -328,6 +339,10 @@ struct MovesSettingsView: View {
                         dismiss()
                     }
                 }
+            }
+            .onAppear {
+                scrollToScreenshotAnchorIfNeeded(proxy)
+            }
             }
         }
 
@@ -1220,4 +1235,9 @@ private struct RouteTrackingSettingsSection: View {
             Text("Moves needs notification permission to send a stop alert. You can allow it in Settings.")
         }
     }
+}
+
+/// Screenshot-agent scroll target for Settings → Import.
+private enum SettingsScreenshotAnchor {
+    static let importCard = "settings.import"
 }
