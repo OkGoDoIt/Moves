@@ -3,6 +3,7 @@ import Combine
 import CoreLocation
 import CoreMotion
 import MapKit
+import os
 import SwiftData
 import UserNotifications
 import UIKit
@@ -100,6 +101,15 @@ enum TemporaryRouteTrackingStopNotificationPermissionResult: Equatable {
 protocol MotionClassifier {
     func classifyTransport(start: Date, end: Date, locations: [CLLocation]) async -> TransportMode
     func stepCount(start: Date, end: Date) async -> Int?
+    /// True when the minutes before `date` include a vehicle ride.
+    func approachWasAutomotive(before date: Date) async -> Bool
+    /// True when the last few minutes are on foot and not in a vehicle.
+    func recentlyWalking(at date: Date) async -> Bool
+}
+
+extension MotionClassifier {
+    func approachWasAutomotive(before date: Date) async -> Bool { false }
+    func recentlyWalking(at date: Date) async -> Bool { false }
 }
 
 protocol PlaceNameResolver {
@@ -110,6 +120,9 @@ protocol PlaceNameResolver {
 protocol TimelineAssembler {
     func ingestVisit(_ visit: CLVisit) async
     func ingestLocations(_ locations: [CLLocation], source: LocationSampleSource) async
+    func reconcileSampleStays() async
+    func approachWasAutomotive(before date: Date) async -> Bool
+    func recentlyWalking(at date: Date) async -> Bool
 }
 
 final class CoreMotionTransportClassifier: MotionClassifier {
@@ -137,12 +150,60 @@ final class CoreMotionTransportClassifier: MotionClassifier {
 
             if let best = scores.max(by: { $0.value < $1.value })?.key {
                 let corrected = correctedModeIfNeeded(best, fallback: fallback, locations: locations)
-                return refinedLongDistanceMode(for: corrected, fallback: fallback, locations: locations)
+                let refined = refinedLongDistanceMode(for: corrected, fallback: fallback, locations: locations)
+                return Self.rejectingImplausibleContinuousTrip(
+                    refined,
+                    duration: end.timeIntervalSince(start),
+                    straightLineDistance: Self.straightLineDistance(for: locations)
+                )
             }
         }
 
         let corrected = correctedModeIfNeeded(fallback, fallback: fallback, locations: locations)
-        return refinedLongDistanceMode(for: corrected, fallback: fallback, locations: locations)
+        let refined = refinedLongDistanceMode(for: corrected, fallback: fallback, locations: locations)
+        return Self.rejectingImplausibleContinuousTrip(
+            refined,
+            duration: end.timeIntervalSince(start),
+            straightLineDistance: Self.straightLineDistance(for: locations)
+        )
+    }
+
+    func approachWasAutomotive(before date: Date) async -> Bool {
+        guard CMMotionActivityManager.isActivityAvailable() else { return false }
+        let start = date.addingTimeInterval(-12 * 60)
+        guard let activities = await queryActivities(from: start, to: date) else { return false }
+        return activities.contains { $0.automotive && $0.confidence != .low }
+    }
+
+    func recentlyWalking(at date: Date) async -> Bool {
+        guard CMMotionActivityManager.isActivityAvailable() else { return false }
+        let start = date.addingTimeInterval(-5 * 60)
+        guard let activities = await queryActivities(from: start, to: date), !activities.isEmpty else {
+            return false
+        }
+        let onFoot = activities.contains { ($0.walking || $0.running) && $0.confidence != .low }
+        let riding = activities.contains { $0.automotive && $0.confidence != .low }
+        return onFoot && !riding
+    }
+
+    /// A multi-hour "walk" whose ends are a short distance apart is time spent
+    /// stopped, not a single trip. Visit monitoring sometimes never closes the
+    /// gap; calling that walking is how a day at home becomes a 36-hour hike.
+    static func rejectingImplausibleContinuousTrip(
+        _ mode: TransportMode,
+        duration: TimeInterval,
+        straightLineDistance: CLLocationDistance
+    ) -> TransportMode {
+        guard duration >= 6 * 60 * 60 else { return mode }
+        switch mode {
+        case .walking, .running, .cycling:
+            break
+        case .automotive, .train, .plane, .boat, .swimming, .stationary, .unknown:
+            return mode
+        }
+        let speed = straightLineDistance / duration
+        guard speed < 0.25 else { return mode }
+        return .unknown
     }
 
     func stepCount(start: Date, end: Date) async -> Int? {
@@ -381,9 +442,14 @@ actor CLGeocoderPlaceNameResolver: PlaceNameResolver {
 
 @MainActor
 final class DefaultTimelineAssembler: TimelineAssembler {
+    private static let timelineLog = Logger(subsystem: MovesAppIdentity.bundleIdentifier, category: "Timeline")
+
     private let repository: TimelineRepository
     private let motionClassifier: MotionClassifier
     private let placeNameResolver: PlaceNameResolver
+    /// One rebuild at a time. Location callbacks and foreground refresh overlap.
+    private var reconcileTask: Task<Void, Never>?
+    private var reconcileAgain = false
 
     init(
         repository: TimelineRepository,
@@ -404,137 +470,112 @@ final class DefaultTimelineAssembler: TimelineAssembler {
         } catch {
             print("Failed to persist location samples: \(error.localizedDescription)")
         }
+
+        await reconcileSampleStays()
     }
 
     func ingestVisit(_ visit: CLVisit) async {
+        // A kilometre-wide visit fix is a cell tower, not a place. The sample
+        // is already stored; stays are built from the fixes that are actually
+        // near the person.
+        guard visit.horizontalAccuracy <= 300 else {
+            Self.timelineLog.info("Skipped a visit whose accuracy was \(Int(visit.horizontalAccuracy)) m")
+            await reconcileSampleStays()
+            return
+        }
+
         do {
             let visitPlace = try repository.addOrUpdateVisit(from: visit)
             await fillAutomaticPlaceLabelIfNeeded(for: visitPlace)
-
-            let normalizedArrival = visitPlace.arrivalDate
-            guard
-                let previousPlace = try repository.latestPlace(
-                    before: normalizedArrival,
-                    excluding: visitPlace.id
-                )
-            else {
-                try repository.saveIfNeeded()
-                return
-            }
-
-            let endDate = normalizedArrival
-
-            if previousPlace.departureDate == nil {
-                let candidateSamples = try repository.samples(from: previousPlace.arrivalDate, to: endDate)
-                previousPlace.departureDate = inferredDepartureDate(
-                    for: previousPlace,
-                    endDate: endDate,
-                    samples: candidateSamples
-                )
-            }
-
-            let candidateStartDate = previousPlace.departureDate ?? previousPlace.arrivalDate
-            let startDate = min(max(candidateStartDate, previousPlace.arrivalDate), endDate)
-
-            guard endDate.timeIntervalSince(startDate) > 60 else {
-                try repository.saveIfNeeded()
-                return
-            }
-
-            let betweenSamples = try repository.samples(from: startDate, to: endDate)
-            let movementLocations = movementLocations(
-                startPlace: previousPlace,
-                endPlace: visitPlace,
-                startDate: startDate,
-                endDate: endDate,
-                samples: betweenSamples
-            )
-
-            let transportMode = await motionClassifier.classifyTransport(
-                start: startDate,
-                end: endDate,
-                locations: movementLocations
-            )
-            let steps = await motionClassifier.stepCount(start: startDate, end: endDate)
-            let totalDistance = Self.totalDistance(for: movementLocations)
-
-            _ = try repository.upsertMove(
-                startPlace: previousPlace,
-                endPlace: visitPlace,
-                startDate: startDate,
-                endDate: endDate,
-                transportMode: transportMode,
-                distanceMeters: totalDistance,
-                stepCount: steps,
-                samples: betweenSamples
-            )
-
             try repository.saveIfNeeded()
         } catch {
             print("Failed to build timeline segment: \(error.localizedDescription)")
         }
+
+        await reconcileSampleStays()
     }
 
-    private func movementLocations(
-        startPlace: VisitPlace,
-        endPlace: VisitPlace,
-        startDate: Date,
-        endDate: Date,
-        samples: [LocationSample]
-    ) -> [CLLocation] {
-        let orderedSamples = samples
-            .sorted(by: { $0.timestamp < $1.timestamp })
-            .map(\.asLocation)
-
-        let start = CLLocation(
-            coordinate: startPlace.coordinate,
-            altitude: 0,
-            horizontalAccuracy: max(startPlace.horizontalAccuracy, 20),
-            verticalAccuracy: -1,
-            course: -1,
-            speed: -1,
-            timestamp: startDate
-        )
-
-        let end = CLLocation(
-            coordinate: endPlace.coordinate,
-            altitude: 0,
-            horizontalAccuracy: max(endPlace.horizontalAccuracy, 20),
-            verticalAccuracy: -1,
-            course: -1,
-            speed: -1,
-            timestamp: endDate
-        )
-
-        return [start] + orderedSamples + [end]
+    func approachWasAutomotive(before date: Date) async -> Bool {
+        await motionClassifier.approachWasAutomotive(before: date)
     }
 
-    private static func totalDistance(for locations: [CLLocation]) -> CLLocationDistance {
-        guard locations.count > 1 else { return 0 }
+    func recentlyWalking(at date: Date) async -> Bool {
+        await motionClassifier.recentlyWalking(at: date)
+    }
 
-        return zip(locations, locations.dropFirst()).reduce(0) { partialResult, pair in
-            partialResult + pair.0.distance(from: pair.1)
+    /// Rebuilds stops from the fixes already on disk, then classifies each new trip.
+    ///
+    /// Called after every batch of fixes and whenever the app comes forward.
+    /// The work is local and, once a trip has a mode, later passes leave it.
+    func reconcileSampleStays() async {
+        if reconcileTask != nil {
+            reconcileAgain = true
+            await reconcileTask?.value
+            return
+        }
+
+        let task = Task { @MainActor in
+            await self.performSampleStayReconciliation()
+        }
+        reconcileTask = task
+        await task.value
+        reconcileTask = nil
+
+        if reconcileAgain {
+            reconcileAgain = false
+            await reconcileSampleStays()
         }
     }
 
-    private func inferredDepartureDate(
-        for place: VisitPlace,
-        endDate: Date,
-        samples: [LocationSample]
-    ) -> Date {
-        let sortedSamples = samples.sorted(by: { $0.timestamp < $1.timestamp })
-        let departureRadius = max(place.horizontalAccuracy * 1.8, 80)
+    private func performSampleStayReconciliation() async {
+        do {
+            let result = try repository.reconcileSampleStays(now: .now)
 
-        if let firstAwaySample = sortedSamples.first(where: { sample in
-            guard sample.timestamp >= place.arrivalDate else { return false }
-            let sampleLocation = sample.asLocation
-            let placeLocation = CLLocation(latitude: place.latitude, longitude: place.longitude)
-            return sampleLocation.distance(from: placeLocation) >= departureRadius
-        }) {
-            return min(firstAwaySample.timestamp, endDate)
+            for leg in result.moveLegs {
+                let proposed = await motionClassifier.classifyTransport(
+                    start: leg.startDate,
+                    end: leg.endDate,
+                    locations: leg.locations
+                )
+                let steps = await motionClassifier.stepCount(start: leg.startDate, end: leg.endDate)
+                let straightLine = CLLocation(
+                    latitude: leg.startPlace.latitude,
+                    longitude: leg.startPlace.longitude
+                ).distance(from: CLLocation(
+                    latitude: leg.endPlace.latitude,
+                    longitude: leg.endPlace.longitude
+                ))
+                let transportMode = LastBlockWalk.mode(
+                    proposed: proposed,
+                    distance: straightLine,
+                    duration: leg.endDate.timeIntervalSince(leg.startDate),
+                    stepCount: steps
+                )
+                let between = try repository.samples(from: leg.startDate, to: leg.endDate)
+                _ = try repository.upsertMove(
+                    startPlace: leg.startPlace,
+                    endPlace: leg.endPlace,
+                    startDate: leg.startDate,
+                    endDate: leg.endDate,
+                    transportMode: transportMode,
+                    distanceMeters: leg.distanceMeters,
+                    stepCount: steps,
+                    samples: between
+                )
+            }
+
+            for place in result.newPlaces.prefix(8) {
+                await fillAutomaticPlaceLabelIfNeeded(for: place)
+            }
+
+            if !result.newPlaces.isEmpty || !result.moveLegs.isEmpty {
+                Self.timelineLog.info(
+                    "Rebuilt \(result.newPlaces.count) stops and \(result.moveLegs.count) trips from stored fixes"
+                )
+            }
+        } catch {
+            Self.timelineLog.error("Failed to rebuild stops from fixes: \(error.localizedDescription, privacy: .public)")
         }
-
-        return endDate
     }
 
     private func fillAutomaticPlaceLabelIfNeeded(for place: VisitPlace) async {
@@ -583,6 +624,12 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
     private var shouldChainToAlwaysAfterWhenInUse = false
     private var isHighAccuracyMonitoring = false
     private var temporaryRouteTrackingExpiryTask: Task<Void, Never>?
+    /// When the short post-ride / departure fix burst should stop.
+    private var lastMileEndsAt: Date?
+    /// When the current burst began, so a hike cannot chain bursts into all-day GPS.
+    private var lastMileStartedAt: Date?
+    private var lastMileExpiryTask: Task<Void, Never>?
+    private var lastMileRecentLocations: [CLLocation] = []
     private var temporaryRouteTrackingEnergyStateObserverTokens: [NSObjectProtocol] = []
 
     private enum TemporaryRouteTrackingStorageKey {
@@ -604,6 +651,12 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
     private static let lowPowerDistanceFilter: CLLocationDistance = 150
     private static let highAccuracyDesiredAccuracy = kCLLocationAccuracyBestForNavigation
     private static let highAccuracyDistanceFilter: CLLocationDistance = 10
+    /// Ten-metre fixes for a few minutes. Enough to draw a walk off a bus,
+    /// far cheaper than navigation-grade GPS left on all day.
+    private static let lastMileDesiredAccuracy = kCLLocationAccuracyNearestTenMeters
+    private static let lastMileDistanceFilter: CLLocationDistance = 20
+    private static let lastMileDuration: TimeInterval = 10 * 60
+    private static let lastMileMaximumDuration: TimeInterval = 12 * 60
 
     private var shouldSkipLiveTracking: Bool {
         isDemoMode || ProcessInfo.processInfo.isRunningUnitTests
@@ -748,8 +801,10 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         guard isAuthorizedForTracking else { return }
 
         // iOS does not expose requestHistoricalLocations for third-party apps.
-        // We ask for one current fix on launch/foreground to bridge short gaps.
+        // One current fix bridges a short silence, and the fixes already stored
+        // are re-read so a missed visit does not stay a single multi-hour trip.
         requestOneShotLocation(source: .launchBackfill)
+        await assembler.reconcileSampleStays()
     }
 
     func enableTemporaryRouteTracking(duration: TemporaryRouteTrackingDuration) {
@@ -915,11 +970,25 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         let shouldUseHighAccuracy = isTemporaryRouteTrackingActive
         if shouldUseHighAccuracy {
             manager.stopMonitoringSignificantLocationChanges()
+            manager.activityType = .otherNavigation
             manager.desiredAccuracy = Self.highAccuracyDesiredAccuracy
             manager.distanceFilter = Self.highAccuracyDistanceFilter
             manager.pausesLocationUpdatesAutomatically = false
             manager.showsBackgroundLocationIndicator = authorizationStatus == .authorizedAlways
 
+            if !isHighAccuracyMonitoring {
+                manager.startUpdatingLocation()
+                isHighAccuracyMonitoring = true
+            }
+        } else if isLastMileActive {
+            // Visits stay on so a real stop still closes. Continuous fixes are
+            // only for this short walk, at pedestrian accuracy.
+            manager.stopMonitoringSignificantLocationChanges()
+            manager.activityType = .fitness
+            manager.desiredAccuracy = Self.lastMileDesiredAccuracy
+            manager.distanceFilter = Self.lastMileDistanceFilter
+            manager.pausesLocationUpdatesAutomatically = true
+            manager.showsBackgroundLocationIndicator = authorizationStatus == .authorizedAlways
             if !isHighAccuracyMonitoring {
                 manager.startUpdatingLocation()
                 isHighAccuracyMonitoring = true
@@ -934,10 +1003,94 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
             }
             manager.stopUpdatingLocation()
             isHighAccuracyMonitoring = false
+            manager.activityType = .otherNavigation
             manager.desiredAccuracy = Self.lowPowerDesiredAccuracy
             manager.distanceFilter = Self.lowPowerDistanceFilter
             manager.pausesLocationUpdatesAutomatically = true
             manager.showsBackgroundLocationIndicator = false
+        }
+    }
+
+    /// Records the walk off a bus, or the first minutes after leaving on foot.
+    ///
+    /// Significant-change updates are about 500 metres apart, so the last
+    /// couple of blocks never arrive. A ten-minute pedestrian session covers
+    /// that without leaving navigation GPS on for the rest of the day.
+    private func startLastMileTracking() {
+        guard !shouldSkipLiveTracking else { return }
+        guard !isTemporaryRouteTrackingActive else { return }
+        guard isAuthorizedForTracking else { return }
+        guard isBackgroundLocationListeningEnabled else { return }
+
+        let now = Date.now
+        if lastMileStartedAt == nil {
+            lastMileStartedAt = now
+        }
+        guard let startedAt = lastMileStartedAt else { return }
+        let cap = startedAt.addingTimeInterval(Self.lastMileMaximumDuration)
+        guard now < cap else { return }
+
+        lastMileEndsAt = min(now.addingTimeInterval(Self.lastMileDuration), cap)
+        scheduleLastMileExpiry()
+        applyTrackingConfiguration()
+    }
+
+    private var isLastMileActive: Bool {
+        guard let lastMileEndsAt else { return false }
+        return lastMileEndsAt > .now
+    }
+
+    private func scheduleLastMileExpiry() {
+        lastMileExpiryTask?.cancel()
+        guard let endsAt = lastMileEndsAt else { return }
+        let seconds = endsAt.timeIntervalSinceNow
+        guard seconds > 0 else {
+            expireLastMile()
+            return
+        }
+        let nanoseconds = UInt64((seconds * 1_000_000_000).rounded())
+        lastMileExpiryTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            await MainActor.run {
+                guard let self, self.lastMileEndsAt == endsAt else { return }
+                self.expireLastMile()
+            }
+        }
+    }
+
+    private func expireLastMile() {
+        guard lastMileEndsAt != nil else { return }
+        lastMileEndsAt = nil
+        lastMileStartedAt = nil
+        lastMileRecentLocations.removeAll()
+        lastMileExpiryTask?.cancel()
+        lastMileExpiryTask = nil
+        applyTrackingConfiguration()
+    }
+
+    /// Ends the burst once the walk has clearly stopped, so sitting down does
+    /// not keep the radio on for the full ten minutes.
+    private func stopLastMileIfSettled(_ locations: [CLLocation]) {
+        guard isLastMileActive else { return }
+        lastMileRecentLocations.append(contentsOf: locations)
+        if lastMileRecentLocations.count > 16 {
+            lastMileRecentLocations.removeFirst(lastMileRecentLocations.count - 16)
+        }
+        guard let newest = lastMileRecentLocations.last,
+              let origin = lastMileRecentLocations.first
+        else { return }
+
+        let hasMoved = lastMileRecentLocations.contains { $0.distance(from: origin) > 40 }
+        guard hasMoved else { return }
+        guard let settledSince = lastMileRecentLocations.first(where: {
+            newest.timestamp.timeIntervalSince($0.timestamp) >= 90
+        }) else { return }
+
+        let settled = lastMileRecentLocations
+            .filter { $0.timestamp >= settledSince.timestamp }
+            .allSatisfy { $0.distance(from: newest) <= 30 }
+        if settled {
+            expireLastMile()
         }
     }
 
@@ -950,7 +1103,7 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
 
     private func updateBackgroundLocationAllowance() {
         manager.allowsBackgroundLocationUpdates = authorizationStatus == .authorizedAlways
-            && (isBackgroundLocationListeningEnabled || isTemporaryRouteTrackingActive)
+            && (isBackgroundLocationListeningEnabled || isTemporaryRouteTrackingActive || isLastMileActive)
     }
 
     private func restoreBackgroundLocationListeningState() {
@@ -1275,6 +1428,11 @@ extension MovesLocationCaptureManager: @preconcurrency CLLocationManagerDelegate
         Task {
             await assembler.ingestLocations([visitLocation], source: .visit)
             await assembler.ingestVisit(visit)
+            // Getting off a bus is a visit. The walk to the door happens in
+            // the next few minutes, and significant-change will not see it.
+            if await assembler.approachWasAutomotive(before: visitTimestamp) {
+                startLastMileTracking()
+            }
         }
     }
 
@@ -1285,11 +1443,22 @@ extension MovesLocationCaptureManager: @preconcurrency CLLocationManagerDelegate
 
         guard pendingOneShotLocationSource != nil
             || isTemporaryRouteTrackingActive
+            || isLastMileActive
             || isBackgroundLocationListeningEnabled
         else { return }
 
+        let idleFor = lastCaptureAt.map { Date.now.timeIntervalSince($0) }
         lastCaptureAt = .now
-        let source: LocationSampleSource = pendingOneShotLocationSource ?? (isTemporaryRouteTrackingActive ? .routeTracking : .significantChange)
+        let source: LocationSampleSource
+        if let pendingOneShotLocationSource {
+            source = pendingOneShotLocationSource
+        } else if isTemporaryRouteTrackingActive {
+            source = .routeTracking
+        } else if isLastMileActive {
+            source = .lastMile
+        } else {
+            source = .significantChange
+        }
         pendingOneShotLocationSource = nil
 
         Task {
@@ -1300,6 +1469,17 @@ extension MovesLocationCaptureManager: @preconcurrency CLLocationManagerDelegate
                 )
             }
             await assembler.ingestLocations(locations, source: source)
+            // Left somewhere on foot after a long pause. Catch the rest of
+            // the walk; a ride keeps the cheaper significant-change stream.
+            if source == .significantChange,
+               let idleFor, idleFor >= 8 * 60,
+               await assembler.recentlyWalking(at: Date()) {
+                startLastMileTracking()
+            }
+        }
+
+        if source == .lastMile {
+            stopLastMileIfSettled(locations)
         }
     }
 

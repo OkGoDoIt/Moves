@@ -58,6 +58,8 @@ enum LocationSampleSource: String, Codable, CaseIterable {
     case healthWorkoutRoute
     case launchBackfill
     case authorizationGrant
+    /// A short burst of fixes after leaving a vehicle, or setting off on foot.
+    case lastMile
 }
 
 extension LocationSampleSource {
@@ -72,12 +74,13 @@ extension LocationSampleSource {
         case .significantChange: return 2
         case .authorizationGrant: return 1
         case .launchBackfill: return 0
+        case .lastMile: return 4
         }
     }
 
     var isRouteTrack: Bool {
         switch self {
-        case .routeTracking, .watchRouteTracking, .healthWorkoutRoute, .fileRouteImport:
+        case .routeTracking, .watchRouteTracking, .healthWorkoutRoute, .fileRouteImport, .lastMile:
             return true
         case .visit, .significantChange, .watchSignificantChange, .launchBackfill, .authorizationGrant:
             return false
@@ -86,7 +89,7 @@ extension LocationSampleSource {
 
     var preservesRouteResolution: Bool {
         switch self {
-        case .healthWorkoutRoute, .watchRouteTracking, .fileRouteImport:
+        case .healthWorkoutRoute, .watchRouteTracking, .fileRouteImport, .lastMile:
             return true
         case .routeTracking, .visit, .significantChange, .watchSignificantChange, .launchBackfill, .authorizationGrant:
             return false
@@ -402,11 +405,39 @@ final class LocationSample {
     }
 }
 
+/// One trip the stay reconciler could not find an existing move for.
+struct SampleStayMoveLeg {
+    /// Where the trip started.
+    var startPlace: VisitPlace
+    /// Where the trip ended.
+    var endPlace: VisitPlace
+    var startDate: Date
+    var endDate: Date
+    /// Path length of the reliable fixes between the two stops, in metres.
+    var distanceMeters: Double
+    /// Fixes the transport classifier should see, including the stop endpoints.
+    var locations: [CLLocation]
+}
+
+/// What `reconcileSampleStays` changed, so the assembler can name new stops
+/// and classify the trips it just opened.
+struct SampleStayReconciliationResult {
+    var newPlaces: [VisitPlace] = []
+    var moveLegs: [SampleStayMoveLeg] = []
+}
+
 protocol TimelineRepository {
     func addOrUpdateVisit(from visit: CLVisit) throws -> VisitPlace
     func appendSamples(from locations: [CLLocation], source: LocationSampleSource) throws -> [LocationSample]
     func latestPlace(before date: Date, excluding placeID: UUID?) throws -> VisitPlace?
     func samples(from startDate: Date, to endDate: Date) throws -> [LocationSample]
+    /// Rebuilds stops and the automatic trips between them from stored fixes.
+    ///
+    /// Visit monitoring is the only event that used to open and close stays.
+    /// Significant-location fixes were kept, but a missed or early visit left
+    /// one trip covering every hour until the next visit arrived. This pass
+    /// reads those fixes and corrects that.
+    func reconcileSampleStays(now: Date) throws -> SampleStayReconciliationResult
     func upsertMove(
         startPlace: VisitPlace,
         endPlace: VisitPlace,
@@ -1346,6 +1377,498 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         )
 
         return try modelContext.fetch(descriptor)
+    }
+
+    func reconcileSampleStays(now: Date) throws -> SampleStayReconciliationResult {
+        let windowStart = try reconciliationWindowStart(through: now)
+        let storedSamples = try samples(from: windowStart, to: now.addingTimeInterval(60))
+        let points = storedSamples.map { LocationLogPoint(location: $0.asLocation) }
+        let inferred = SampleStayInference.stays(from: points, now: now)
+
+        var places = try placesArriving(from: windowStart.addingTimeInterval(-36 * 60 * 60), through: now)
+        let clamped = inferred.flatMap { split($0, aroundFarPlaces: places) }
+        var newPlaces: [VisitPlace] = []
+
+        for stay in clamped {
+            if let match = matchingPlace(for: stay, among: places, samples: storedSamples) {
+                try extend(match, toCover: stay, among: places)
+            } else {
+                let created = try makePlace(for: stay, among: places)
+                places.append(created)
+                newPlaces.append(created)
+            }
+        }
+
+        places.sort { $0.arrivalDate < $1.arrivalDate }
+        try mergeAdjacentSamePlaceVisits(&places, samples: storedSamples)
+        closeOpenPlacesThatHaveASuccessor(places)
+        // A visit that ends at the exact moment the next one starts has swallowed
+        // the walk between them. Pull the departure back to the last fix that
+        // was still there so the gap becomes a trip.
+        separateLastBlockWalks(places, samples: storedSamples)
+
+        try deleteInconsistentAutomaticMoves(among: places, from: windowStart, through: now)
+        let legs = try moveLegs(among: places, samples: storedSamples, from: windowStart, through: now)
+        let survivingNewPlaces = newPlaces.filter { created in
+            places.contains { $0.id == created.id }
+        }
+
+        try saveIfNeeded()
+        return SampleStayReconciliationResult(newPlaces: survivingNewPlaces, moveLegs: legs)
+    }
+
+    /// How far back to read fixes. A week covers a missed visit that is still
+    /// on screen, without rewriting the whole diary on every launch.
+    private func reconciliationWindowStart(through end: Date) throws -> Date {
+        end.addingTimeInterval(-7 * 24 * 60 * 60)
+    }
+
+    private func placesArriving(from start: Date, through end: Date) throws -> [VisitPlace] {
+        let descriptor = FetchDescriptor<VisitPlace>(
+            predicate: #Predicate { place in
+                place.arrivalDate >= start && place.arrivalDate <= end
+            },
+            sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .forward)]
+        )
+        return try modelContext.fetch(descriptor)
+    }
+
+    /// A comment, a hand-drawn route, or a Health workout is the user's account
+    /// of the trip. Automatic repair must leave it alone.
+    private func isUserCurated(_ move: MoveSegment) -> Bool {
+        if let comment = move.comment?.trimmingCharacters(in: .whitespacesAndNewlines), !comment.isEmpty {
+            return true
+        }
+        if move.manualRouteCoordinatesData != nil {
+            return true
+        }
+        return move.samples.contains { $0.source == .healthWorkoutRoute }
+    }
+
+    private static let stayMatchDistance: CLLocationDistance = 120
+
+    /// Cuts a stop so it does not swallow a visit that fixes put somewhere else.
+    private func split(_ stay: SampleStay, aroundFarPlaces places: [VisitPlace]) -> [SampleStay] {
+        let stayEnd = stay.presenceEnd
+        let blockers = places
+            .filter { Self.distanceMeters(from: stay.coordinate, to: $0.coordinate) > Self.stayMatchDistance }
+            .filter { place in
+                let placeEnd = place.departureDate ?? place.arrivalDate
+                return place.arrivalDate < stayEnd && placeEnd > stay.arrivalDate
+            }
+            .sorted { $0.arrivalDate < $1.arrivalDate }
+
+        guard let blocker = blockers.first else { return [stay] }
+
+        let minimumStay = SampleStayInference.Configuration().minimumStayDuration
+        var pieces: [SampleStay] = []
+        if blocker.arrivalDate.timeIntervalSince(stay.arrivalDate) >= minimumStay {
+            var head = stay
+            head.departureDate = blocker.arrivalDate
+            head.lastInsideDate = min(stay.lastInsideDate, blocker.arrivalDate)
+            pieces.append(head)
+        }
+
+        if let blockerEnd = blocker.departureDate,
+           stayEnd.timeIntervalSince(blockerEnd) >= minimumStay {
+            var tail = stay
+            tail.arrivalDate = blockerEnd
+            tail.lastInsideDate = max(stay.lastInsideDate, blockerEnd)
+            pieces.append(contentsOf: split(tail, aroundFarPlaces: Array(blockers.dropFirst())))
+        }
+        return pieces
+    }
+
+    private func matchingPlace(
+        for stay: SampleStay,
+        among places: [VisitPlace],
+        samples: [LocationSample]
+    ) -> VisitPlace? {
+        places
+            .filter { place in
+                Self.distanceMeters(from: stay.coordinate, to: place.coordinate) <= Self.stayMatchDistance
+                    && !placeSeparates(place, from: stay, samples: samples)
+                    && !anotherPlaceLiesBetween(place, and: stay, among: places)
+            }
+            .min { lhs, rhs in
+                abs(lhs.arrivalDate.timeIntervalSince(stay.arrivalDate))
+                    < abs(rhs.arrivalDate.timeIntervalSince(stay.arrivalDate))
+            }
+    }
+
+    /// True when a same-spot visit and a reconstructed stop are different presences.
+    ///
+    /// A gap with no fix outside the spot is the same stay: significant-location
+    /// delivery goes quiet while the phone is still. A fix that actually left
+    /// keeps them apart.
+    private func placeSeparates(
+        _ place: VisitPlace,
+        from stay: SampleStay,
+        samples: [LocationSample]
+    ) -> Bool {
+        let placeEnd = place.departureDate ?? place.arrivalDate
+        let stayEnd = stay.presenceEnd
+        let gapStart: Date
+        let gapEnd: Date
+        if placeEnd < stay.arrivalDate {
+            gapStart = placeEnd
+            gapEnd = stay.arrivalDate
+        } else if stayEnd < place.arrivalDate {
+            gapStart = stayEnd
+            gapEnd = place.arrivalDate
+        } else {
+            return false
+        }
+
+        let gap = gapEnd.timeIntervalSince(gapStart)
+        if gap <= 3 * 60 * 60 { return false }
+        if gap > 18 * 60 * 60 { return true }
+
+        let centre = stay.coordinate
+        let placeCentre = place.coordinate
+        let left = samples.contains { sample in
+            guard sample.timestamp > gapStart, sample.timestamp < gapEnd else { return false }
+            let fromStay = Self.distanceMeters(from: sample.coordinate, to: centre)
+            let fromPlace = Self.distanceMeters(from: sample.coordinate, to: placeCentre)
+            return fromStay > Self.stayMatchDistance && fromPlace > Self.stayMatchDistance
+        }
+        return left
+    }
+
+    /// A visit somewhere else between this place and this stop means they are
+    /// not the same presence, even if both are at home.
+    private func anotherPlaceLiesBetween(
+        _ place: VisitPlace,
+        and stay: SampleStay,
+        among places: [VisitPlace]
+    ) -> Bool {
+        let start = min(place.arrivalDate, stay.arrivalDate)
+        let end = max(place.departureDate ?? place.arrivalDate, stay.presenceEnd)
+        return places.contains { other in
+            other.id != place.id
+                && other.arrivalDate > start
+                && other.arrivalDate < end
+                && Self.distanceMeters(from: other.coordinate, to: place.coordinate) > Self.stayMatchDistance
+        }
+    }
+
+    private func extend(_ place: VisitPlace, toCover stay: SampleStay, among places: [VisitPlace]) throws {
+        let proposedArrival = min(place.arrivalDate, stay.arrivalDate)
+        place.arrivalDate = clampedArrival(proposedArrival, for: place, among: places)
+
+        let nextDifferent = nextDifferentPlace(after: place, among: places)
+        if let stayEnd = stay.departureDate {
+            var capped = stayEnd
+            if let next = nextDifferent {
+                capped = min(capped, next.arrivalDate)
+            }
+            if capped > place.arrivalDate {
+                if let current = place.departureDate {
+                    if capped > current {
+                        place.departureDate = capped
+                    }
+                } else {
+                    place.departureDate = capped
+                }
+            }
+        } else if let next = nextDifferent, next.arrivalDate > stay.lastInsideDate {
+            if place.departureDate == nil || (place.departureDate ?? .distantFuture) > next.arrivalDate {
+                place.departureDate = min(stay.lastInsideDate, next.arrivalDate)
+            }
+        } else if stay.lastInsideDate > (place.departureDate ?? .distantPast) {
+            place.departureDate = nil
+        }
+
+        place.horizontalAccuracy = min(place.horizontalAccuracy, stay.horizontalAccuracy)
+        place.dayTimeline = try timeline(for: place.arrivalDate)
+    }
+
+    private func makePlace(for stay: SampleStay, among places: [VisitPlace]) throws -> VisitPlace {
+        var departure = stay.departureDate
+        let draft = VisitPlace(
+            arrivalDate: stay.arrivalDate,
+            departureDate: departure,
+            latitude: stay.latitude,
+            longitude: stay.longitude,
+            horizontalAccuracy: max(stay.horizontalAccuracy, 20),
+            userLabel: try inferredUserLabel(near: stay.coordinate)
+        )
+        if departure == nil, let next = nextDifferentPlace(after: draft, among: places), next.arrivalDate > stay.lastInsideDate {
+            departure = min(stay.lastInsideDate, next.arrivalDate)
+            draft.departureDate = departure
+        }
+        draft.dayTimeline = try timeline(for: draft.arrivalDate)
+        modelContext.insert(draft)
+        return draft
+    }
+
+    private func clampedArrival(_ proposed: Date, for place: VisitPlace, among places: [VisitPlace]) -> Date {
+        guard let previous = places
+            .filter({ $0.id != place.id && $0.arrivalDate < place.arrivalDate })
+            .max(by: { $0.arrivalDate < $1.arrivalDate })
+        else {
+            return proposed
+        }
+
+        guard Self.distanceMeters(from: previous.coordinate, to: place.coordinate) > Self.stayMatchDistance else {
+            return proposed
+        }
+        let boundary = previous.departureDate ?? previous.arrivalDate
+        return max(proposed, boundary)
+    }
+
+    private func nextDifferentPlace(after place: VisitPlace, among places: [VisitPlace]) -> VisitPlace? {
+        places
+            .filter { candidate in
+                candidate.id != place.id
+                    && candidate.arrivalDate > place.arrivalDate
+                    && Self.distanceMeters(from: candidate.coordinate, to: place.coordinate) > Self.stayMatchDistance
+            }
+            .min { $0.arrivalDate < $1.arrivalDate }
+    }
+
+    /// Joins two visits at the same spot when a fix between them never left.
+    /// Visit monitoring likes to close a stay and open another a few minutes
+    /// later while the phone has not moved.
+    private func mergeAdjacentSamePlaceVisits(
+        _ places: inout [VisitPlace],
+        samples: [LocationSample]
+    ) throws {
+        var index = 0
+        while index < places.count - 1 {
+            let current = places[index]
+            let next = places[index + 1]
+            let distance = Self.distanceMeters(from: current.coordinate, to: next.coordinate)
+            guard distance <= Self.stayMatchDistance else {
+                index += 1
+                continue
+            }
+
+            let currentEnd = current.departureDate ?? current.arrivalDate
+            let gap = next.arrivalDate.timeIntervalSince(currentEnd)
+            // A clean handoff (one visit ends as the next begins) stays two
+            // visits. Merge only when they overlap, or when fixes in the gap
+            // show the phone never left and the split was a false departure.
+            let overlaps = currentEnd.timeIntervalSince(next.arrivalDate) > 60
+            let stayed = gap > 60 && gap <= 12 * 60 * 60 && samplesProvePresence(
+                from: currentEnd,
+                to: next.arrivalDate,
+                around: current.coordinate,
+                samples: samples
+            )
+            guard overlaps || stayed else {
+                index += 1
+                continue
+            }
+
+            if labelsConflict(current, next) {
+                index += 1
+                continue
+            }
+
+            mergePlace(next, into: current)
+            if let nextDeparture = next.departureDate, nextDeparture > (current.departureDate ?? current.arrivalDate) {
+                current.departureDate = nextDeparture
+            } else if next.departureDate == nil {
+                current.departureDate = nil
+            }
+            current.arrivalDate = min(current.arrivalDate, next.arrivalDate)
+            modelContext.delete(next)
+            places.remove(at: index + 1)
+        }
+    }
+
+    private func labelsConflict(_ lhs: VisitPlace, _ rhs: VisitPlace) -> Bool {
+        let left = lhs.userLabel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let right = rhs.userLabel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return !left.isEmpty && !right.isEmpty && left != right
+    }
+
+    /// True when every fix in the gap is still at `coordinate`. An empty gap
+    /// does not count: with no evidence, the visit boundary stands.
+    private func samplesProvePresence(
+        from start: Date,
+        to end: Date,
+        around coordinate: CLLocationCoordinate2D,
+        samples: [LocationSample]
+    ) -> Bool {
+        let inside = samples.filter { sample in
+            sample.timestamp > start && sample.timestamp < end
+        }
+        guard !inside.isEmpty else { return false }
+        return inside.allSatisfy { sample in
+            Self.distanceMeters(from: sample.coordinate, to: coordinate) <= Self.stayMatchDistance
+        }
+    }
+
+    /// Turns a stay that runs right up to a place a couple of blocks away into
+    /// a stay plus a walk. Low-power fixes record the kerb and the door, and
+    /// nothing between.
+    private func separateLastBlockWalks(_ places: [VisitPlace], samples: [LocationSample]) {
+        let ordered = places.sorted { $0.arrivalDate < $1.arrivalDate }
+        for index in ordered.indices.dropLast() {
+            let current = ordered[index]
+            let next = ordered[index + 1]
+            let userLabel = current.userLabel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !userLabel.isEmpty { continue }
+
+            let separation = Self.distanceMeters(from: current.coordinate, to: next.coordinate)
+            guard separation >= LastBlockWalk.minimumDistance,
+                  separation <= LastBlockWalk.maximumDistance
+            else { continue }
+
+            guard let departure = current.departureDate else { continue }
+            let glued = next.arrivalDate.timeIntervalSince(departure) < 90
+            guard glued else { continue }
+
+            let lastOnSite = samples
+                .filter { sample in
+                    sample.timestamp >= current.arrivalDate
+                        && sample.timestamp < next.arrivalDate.addingTimeInterval(-LastBlockWalk.minimumDuration)
+                        && Self.distanceMeters(from: sample.coordinate, to: current.coordinate) <= Self.stayMatchDistance
+                }
+                .map(\.timestamp)
+                .max()
+            guard let lastOnSite else { continue }
+            let walkDuration = next.arrivalDate.timeIntervalSince(lastOnSite)
+            guard LastBlockWalk.isShape(distance: separation, duration: walkDuration) else { continue }
+            current.departureDate = max(lastOnSite, current.arrivalDate)
+        }
+    }
+
+    private func closeOpenPlacesThatHaveASuccessor(_ places: [VisitPlace]) {
+        for (index, place) in places.enumerated() where place.departureDate == nil {
+            guard let next = places[(index + 1)...].first else { continue }
+            if next.arrivalDate > place.arrivalDate {
+                place.departureDate = next.arrivalDate
+            }
+        }
+    }
+
+    private func deleteInconsistentAutomaticMoves(
+        among places: [VisitPlace],
+        from start: Date,
+        through end: Date
+    ) throws {
+        let moves = try modelContext.fetch(
+            FetchDescriptor<MoveSegment>(
+                predicate: #Predicate { move in
+                    move.endDate >= start && move.startDate <= end
+                }
+            )
+        )
+
+        for move in moves where !isUserCurated(move) {
+            guard shouldDeleteAutomaticMove(move, places: places) else { continue }
+            modelContext.delete(move)
+        }
+    }
+
+    private func shouldDeleteAutomaticMove(_ move: MoveSegment, places: [VisitPlace]) -> Bool {
+        let interior = places.contains { place in
+            guard place.id != move.startPlace?.id, place.id != move.endPlace?.id else { return false }
+            let placeEnd = place.departureDate ?? place.arrivalDate
+            let overlapsStart = placeEnd > move.startDate.addingTimeInterval(60)
+            let overlapsEnd = place.arrivalDate < move.endDate.addingTimeInterval(-60)
+            return overlapsStart && overlapsEnd
+        }
+        if interior { return true }
+
+        if let departure = move.startPlace?.departureDate,
+           move.startDate.addingTimeInterval(5 * 60) < departure {
+            return true
+        }
+
+        if move.endDate.timeIntervalSince(move.endPlace?.arrivalDate ?? move.endDate) > 5 * 60 {
+            return true
+        }
+
+        // A short slow hop labeled as a ride is the walk off the bus. Drop it
+        // so the next pass can classify it from the gap's own steps.
+        if let start = move.startPlace?.coordinate, let end = move.endPlace?.coordinate {
+            let separation = Self.distanceMeters(from: start, to: end)
+            let duration = move.endDate.timeIntervalSince(move.startDate)
+            let mislabeledRide = LastBlockWalk.isShape(distance: separation, duration: duration)
+                && (move.transportMode == .automotive || move.transportMode == .stationary || move.transportMode == .unknown)
+            if mislabeledRide { return true }
+        }
+
+        return false
+    }
+
+    private func moveLegs(
+        among places: [VisitPlace],
+        samples: [LocationSample],
+        from start: Date,
+        through end: Date
+    ) throws -> [SampleStayMoveLeg] {
+        let ordered = places.sorted { $0.arrivalDate < $1.arrivalDate }
+        var legs: [SampleStayMoveLeg] = []
+
+        for index in ordered.indices.dropLast() {
+            let origin = ordered[index]
+            let destination = ordered[index + 1]
+            let legStart = origin.departureDate ?? origin.arrivalDate
+            let legEnd = destination.arrivalDate
+            guard legEnd.timeIntervalSince(legStart) > 60 else { continue }
+            guard legEnd >= start, legStart <= end else { continue }
+            if try existingConsistentMove(from: origin, to: destination, start: legStart, end: legEnd) != nil {
+                continue
+            }
+
+            let between = samples
+                .filter { $0.timestamp >= legStart && $0.timestamp <= legEnd }
+                .map { LocationLogPoint(location: $0.asLocation) }
+            let reliable = SampleStayInference.reliablePoints(from: between)
+            let originPoint = LocationLogPoint(
+                latitude: origin.latitude,
+                longitude: origin.longitude,
+                horizontalAccuracy: origin.horizontalAccuracy,
+                timestamp: legStart
+            )
+            let destinationPoint = LocationLogPoint(
+                latitude: destination.latitude,
+                longitude: destination.longitude,
+                horizontalAccuracy: destination.horizontalAccuracy,
+                timestamp: legEnd
+            )
+            var routed = reliable
+            if routed.first?.timestamp != legStart {
+                routed.insert(originPoint, at: 0)
+            }
+            if routed.last?.timestamp != legEnd {
+                routed.append(destinationPoint)
+            }
+
+            legs.append(
+                SampleStayMoveLeg(
+                    startPlace: origin,
+                    endPlace: destination,
+                    startDate: legStart,
+                    endDate: legEnd,
+                    distanceMeters: LocationLogGeometry.pathDistance(routed),
+                    locations: routed.map(\.location)
+                )
+            )
+        }
+
+        return legs
+    }
+
+    private func existingConsistentMove(
+        from origin: VisitPlace,
+        to destination: VisitPlace,
+        start: Date,
+        end: Date
+    ) throws -> MoveSegment? {
+        guard let existing = try findMove(startPlaceID: origin.id, endPlaceID: destination.id) else {
+            return nil
+        }
+        let startDelta = abs(existing.startDate.timeIntervalSince(start))
+        let endDelta = abs(existing.endDate.timeIntervalSince(end))
+        guard startDelta <= 5 * 60, endDelta <= 5 * 60 else { return nil }
+        guard existing.transportMode != .unknown else { return nil }
+        return existing
     }
 
     func upsertMove(
