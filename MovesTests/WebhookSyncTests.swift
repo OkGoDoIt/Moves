@@ -202,6 +202,20 @@ final class WebhookSyncTests: XCTestCase {
         XCTAssertTrue(expanded.contains(where: { $0.name.hasSuffix(".gpx") }))
         XCTAssertFalse(expanded.contains(where: { $0.name == "places.json" }))
 
+        // Restoring the zip reads its three timeline files and reports nothing as skipped.
+        let parsed = TimelineArchiveFileParser.parseAll(files: [("moves-all-days.zip", zip.data)])
+        XCTAssertEqual(parsed.parsedFileCount, 3)
+        XCTAssertEqual(parsed.skipped, [])
+        XCTAssertEqual(parsed.warnings, [])
+        XCTAssertFalse(parsed.archive.isEmpty)
+
+        // A KML picked on its own still says it could not be restored.
+        let picked = TimelineArchiveFileParser.parseAll(
+            files: [("day.kml", Data("<kml></kml>".utf8))]
+        )
+        XCTAssertEqual(picked.parsedFileCount, 0)
+        XCTAssertEqual(picked.skipped, ["day.kml"])
+
         let kml = try XCTUnwrap(TimelineExporter.makePayload(days: [day], format: .kml, fileStem: "day"))
         let xml = try XCTUnwrap(String(data: kml.data, encoding: .utf8))
         XCTAssertTrue(xml.contains("<kml"))

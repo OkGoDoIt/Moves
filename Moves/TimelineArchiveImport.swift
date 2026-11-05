@@ -169,7 +169,9 @@ enum TimelineArchiveFileParser {
         return .failure(TimelineArchiveParseError(message: "\(trimmedName) is not a Moves GPX, GeoJSON, or CSV export"))
     }
 
-    static func parseAll(files: [(name: String, data: Data)]) -> (archive: TimelineArchive, skipped: [String], warnings: [String]) {
+    static func parseAll(
+        files: [(name: String, data: Data)]
+    ) -> (archive: TimelineArchive, parsedFileCount: Int, skipped: [String], warnings: [String]) {
         var archives: [TimelineArchive] = []
         var skipped: [String] = []
         var warnings: [String] = []
@@ -188,7 +190,7 @@ enum TimelineArchiveFileParser {
             }
         }
 
-        return (TimelineArchiveMerger.merge(archives), skipped, warnings)
+        return (TimelineArchiveMerger.merge(archives), archives.count, skipped, warnings)
     }
 
     /// Unwraps `.zip` members so a single archive export can be restored.
@@ -207,7 +209,8 @@ enum TimelineArchiveFileParser {
             for member in members {
                 let name = (member.path as NSString).lastPathComponent
                 let memberName = name.lowercased()
-                if memberName == "places.json" || memberName == "photos.csv" {
+                // The zip's KML repeats its GPX for Google Earth, and these two are not timeline data.
+                if memberName == "places.json" || memberName == "photos.csv" || memberName.hasSuffix(".kml") {
                     continue
                 }
                 expanded.append((name, member.data))
@@ -822,7 +825,7 @@ final class TimelineArchiveImporter: ObservableObject {
 
             var report = persisted
             report.fileCount = uniqueURLs.count
-            report.parsedFileCount = uniqueURLs.count - parsed.skipped.count
+            report.parsedFileCount = parsed.parsedFileCount
             report.formats = parsed.archive.formats
             report.skippedFileNames = parsed.skipped
             report.warnings = parsed.warnings
