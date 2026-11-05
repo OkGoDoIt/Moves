@@ -126,6 +126,7 @@ enum SpeedProfileBuilder {
     }
 
     /// Persists a profile next to the route cache so it invalidates with the matched path.
+    @MainActor
     static func store(_ fractions: [Float], on move: MoveSegment, signature: String) {
         guard move.routeCacheSignature == signature else { return }
         move.writeDerivedRouteData {
@@ -133,7 +134,9 @@ enum SpeedProfileBuilder {
         }
     }
 
-    /// Builds the profile off the main actor, then writes the cache on the calling actor.
+    /// Builds the profile off the main actor, then writes the cache back on it. The write
+    /// saves the main context, which crashes a `@Query` reading it from another thread.
+    @MainActor
     static func buildAndCache(
         for move: MoveSegment,
         coordinates: [CLLocationCoordinate2D]

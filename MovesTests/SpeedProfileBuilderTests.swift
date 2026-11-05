@@ -144,6 +144,7 @@ final class SpeedProfileBuilderTests: XCTestCase {
         XCTAssertEqual(stops.last?.location, 1)
     }
 
+    @MainActor
     func testSpeedProfileCacheRoundTripsWithRouteSignature() {
         let move = MoveSegment(
             dedupeKey: "cache",

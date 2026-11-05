@@ -617,6 +617,7 @@ final class MoveSegment {
     /// land on the undo stack above the person's own edit, and the next Undo reverts a cache
     /// instead of that edit. Saves inside the window because SwiftData registers pending
     /// changes with whichever manager is attached when it processes them.
+    @MainActor
     func writeDerivedRouteData(_ write: () -> Void) {
         guard !hasLeftStore else { return }
         guard let context = modelContext, let undoManager = context.undoManager else {
