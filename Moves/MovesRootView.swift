@@ -63,11 +63,20 @@ final class MovesRootController: ObservableObject {
     }
 }
 
+/// A history source chosen on the last onboarding page.
+private enum OnboardingImport {
+    case google
+    case photos
+    case health
+    case files
+}
+
 /// Owns the tab bar and keeps capture, undo, and sheets above tab identity.
 struct MovesRootView: View {
     @EnvironmentObject private var captureManager: MovesLocationCaptureManager
     @EnvironmentObject private var undoController: AppUndoController
     @EnvironmentObject private var cloudDataPresencePublisher: MovesCloudDataPresencePublisher
+    @EnvironmentObject private var photoLibrary: PhotoLibraryController
     @Environment(\.modelContext) private var modelContext
 
     @StateObject private var controller = MovesRootController()
@@ -75,7 +84,10 @@ struct MovesRootView: View {
     @State private var undoToast = UndoToastPresenter()
     @AppStorage(OnboardingStorage.hasSeenKey) private var hasSeenOnboarding = false
     @State private var isShowingOnboarding = false
+    @State private var pendingOnboardingImport: OnboardingImport?
     @State private var isShowingGoogleImport = false
+    @State private var isShowingPhotoImport = false
+    @State private var isShowingHealthImport = false
     @State private var isShowingFileImport = false
 
     @Query(sort: \DayTimeline.dayStart, order: .forward)
@@ -208,29 +220,29 @@ struct MovesRootView: View {
             Text(editController.errorMessage ?? "")
         }
         .undoToast(undoToast)
-        .fullScreenCover(isPresented: $isShowingOnboarding) {
+        .fullScreenCover(isPresented: $isShowingOnboarding, onDismiss: presentPendingOnboardingImport) {
             OnboardingFlow(
                 onRequestLocation: {
                     captureManager.requestTrackingAuthorization()
                 },
-                onImportGoogle: {
-                    finishOnboarding()
-                    DispatchQueue.main.async {
-                        isShowingGoogleImport = true
-                    }
-                },
-                onImportFiles: {
-                    finishOnboarding()
-                    DispatchQueue.main.async {
-                        isShowingFileImport = true
-                    }
-                },
-                onSkip: finishOnboarding
+                onImportGoogle: { finishOnboarding(importing: .google) },
+                onImportPhotos: { finishOnboarding(importing: .photos) },
+                onImportHealth: { finishOnboarding(importing: .health) },
+                onImportFiles: { finishOnboarding(importing: .files) },
+                onSkip: { finishOnboarding() }
             )
         }
         .sheet(isPresented: $isShowingGoogleImport) {
             NavigationStack {
                 GoogleTimelineImportSettingsView(modelContext: modelContext)
+            }
+        }
+        .sheet(isPresented: $isShowingPhotoImport) {
+            PhotoHistoryImportSheet(firstRecordedDayStart: dayTimelines.first?.dayStart)
+        }
+        .sheet(isPresented: $isShowingHealthImport) {
+            NavigationStack {
+                HealthWorkoutRouteImportSettingsView()
             }
         }
         .sheet(isPresented: $isShowingFileImport) {
@@ -256,8 +268,9 @@ struct MovesRootView: View {
     /// First-launch onboarding stays off while demo data seeds or screenshot flags are set.
     private var shouldPresentOnboarding: Bool {
         if ProcessInfo.processInfo.isRunningUnitTests { return false }
-        if captureManager.isDemoMode { return false }
         let env = ProcessInfo.processInfo.environment
+        if env["MOVES_OPEN_ONBOARDING"] == "1" { return true }
+        if captureManager.isDemoMode { return false }
         if env["MOVES_START_TAB"] != nil
             || env["MOVES_OPEN_SETTINGS"] == "1"
             || env["MOVES_OPEN_SEARCH"] == "1"
@@ -281,12 +294,37 @@ struct MovesRootView: View {
         isShowingOnboarding = true
     }
 
-    private func finishOnboarding() {
+    private func finishOnboarding(importing source: OnboardingImport? = nil) {
+        pendingOnboardingImport = source
         hasSeenOnboarding = true
         isShowingOnboarding = false
     }
 
-    /// Screenshot-agent launch flags (`MOVES_JUMP_DATE`, `MOVES_OPEN_SETTINGS`, `MOVES_OPEN_GOOGLE_IMPORT`, `MOVES_OPEN_WEBHOOK`, `MOVES_OPEN_ICLOUD`, `MOVES_OPEN_PRIVACY`, `MOVES_OPEN_REVIEW`, `MOVES_OPEN_SEARCH`, `MOVES_OPEN_TRIPS`, `MOVES_START_TAB`, `MOVES_OPEN_FIRST_PLACE`).
+    /// A sheet can only come up once the cover is gone, and Photos asks for access first.
+    private func presentPendingOnboardingImport() {
+        let source = pendingOnboardingImport
+        pendingOnboardingImport = nil
+        switch source {
+        case .google:
+            isShowingGoogleImport = true
+        case .photos:
+            Task { @MainActor in
+                if !photoLibrary.hasReadAccess {
+                    let status = await photoLibrary.requestAccess()
+                    guard status == .authorized || status == .limited else { return }
+                }
+                isShowingPhotoImport = true
+            }
+        case .health:
+            isShowingHealthImport = true
+        case .files:
+            isShowingFileImport = true
+        case nil:
+            break
+        }
+    }
+
+    /// Screenshot-agent launch flags (`MOVES_OPEN_ONBOARDING`, `MOVES_JUMP_DATE`, `MOVES_OPEN_SETTINGS`, `MOVES_OPEN_GOOGLE_IMPORT`, `MOVES_OPEN_WEBHOOK`, `MOVES_OPEN_ICLOUD`, `MOVES_OPEN_PRIVACY`, `MOVES_OPEN_REVIEW`, `MOVES_OPEN_SEARCH`, `MOVES_OPEN_TRIPS`, `MOVES_START_TAB`, `MOVES_OPEN_FIRST_PLACE`).
     private func applyLaunchJumpIfNeeded() {
         let env = ProcessInfo.processInfo.environment
         if env["MOVES_OPEN_SETTINGS"] == "1"

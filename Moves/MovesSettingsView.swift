@@ -666,7 +666,7 @@ struct RouteTrackingSettingsSheet: View {
     }
 }
 
-private struct HealthWorkoutRouteImportSettingsView: View {
+struct HealthWorkoutRouteImportSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var healthRouteImportManager: HealthWorkoutRouteAutoImportManager
     @AppStorage(HealthWorkoutRouteImportSettings.isEnabledKey) private var isEnabled = false

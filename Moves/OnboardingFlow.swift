@@ -1,4 +1,4 @@
-import SwiftData
+import HealthKit
 import SwiftUI
 
 /// First-launch pages shown only when the timeline is empty.
@@ -8,10 +8,13 @@ import SwiftUI
 struct OnboardingFlow: View {
     var onRequestLocation: () -> Void
     var onImportGoogle: () -> Void
+    var onImportPhotos: () -> Void
+    var onImportHealth: () -> Void
     var onImportFiles: () -> Void
     var onSkip: () -> Void
 
-    @State private var page = 0
+    /// `MOVES_ONBOARDING_PAGE` lets screenshot agents open a later page without swiping.
+    @State private var page = ProcessInfo.processInfo.environment["MOVES_ONBOARDING_PAGE"].flatMap(Int.init) ?? 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -33,7 +36,7 @@ struct OnboardingFlow: View {
                 OnboardingPage(
                     symbolName: "clock.arrow.circlepath",
                     title: String(localized: "Bring your history"),
-                    message: String(localized: "Import Google Timeline, or GPS files from another app. Apple Health workout routes are in Settings.")
+                    message: String(localized: "Import Google Timeline, geotagged photos, Apple Health workouts, or GPS files.")
                 )
                 .tag(2)
             }
@@ -48,14 +51,28 @@ struct OnboardingFlow: View {
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
                 } else if page == 2 {
-                    Button(String(localized: "Google Timeline")) {
-                        onImportGoogle()
+                    Button(action: onImportGoogle) {
+                        importLabel(String(localized: "Google Timeline"), systemImage: "globe")
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
 
-                    Button(String(localized: "GPS files")) {
-                        onImportFiles()
+                    Button(action: onImportPhotos) {
+                        importLabel(String(localized: "Photos"), systemImage: "photo.on.rectangle")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+
+                    if HKHealthStore.isHealthDataAvailable() {
+                        Button(action: onImportHealth) {
+                            importLabel(String(localized: "Apple Health"), systemImage: "figure.run")
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.large)
+                    }
+
+                    Button(action: onImportFiles) {
+                        importLabel(String(localized: "GPS files"), systemImage: "square.and.arrow.down")
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.large)
@@ -85,6 +102,11 @@ struct OnboardingFlow: View {
             )
             .ignoresSafeArea()
         }
+    }
+
+    private func importLabel(_ title: String, systemImage: String) -> some View {
+        Label(title, systemImage: systemImage)
+            .frame(maxWidth: .infinity)
     }
 }
 
