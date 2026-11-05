@@ -798,7 +798,7 @@ private struct InsightsMonthlyChart: View {
                     row.date,
                     unit: usesYears ? .year : .month
                 ),
-                y: .value(String(localized: "Kilometers"), row.distanceMeters / 1_000)
+                y: .value(MovesStatisticsFormatting.roadUnitTitle, row.distanceMeters / MovesStatisticsFormatting.roadUnitMeters)
             )
             .foregroundStyle(MovesPalette.transport(.cycling).gradient)
             .cornerRadius(4)
@@ -838,8 +838,8 @@ private struct InsightsMonthlyDescriptor: AXChartDescriptorRepresentable {
                 categoryOrder: rows.map(\.id)
             ),
             yAxis: AXNumericDataAxisDescriptor(
-                title: String(localized: "Kilometers"),
-                range: 0...max((rows.map(\.distanceMeters).max() ?? 1) / 1_000, 1),
+                title: MovesStatisticsFormatting.roadUnitTitle,
+                range: 0...max((rows.map(\.distanceMeters).max() ?? 1) / MovesStatisticsFormatting.roadUnitMeters, 1),
                 gridlinePositions: []
             ) { String(format: "%.1f", $0) },
             series: [
@@ -847,7 +847,7 @@ private struct InsightsMonthlyDescriptor: AXChartDescriptorRepresentable {
                     name: String(localized: "Distance"),
                     isContinuous: false,
                     dataPoints: rows.map { row in
-                        AXDataPoint(x: row.id, y: row.distanceMeters / 1_000)
+                        AXDataPoint(x: row.id, y: row.distanceMeters / MovesStatisticsFormatting.roadUnitMeters)
                     }
                 )
             ]

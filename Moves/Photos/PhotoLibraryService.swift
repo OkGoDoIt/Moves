@@ -70,6 +70,8 @@ actor PhotoLibraryService: PhotoAssetProviding {
         targetSize: CGSize,
         quality: PHImageRequestOptionsDeliveryMode = .fastFormat
     ) async -> UIImage? {
+        // Fetching without access would raise the system prompt from a passing thumbnail.
+        guard hasReadAccess else { return nil }
         let assets = PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil)
         guard let asset = assets.firstObject else { return nil }
 

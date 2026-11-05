@@ -212,9 +212,20 @@ enum MovesStatisticsFormatting {
         return hours == 0 ? "\(days) d" : "\(days) d \(hours) hr"
     }
 
+    /// Meters in the road unit the person's region uses, for chart axes.
+    static var roadUnitMeters: Double {
+        Locale.autoupdatingCurrent.measurementSystem == .metric ? 1_000 : 1_609.344
+    }
+
+    static var roadUnitTitle: String {
+        Locale.autoupdatingCurrent.measurementSystem == .metric
+            ? String(localized: "Kilometers")
+            : String(localized: "Miles")
+    }
+
     static func distance(_ meters: Double) -> String {
-        if meters < 1_000 { return "\(Int(max(meters, 0).rounded())) m" }
-        return String(format: "%.1f km", meters / 1_000)
+        Measurement(value: max(meters, 0), unit: UnitLength.meters)
+            .formatted(.measurement(width: .abbreviated, usage: .road))
     }
 
     static func visitInterval(_ place: VisitPlace) -> String {

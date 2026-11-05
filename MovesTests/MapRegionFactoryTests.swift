@@ -37,6 +37,21 @@ final class MapRegionFactoryTests: XCTestCase {
         assertAssignableToSnapshotOptions(region)
     }
 
+    func testPointsAcrossThePacificFrameThePacific() {
+        let sanFrancisco = CLLocationCoordinate2D(latitude: 37.77, longitude: -122.42)
+        let atlanta = CLLocationCoordinate2D(latitude: 33.75, longitude: -84.39)
+        let saigon = CLLocationCoordinate2D(latitude: 10.77, longitude: 106.70)
+        let region = MapRegionFactory.region(for: [sanFrancisco, atlanta, saigon])
+
+        XCTAssertTrue(abs(region.center.longitude) > 140, "Centered at \(region.center.longitude), not the Pacific")
+        assertAssignableToSnapshotOptions(region)
+    }
+
+    func testPointsOnOneSideKeepTheirOrdinaryFit() {
+        let region = MapRegionFactory.region(for: [bangkok, chiangMai])
+        XCTAssertEqual(region.center.longitude, (bangkok.longitude + chiangMai.longitude) / 2, accuracy: 0.0001)
+    }
+
     func testDayWithNoMovesOneStayIsSnapshotSafe() {
         let stayOnly = [bangkok]
         let region = MapRegionFactory.region(for: stayOnly)

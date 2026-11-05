@@ -264,22 +264,33 @@ enum MapRegionFactory {
 
         var minLat = first.latitude
         var maxLat = first.latitude
-        var minLon = first.longitude
-        var maxLon = first.longitude
 
         for coordinate in usable.dropFirst() {
             minLat = min(minLat, coordinate.latitude)
             maxLat = max(maxLat, coordinate.latitude)
-            minLon = min(minLon, coordinate.longitude)
-            maxLon = max(maxLon, coordinate.longitude)
+        }
+
+        // Longitude wraps, so the tightest fit starts just past the widest empty stretch.
+        // Without this, San Francisco and Saigon frame the Atlantic with both off-screen.
+        let longitudes = usable.map(\.longitude).sorted()
+        var widestGap = longitudes[0] + 360 - longitudes[longitudes.count - 1]
+        var arcStart = longitudes[0]
+        for (west, east) in zip(longitudes, longitudes.dropFirst()) where east - west > widestGap {
+            widestGap = east - west
+            arcStart = east
+        }
+        let arcWidth = 360 - widestGap
+        var centerLongitude = arcStart + arcWidth / 2
+        if centerLongitude > 180 {
+            centerLongitude -= 360
         }
 
         let center = CLLocationCoordinate2D(
             latitude: (minLat + maxLat) / 2,
-            longitude: (minLon + maxLon) / 2
+            longitude: centerLongitude
         )
         let latitudeDelta = (maxLat - minLat) * boundingBoxPadding
-        let longitudeDelta = (maxLon - minLon) * boundingBoxPadding
+        let longitudeDelta = arcWidth * boundingBoxPadding
 
         return snapshotSafe(
             MKCoordinateRegion(
