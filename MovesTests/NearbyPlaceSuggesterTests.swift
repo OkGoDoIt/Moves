@@ -132,6 +132,25 @@ final class ReviewInboxBuilderTests: XCTestCase {
         XCTAssertEqual(items.filter { $0.section == .uncertainModes }.count, 1)
     }
 
+    func testOnlyGoogleTimelineGuessesAreListedAsImportedPaths() throws {
+        let (context, _) = try makeContext()
+        let start = insertPlace(in: context, arrival: date(8, 0), departure: date(8, 10), latitude: 52.5, longitude: 13.4)
+        let end = insertPlace(in: context, arrival: date(8, 40), departure: date(9, 0), latitude: 52.54, longitude: 13.44)
+
+        let google = insertMove(in: context, from: start, to: end, start: date(8, 10), end: date(8, 40))
+        google.origin = .imported
+        google.transportModeSource = .imported
+        google.routeMatchConfidence = .estimated
+
+        let restored = insertMove(in: context, from: start, to: end, start: date(9, 0), end: date(9, 30))
+        restored.origin = .imported
+        restored.routeMatchConfidence = .estimated
+        try context.save()
+
+        let items = ReviewInboxBuilder.items(visits: [], moves: [google, restored])
+        XCTAssertEqual(items.map(\.id), ["import-move-\(google.id.uuidString)"])
+    }
+
     func testHeadingDifferenceTreatsWrapAround() {
         XCTAssertEqual(TimelineReviewHeuristics.angularDifference(350, 10), 20, accuracy: 0.01)
         XCTAssertEqual(TimelineReviewHeuristics.angularDifference(0, 180), 180, accuracy: 0.01)

@@ -104,7 +104,10 @@ enum ReviewInboxBuilder {
             usedVisitIDs.insert(visit.id)
         }
 
-        for move in moves where move.origin == .imported && !usedMoveIDs.contains(move.id) {
+        // Google Timeline guessed these. A Moves restore or a GPS file is the person's own record.
+        for move in moves where move.origin == .imported
+            && move.transportModeSource == .imported
+            && !usedMoveIDs.contains(move.id) {
             let estimated = move.routeMatchConfidence == .estimated || move.routeMatchConfidence == .unknown
             guard move.reviewState == .pending || estimated else { continue }
             guard move.reviewState != .dismissed && move.reviewState != .confirmed else { continue }
@@ -144,10 +147,19 @@ struct ReviewInboxView: View {
     }, sort: \VisitPlace.arrivalDate, order: .reverse)
     private var flaggedVisits: [VisitPlace]
 
-    @Query(filter: #Predicate<MoveSegment> { move in
-        move.reviewStateRaw == "pending" || move.originRaw == "imported"
-    }, sort: \MoveSegment.startDate, order: .reverse)
+    @Query(filter: ReviewInboxView.flaggedMovesFilter, sort: \MoveSegment.startDate, order: .reverse)
     private var flaggedMoves: [MoveSegment]
+
+    /// Reads only what `ReviewInboxBuilder` can list, so a large restore stays out of memory here.
+    private static var flaggedMovesFilter: Predicate<MoveSegment> {
+        let pending = ReviewState.pending.rawValue
+        let imported = TimelineItemOrigin.imported.rawValue
+        let importedMode = TransportModeSource.imported.rawValue
+        return #Predicate<MoveSegment> { move in
+            move.reviewStateRaw == pending
+                || (move.originRaw == imported && move.transportModeSourceRaw == importedMode)
+        }
+    }
 
     private var items: [ReviewInboxItem] {
         ReviewInboxBuilder.items(visits: flaggedVisits, moves: flaggedMoves)
