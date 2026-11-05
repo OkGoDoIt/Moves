@@ -2,6 +2,8 @@
 
 This file is shared by Cursor and Claude Code (`CLAUDE.md` is a symlink to it). Read it before changing anything.
 
+Product direction, workstreams, and per-agent task briefs live in **`PLAN.md`**. Pick a workstream there before starting feature work.
+
 ## What this repo is
 
 Moves is a **private on-device timeline app** (SwiftUI + SwiftData). It records visits and movement, infers transport mode, and optionally uploads new points to Dawarich, Reitti, GeoPulse, OwnTracks Recorder, or Traccar.
@@ -103,6 +105,7 @@ Optional: `DEVICE_UDID=... ./Scripts/install-iphone.sh`.
 | iCloud status, privacy zones | `Moves/CloudDataPresencePublisher.swift` (Settings → iCloud), `Moves/PrivacyZones.swift` (Home/Work circles on share cards and exports) |
 | Imports | `Moves/Import/` (Google Timeline: `GoogleTimelineImporter`, `GoogleTimelineDocument`, streaming `Records.json` scanner, zip reader); `Moves/OnboardingFlow.swift`; `Moves/TimelineArchiveImport.swift` (Moves GPX+GeoJSON+CSV+zip); `Moves/LocationLogImport.swift` + `Moves/RouteFileImport.swift` (any timestamped GPX/TCX/KML log → stays, moves, speed-based modes, geocoded names; bulk writer is `importLocationLog` in `VisitedLocation.swift`). Real-file fixtures live in gitignored `import-staging/` and `MovesTests/Fixtures/`; Google Timeline unit fixtures are `MovesTests/Fixtures/GoogleTimeline/`. |
 | Location capture, motion, route tracking | `Moves/LocationChange.swift` (`MovesLocationCaptureManager`) |
+| Stops and trips from stored fixes | `Moves/SampleStayInference.swift`; `reconcileSampleStays` in `VisitedLocation.swift`, driven by `DefaultTimelineAssembler`. It rebuilds the last week on every location batch, so it must leave corrected, imported, and reviewed items alone, and `RemovedTimelineSpan` records what the person removed so fixes don't bring it back. |
 | Timeline assembly / transport inference | `DefaultTimelineAssembler` in the location/timeline sources; tests in `MovesTests/TimelineAssemblerTests.swift` |
 | App Intents / Siri / Action button | `Moves/MovesAppIntents.swift` |
 | Widgets + Live Activity | `Moves Widgets/` (route Canvas from `TimelineWidgetSnapshot.routePoints`; Live Activity uses the mode palette) |
@@ -118,6 +121,12 @@ Keep capture, Live Activity, uploads, and SwiftData writes **independent of view
 - Export (GPX / GeoJSON / CSV) and App Intent export require user action; export via Siri/Shortcuts requires device authentication.
 - Spotlight `IndexedEntityQuery` donates place name + visit time only — never coordinates or comments.
 - Background modes: visit monitoring + significant location changes; temporary high-accuracy route tracking is opt-in and shows a Live Activity.
+
+## Store safety
+
+Never hold a model across a delete on another context: touching a row another context deleted aborts the process (`SwiftData/BackingData.swift: This model instance was invalidated`), and nothing can catch it. Long background reads copy values out of a prefetched fetch (see `ShareMapAggregateBuilder`). Use `MovesApp.sharedContainer()`; a second container means a second CloudKit mirror on one file. Anything that deletes rows in bulk at launch goes in `TimelineSchemaUpgrader`, which holds back the timeline UI and background work until it finishes.
+
+To check a change against real history before it reaches a phone, back up the device (`xcrun devicectl device copy from --domain-type appGroupDataContainer --domain-identifier group.<bundle id> --source / --destination import-staging/device-backup-<date>/group-container`, which is gitignored). `StoreResilienceTests` then runs against that copy. Launching the simulator with `SIMCTL_CHILD_MOVES_SIMULATOR_STORE=<path to a copy of default.store>` opens that copy instead of demo data.
 
 ## Git hygiene
 
