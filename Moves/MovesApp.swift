@@ -47,6 +47,7 @@ struct MovesApp: App {
 
     private let sharedModelContainer: ModelContainer
     private static var processContainer: ModelContainer?
+    @State private var isUpgradingTimeline: Bool
     @StateObject private var undoController = AppUndoController()
     @StateObject private var captureManager: MovesLocationCaptureManager
     @StateObject private var watchRouteInbox: WatchRouteInbox
@@ -90,6 +91,7 @@ struct MovesApp: App {
             if !ProcessInfo.processInfo.isRunningUnitTests {
                 TimelineSchemaUpgrader.runIfNeeded(container: container)
             }
+            _isUpgradingTimeline = State(initialValue: TimelineSchemaUpgrader.isRunning)
         } catch {
             fatalError("Could not create ModelContainer: \(error)")
         }
@@ -220,14 +222,24 @@ struct MovesApp: App {
 
     var body: some Scene {
         WindowGroup {
-            MovesRootView()
-                .environmentObject(captureManager)
-                .environmentObject(undoController)
-                .environmentObject(healthWorkoutRouteAutoImporter)
-                .environmentObject(cloudDataPresencePublisher)
-                .environmentObject(locationServiceSyncManager)
-                .environmentObject(photoLibraryController)
-                .environmentObject(webhookSyncManager)
+            if isUpgradingTimeline {
+                // The upgrade deletes duplicate rows, and a view reading a row deleted on
+                // another context aborts the process, so no timeline views exist until it ends.
+                TimelineUpgradeView()
+                    .task {
+                        await TimelineSchemaUpgrader.waitUntilFinished()
+                        isUpgradingTimeline = false
+                    }
+            } else {
+                MovesRootView()
+                    .environmentObject(captureManager)
+                    .environmentObject(undoController)
+                    .environmentObject(healthWorkoutRouteAutoImporter)
+                    .environmentObject(cloudDataPresencePublisher)
+                    .environmentObject(locationServiceSyncManager)
+                    .environmentObject(photoLibraryController)
+                    .environmentObject(webhookSyncManager)
+            }
         }
         .modelContainer(sharedModelContainer)
         .onChange(of: scenePhase) { _, newPhase in
@@ -255,6 +267,17 @@ struct MovesApp: App {
                 }
             }
         }
+    }
+}
+
+private struct TimelineUpgradeView: View {
+    var body: some View {
+        VStack(spacing: 16) {
+            ProgressView()
+            Text("Updating your timeline")
+                .font(.headline)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 

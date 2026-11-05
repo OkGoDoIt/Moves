@@ -13,6 +13,11 @@ enum TimelineSchemaUpgrader {
 
     @MainActor private static var running: Task<Void, Never>?
 
+    /// Whether an upgrade is underway. The timeline UI stays away until it finishes.
+    @MainActor static var isRunning: Bool {
+        running != nil
+    }
+
     /// Returns once any upgrade in progress is done.
     ///
     /// The upgrade deletes duplicate rows on its own context, and touching a row another
