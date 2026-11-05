@@ -273,6 +273,7 @@ enum ShareMapAggregateBuilder {
     }
 
     static func refreshAll(in modelContainer: ModelContainer) async {
+        await TimelineSchemaUpgrader.waitUntilFinished()
         let work = Task.detached(priority: .utility) {
             do {
                 try Task.checkCancellation()

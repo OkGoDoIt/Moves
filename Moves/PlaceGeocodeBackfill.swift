@@ -520,6 +520,7 @@ enum PlaceGeocodeBackfill {
         let work = Task {
             do {
                 let container = try await MainActor.run { try MovesApp.sharedContainer() }
+                await TimelineSchemaUpgrader.waitUntilFinished()
                 _ = await run(in: container)
                 task.setTaskCompleted(success: !Task.isCancelled)
             } catch {

@@ -114,6 +114,18 @@ struct MovesApp: App {
 
         let cacheConfiguration: ModelConfiguration
         #if targetEnvironment(simulator)
+        // Opens a copy of a real store, to check a change against real history.
+        if let path = ProcessInfo.processInfo.environment["MOVES_SIMULATOR_STORE"] {
+            let storeURL = URL(fileURLWithPath: path)
+            let cacheURL = storeURL.deletingLastPathComponent().appendingPathComponent("ShareMapCache.store")
+            return try ModelContainer(
+                for: schema,
+                configurations: [
+                    ModelConfiguration(schema: timelineSchema, url: storeURL, cloudKitDatabase: .none),
+                    ModelConfiguration("ShareMapCache", schema: cacheSchema, url: cacheURL, cloudKitDatabase: .none),
+                ]
+            )
+        }
         let modelConfiguration = ModelConfiguration(
             schema: timelineSchema,
             isStoredInMemoryOnly: true,
@@ -224,6 +236,7 @@ struct MovesApp: App {
                 ShareMapAggregateBackgroundTask.scheduleNextRun()
                 PlaceGeocodeBackfill.scheduleNextRun()
                 Task {
+                    await TimelineSchemaUpgrader.waitUntilFinished()
                     await captureManager.start()
                     await captureManager.refreshHistoricalBackfill()
                     healthWorkoutRouteAutoImporter.refreshInterruptedHistoricalImportState()
@@ -237,6 +250,7 @@ struct MovesApp: App {
                     await ShareMapAggregateBuilder.refreshAll(in: sharedModelContainer)
                 }
                 Task(priority: .utility) {
+                    await TimelineSchemaUpgrader.waitUntilFinished()
                     await PlaceGeocodeBackfill.runForegroundTrickle(in: sharedModelContainer)
                 }
             }

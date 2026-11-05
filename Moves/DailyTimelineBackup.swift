@@ -112,10 +112,8 @@ enum DailyTimelineBackup {
         guard let payload = TimelineExporter.makePayload(
             days: [day],
             format: format.timelineExportFormat,
-            fileStem: "Moves-\(dayKey)",
-            privacyZones: PrivacyZoneResolver.exportZones(
-                from: (try? context.fetch(FetchDescriptor<KnownPlace>())) ?? []
-            )
+            // A backup is the person's own copy, and a restore can only bring back what it holds.
+            fileStem: "Moves-\(dayKey)"
         ) else {
             throw DailyTimelineBackupError.couldNotCreateExport
         }
@@ -232,6 +230,7 @@ enum DailyTimelineBackup {
             }
             do {
                 let container = try await MainActor.run { try MovesApp.sharedContainer() }
+                await TimelineSchemaUpgrader.waitUntilFinished()
                 _ = try await saveYesterday(in: container)
                 task.setTaskCompleted(success: true)
             } catch {

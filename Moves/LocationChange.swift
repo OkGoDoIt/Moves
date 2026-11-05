@@ -606,6 +606,7 @@ final class DefaultTimelineAssembler: TimelineAssembler {
     }
 
     private func performSampleStayReconciliation() async {
+        await TimelineSchemaUpgrader.waitUntilFinished()
         do {
             let result = try repository.reconcileSampleStays(now: .now)
 

@@ -11,14 +11,26 @@ enum TimelineSchemaUpgrader {
     static let currentVersion = 2
     static let userDefaultsKey = "moves.timelineSchemaVersion"
 
+    @MainActor private static var running: Task<Void, Never>?
+
+    /// Returns once any upgrade in progress is done.
+    ///
+    /// The upgrade deletes duplicate rows on its own context, and touching a row another
+    /// context has deleted aborts the process. Work that walks the store waits for this.
+    static func waitUntilFinished() async {
+        let task = await MainActor.run { running }
+        await task?.value
+    }
+
     /// Schedules an upgrade when the stored version is behind `currentVersion`.
+    @MainActor
     static func runIfNeeded(
         container: ModelContainer,
         defaults: UserDefaults = .standard
     ) {
         guard defaults.integer(forKey: userDefaultsKey) < currentVersion else { return }
 
-        Task.detached(priority: .utility) {
+        running = Task.detached(priority: .userInitiated) {
             let context = ModelContext(container)
             context.autosaveEnabled = false
             do {
