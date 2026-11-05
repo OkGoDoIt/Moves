@@ -139,6 +139,58 @@ final class PhotoHistoryImporterTests: XCTestCase {
         XCTAssertFalse(LocationSampleSource.photoLibrary.isRouteTrack)
     }
 
+    func testIsolatedPhotoImportsWithoutForcingAStay() throws {
+        let (context, _) = try makeContext()
+        let importer = PhotoHistoryImporter(modelContext: context, calendar: gmt)
+
+        let report = try importer.importHistory(
+            assets: [photo("solo", at: epoch, coordinate: home)],
+            in: DateInterval(start: epoch.addingTimeInterval(-1), end: epoch.addingTimeInterval(3_600))
+        )
+
+        XCTAssertEqual(report.createdVisitCount, 0)
+        XCTAssertEqual(report.attachedPhotoCount, 1)
+        XCTAssertEqual(report.dayOnlyAttachmentCount, 1)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<VisitPlace>()).count, 0)
+    }
+
+    func testPhotosInsideAMultiDayVisitAttachWithoutAddingAVisit() throws {
+        let (context, _) = try makeContext()
+        let day = DayTimeline(dayStart: epoch)
+        context.insert(day)
+        let hotel = VisitPlace(
+            arrivalDate: epoch,
+            departureDate: epoch.addingTimeInterval(3 * 24 * 60 * 60),
+            latitude: home.latitude,
+            longitude: home.longitude,
+            horizontalAccuracy: 12
+        )
+        hotel.origin = .sensor
+        hotel.dayTimeline = day
+        context.insert(hotel)
+        try context.save()
+
+        // Far enough past the arrival to fall on another day in any time zone.
+        let nextDay = epoch.addingTimeInterval(36 * 60 * 60)
+        let far = offset(home, northMeters: 900)
+        let importer = PhotoHistoryImporter(modelContext: context, calendar: gmt)
+        let report = try importer.importHistory(
+            assets: [
+                photo("hotel-1", at: nextDay, coordinate: home),
+                photo("hotel-2", at: nextDay.addingTimeInterval(5 * 60), coordinate: home),
+                photo("museum-1", at: nextDay.addingTimeInterval(30 * 60), coordinate: far),
+                photo("museum-2", at: nextDay.addingTimeInterval(35 * 60), coordinate: far),
+            ],
+            in: DateInterval(start: epoch, end: epoch.addingTimeInterval(4 * 24 * 60 * 60))
+        )
+
+        XCTAssertEqual(report.createdVisitCount, 0)
+        let visits = try context.fetch(FetchDescriptor<VisitPlace>())
+        XCTAssertEqual(visits.map(\.id), [hotel.id])
+        XCTAssertEqual(Set(hotel.photoAttachments.map(\.assetLocalIdentifier)), ["hotel-1", "hotel-2"])
+        XCTAssertEqual(try context.fetch(FetchDescriptor<PhotoAttachment>()).count, 4)
+    }
+
     func testImportCreatesEstimatedUnknownMoveUnlessPlane() throws {
         let (context, _) = try makeContext()
         let importer = PhotoHistoryImporter(modelContext: context, calendar: gmt)

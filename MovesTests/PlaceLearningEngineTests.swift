@@ -515,6 +515,118 @@ final class PlaceLearningEngineTests: XCTestCase {
         XCTAssertEqual(destination.arrivalHourHistogram[18], 1)
     }
 
+    func testMergeWithNoConfirmedVisitsKeepsTheDestinationWhereItIs() throws {
+        let (context, _) = try makeContext()
+        let destination = KnownPlace(name: "Home", latitude: home.latitude, longitude: home.longitude, footprintRadius: 60)
+        destination.confirmedVisitCount = 3
+        let source = KnownPlace(name: "Home 2", latitude: home.latitude, longitude: home.longitude)
+        context.insert(destination)
+        context.insert(source)
+        _ = insertVisit(
+            in: context,
+            at: home,
+            arrival: date(hour: 9),
+            departure: date(hour: 17),
+            source: .auto,
+            knownPlace: source
+        )
+
+        PlaceLearningEngine.merge(source, into: destination, calendar: gmtCalendar)
+
+        XCTAssertEqual(destination.centerLatitude, home.latitude, accuracy: 0.000001)
+        XCTAssertEqual(destination.centerLongitude, home.longitude, accuracy: 0.000001)
+        XCTAssertEqual(destination.footprintRadius, 60, accuracy: 0.01)
+        XCTAssertEqual(destination.confirmedVisitCount, 3)
+    }
+
+    func testKeepingTheSuggestedNameDoesNotRejectIt() throws {
+        let (repository, context, _) = try makeRepository()
+        let visit = insertVisit(
+            in: context,
+            at: home,
+            arrival: date(hour: 9),
+            departure: date(hour: 10),
+            source: .none,
+            knownPlace: nil
+        )
+        visit.autoLabel = "Blue Bottle"
+        try context.save()
+
+        let place = try repository.createKnownPlace(from: visit, name: "Blue Bottle")
+        try repository.recordCorrection(
+            PlaceCorrectionEvent(
+                visitPlaceID: visit.id,
+                fromAutoLabel: "Blue Bottle",
+                toKnownPlaceID: place.id,
+                latitude: home.latitude,
+                longitude: home.longitude,
+                arrivalHour: 9,
+                weekday: 2,
+                stayDuration: 3_600
+            )
+        )
+
+        XCTAssertTrue(place.rejectedAutoLabels.isEmpty)
+        XCTAssertFalse(PlaceLearningEngine.shouldSuppress("Blue Bottle", nearbyPlaces: [place]))
+    }
+
+    func testGoogleImportSkipsAStayNameTheUserRejected() throws {
+        let (repository, context, _) = try makeRepository()
+        let known = KnownPlace(name: "Home", latitude: home.latitude, longitude: home.longitude)
+        known.rejectedAutoLabels = ["Wrong Café"]
+        context.insert(known)
+        try context.save()
+        let stay = LocationLogStay(
+            arrivalDate: date(hour: 9),
+            departureDate: date(hour: 10),
+            latitude: home.latitude,
+            longitude: home.longitude,
+            radius: 20,
+            points: [LocationLogPoint(latitude: home.latitude, longitude: home.longitude, timestamp: date(hour: 9))],
+            name: "Wrong Café"
+        )
+
+        _ = try repository.importLocationLog(
+            LocationLogTimeline(segments: [.stay(stay)], pointCount: 1),
+            source: .googleTimelineImport
+        )
+
+        let visit = try XCTUnwrap(try context.fetch(FetchDescriptor<VisitPlace>()).first)
+        XCTAssertNil(visit.autoLabel)
+    }
+
+    func testConfirmingAVisitKeepsAMovedPinAndAShrink() throws {
+        let (repository, context, _) = try makeRepository()
+        let north = offset(home, northMeters: 60)
+        let middle = offset(home, northMeters: 30)
+        let first = insertVisit(in: context, at: home, arrival: date(hour: 9), departure: date(hour: 10), source: .none, knownPlace: nil)
+        let second = insertVisit(in: context, at: north, arrival: date(hour: 11), departure: date(hour: 12), source: .none, knownPlace: nil)
+        let third = insertVisit(in: context, at: middle, arrival: date(hour: 13), departure: date(hour: 14), source: .none, knownPlace: nil)
+        try context.save()
+
+        // Learned from two visits, then shrunk by hand.
+        let shrunk = try repository.createKnownPlace(from: first, name: "Cafe")
+        try repository.assign(second, to: shrunk, source: .user, confidence: 1)
+        XCTAssertEqual(shrunk.centerLatitude, middle.latitude, accuracy: 0.000001)
+        shrunk.footprintRadius *= PlaceLearningEngine.radiusShrinkFactor
+        let shrunkRadius = shrunk.footprintRadius
+        try repository.assign(third, to: shrunk, source: .user, confidence: 1)
+        XCTAssertEqual(shrunk.footprintRadius, shrunkRadius, accuracy: 0.01)
+        XCTAssertEqual(shrunk.confirmedVisitCount, 3)
+
+        // A pin moved right after the first visit, as the confirm sheet does.
+        let pin = offset(home, northMeters: 200)
+        let firstAgain = insertVisit(in: context, at: home, arrival: date(hour: 15), departure: date(hour: 16), source: .none, knownPlace: nil)
+        let secondAgain = insertVisit(in: context, at: north, arrival: date(hour: 17), departure: date(hour: 18), source: .none, knownPlace: nil)
+        let pinned = try repository.createKnownPlace(from: firstAgain, name: "Museum")
+        pinned.centerLatitude = pin.latitude
+        pinned.centerLongitude = pin.longitude
+        try repository.assign(secondAgain, to: pinned, source: .user, confidence: 1)
+        XCTAssertEqual(pinned.centerLatitude, pin.latitude, accuracy: 0.000001)
+        XCTAssertEqual(pinned.centerLongitude, pin.longitude, accuracy: 0.000001)
+        XCTAssertEqual(pinned.confirmedVisitCount, 2)
+    }
+
     func testMailboxActorForwardsResolve() async {
         let place = PlaceLearningEngine.PlaceSnapshot(
             name: "Home",

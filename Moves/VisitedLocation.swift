@@ -267,18 +267,14 @@ final class DayTimeline {
         self.createdAt = .now
     }
 
+    /// Reads the time zone on every call: a formatter would keep the zone the process
+    /// launched in, and after a flight would file today under yesterday.
     static func makeDayKey(for date: Date) -> String {
-        dayKeyFormatter.string(from: Calendar.current.startOfDay(for: date))
+        var gregorian = Calendar(identifier: .gregorian)
+        gregorian.timeZone = Calendar.current.timeZone
+        let day = gregorian.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", day.year ?? 0, day.month ?? 0, day.day ?? 0)
     }
-
-    private static let dayKeyFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = .current
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter
-    }()
 }
 
 extension DayTimeline {
@@ -464,6 +460,18 @@ final class VisitPlace {
     static let transientStopMaximumDuration: TimeInterval = 5 * 60
 }
 
+extension VisitPlace {
+    /// Call before deleting this visit: photos cascade with it, but they still belong to the day.
+    func keepPhotosOnDay() {
+        for photo in photoAttachments {
+            if photo.dayTimeline == nil {
+                photo.dayTimeline = dayTimeline
+            }
+            photo.visitPlace = nil
+        }
+    }
+}
+
 fileprivate extension VisitPlace {
     var locationKey: String {
         // Round into ~10m buckets so repeat visits to the same spot count once.
@@ -598,6 +606,23 @@ final class MoveSegment {
     func clearCachedRouteCoordinates() {
         routeCacheSignature = nil
         routeCacheCoordinatesData = nil
+    }
+
+    /// Route caches and match labels are derived data. With the undo manager attached they
+    /// land on the undo stack above the person's own edit, and the next Undo reverts a cache
+    /// instead of that edit. Saves inside the window because SwiftData registers pending
+    /// changes with whichever manager is attached when it processes them.
+    func writeDerivedRouteData(_ write: () -> Void) {
+        guard let context = modelContext, let undoManager = context.undoManager else {
+            write()
+            return
+        }
+        context.undoManager = nil
+        write()
+        if context.hasChanges {
+            try? context.save()
+        }
+        context.undoManager = undoManager
     }
 }
 
@@ -929,12 +954,42 @@ struct HistoricalDeduplicationReport {
     }
 }
 
+/// What Undo needs to reverse a deduplication run.
+///
+/// The fields added after the first release are optional so snapshot files saved
+/// earlier still load.
 struct TimelineDeduplicationUndoSnapshot: Codable {
     let capturedAt: Date
     let dayTimelines: [DayTimelineSnapshot]
     let places: [VisitPlaceSnapshot]
     let moves: [MoveSegmentSnapshot]
     let samples: [LocationSampleSnapshot]
+    let photos: [PhotoLinkSnapshot]?
+    /// Rows the run deleted. Only these come back as new rows; a changed row the person
+    /// has since deleted stays deleted. Nil in a full snapshot, where any row may return.
+    let removedPlaceIDs: [UUID]?
+    let removedMoveIDs: [UUID]?
+
+    /// This snapshot cut down to what `after` no longer has, or has with different values.
+    func changes(comparedTo after: TimelineDeduplicationUndoSnapshot) -> TimelineDeduplicationUndoSnapshot {
+        let placesAfter = Dictionary(after.places.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let movesAfter = Dictionary(after.moves.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let samplesAfter = Dictionary(after.samples.map { ($0.dedupeKey, $0) }, uniquingKeysWith: { first, _ in first })
+        let photosAfter = Dictionary(
+            (after.photos ?? []).map { ($0.assetLocalIdentifier, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        return TimelineDeduplicationUndoSnapshot(
+            capturedAt: capturedAt,
+            dayTimelines: dayTimelines,
+            places: places.filter { placesAfter[$0.id] != $0 },
+            moves: moves.filter { movesAfter[$0.id] != $0 },
+            samples: samples.filter { samplesAfter[$0.dedupeKey] != $0 },
+            photos: (photos ?? []).filter { photosAfter[$0.assetLocalIdentifier] != $0 },
+            removedPlaceIDs: places.map(\.id).filter { placesAfter[$0] == nil },
+            removedMoveIDs: moves.map(\.id).filter { movesAfter[$0] == nil }
+        )
+    }
 }
 
 struct DayTimelineSnapshot: Codable {
@@ -943,7 +998,7 @@ struct DayTimelineSnapshot: Codable {
     let createdAt: Date
 }
 
-struct VisitPlaceSnapshot: Codable {
+struct VisitPlaceSnapshot: Codable, Equatable {
     let id: UUID
     let arrivalDate: Date
     let departureDate: Date?
@@ -955,9 +1010,20 @@ struct VisitPlaceSnapshot: Codable {
     let comment: String?
     let createdAt: Date
     let dayKey: String?
+    let knownPlaceID: UUID?
+    let assignmentSourceRaw: String?
+    let assignmentConfidence: Double?
+    let originRaw: String?
+    let isHiddenAsShortStop: Bool?
+    let countryCode: String?
+    let locality: String?
+    let administrativeArea: String?
+    let thoroughfare: String?
+    let formattedAddress: String?
+    let reviewStateRaw: String?
 }
 
-struct MoveSegmentSnapshot: Codable {
+struct MoveSegmentSnapshot: Codable, Equatable {
     let id: UUID
     let dedupeKey: String
     let startDate: Date
@@ -973,9 +1039,16 @@ struct MoveSegmentSnapshot: Codable {
     let routeCacheSignature: String?
     let routeCacheCoordinatesData: Data?
     let manualRouteCoordinatesData: Data?
+    let routeMatchPolicyRaw: String?
+    let routeMatchConfidenceRaw: String?
+    let routeMatchSummary: String?
+    let transportModeSourceRaw: String?
+    let originRaw: String?
+    let speedProfileData: Data?
+    let reviewStateRaw: String?
 }
 
-struct LocationSampleSnapshot: Codable {
+struct LocationSampleSnapshot: Codable, Equatable {
     let dedupeKey: String
     let timestamp: Date
     let latitude: Double
@@ -987,6 +1060,12 @@ struct LocationSampleSnapshot: Codable {
     let createdAt: Date
     let dayKey: String?
     let moveID: UUID?
+}
+
+/// Which visit a photo sat on. Deduplication moves photos but never deletes them.
+struct PhotoLinkSnapshot: Codable, Equatable {
+    let assetLocalIdentifier: String
+    let visitPlaceID: UUID?
 }
 
 enum TimelineDeduplicationSnapshotStore {
@@ -1046,6 +1125,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
     private static let logPlaceMatchDistance: CLLocationDistance = 120
     private static let logPlaceMatchSlack: TimeInterval = 15 * 60
     private static let logPlaceExtendLimit: TimeInterval = 12 * 60 * 60
+    private static let maximumReportedMoveDistance: CLLocationDistance = 100_000_000
     private static let sampleDedupeTimeWindow: TimeInterval = 5 * 60
     private static let sampleDedupeDistanceThreshold: CLLocationDistance = 120
     private static let placeDedupeArrivalWindow: TimeInterval = 3 * 60
@@ -1098,6 +1178,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                 sortBy: [SortDescriptor(\LocationSample.timestamp, order: .forward)]
             )
         )
+        let photos = try modelContext.fetch(FetchDescriptor<PhotoAttachment>())
 
         return TimelineDeduplicationUndoSnapshot(
             capturedAt: .now,
@@ -1120,7 +1201,18 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                     autoLabel: place.autoLabel,
                     comment: place.comment,
                     createdAt: place.createdAt,
-                    dayKey: place.dayTimeline?.dayKey
+                    dayKey: place.dayTimeline?.dayKey,
+                    knownPlaceID: place.knownPlace?.id,
+                    assignmentSourceRaw: place.assignmentSourceRaw,
+                    assignmentConfidence: place.assignmentConfidence,
+                    originRaw: place.originRaw,
+                    isHiddenAsShortStop: place.isHiddenAsShortStop,
+                    countryCode: place.countryCode,
+                    locality: place.locality,
+                    administrativeArea: place.administrativeArea,
+                    thoroughfare: place.thoroughfare,
+                    formattedAddress: place.formattedAddress,
+                    reviewStateRaw: place.reviewStateRaw
                 )
             },
             moves: moves.map { move in
@@ -1139,7 +1231,14 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                     dayKey: move.dayTimeline?.dayKey,
                     routeCacheSignature: move.routeCacheSignature,
                     routeCacheCoordinatesData: move.routeCacheCoordinatesData,
-                    manualRouteCoordinatesData: move.manualRouteCoordinatesData
+                    manualRouteCoordinatesData: move.manualRouteCoordinatesData,
+                    routeMatchPolicyRaw: move.routeMatchPolicyRaw,
+                    routeMatchConfidenceRaw: move.routeMatchConfidenceRaw,
+                    routeMatchSummary: move.routeMatchSummary,
+                    transportModeSourceRaw: move.transportModeSourceRaw,
+                    originRaw: move.originRaw,
+                    speedProfileData: move.speedProfileData,
+                    reviewStateRaw: move.reviewStateRaw
                 )
             },
             samples: samples.map { sample in
@@ -1156,115 +1255,188 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                     dayKey: sample.dayTimeline?.dayKey,
                     moveID: sample.moveSegment?.id
                 )
-            }
+            },
+            photos: photos.map { photo in
+                PhotoLinkSnapshot(
+                    assetLocalIdentifier: photo.assetLocalIdentifier,
+                    visitPlaceID: photo.visitPlace?.id
+                )
+            },
+            removedPlaceIDs: nil,
+            removedMoveIDs: nil
         )
     }
 
+    /// Puts back what a deduplication run changed, and nothing else.
+    ///
+    /// Rows the run removed return, rows it altered go back to their earlier values,
+    /// and fixes and photos are re-linked. Nothing is deleted, so learned places,
+    /// corrections, and whatever was recorded since the run are all still there.
     func restoreFromUndoSnapshot(_ snapshot: TimelineDeduplicationUndoSnapshot) throws {
-        try deleteAllTimelineData()
-
         var timelinesByDayKey: [String: DayTimeline] = [:]
-        timelinesByDayKey.reserveCapacity(snapshot.dayTimelines.count)
+        for timeline in try modelContext.fetch(FetchDescriptor<DayTimeline>())
+        where timelinesByDayKey[timeline.dayKey] == nil {
+            timelinesByDayKey[timeline.dayKey] = timeline
+        }
 
-        for timelineSnapshot in snapshot.dayTimelines {
+        for timelineSnapshot in snapshot.dayTimelines where timelinesByDayKey[timelineSnapshot.dayKey] == nil {
             let timeline = DayTimeline(dayStart: timelineSnapshot.dayStart)
             timeline.dayKey = timelineSnapshot.dayKey
             timeline.dayStart = timelineSnapshot.dayStart
             timeline.createdAt = timelineSnapshot.createdAt
             modelContext.insert(timeline)
-
-            if timelinesByDayKey[timelineSnapshot.dayKey] == nil {
-                timelinesByDayKey[timelineSnapshot.dayKey] = timeline
-            }
+            timelinesByDayKey[timelineSnapshot.dayKey] = timeline
         }
 
-        var placesByID: [UUID: VisitPlace] = [:]
-        placesByID.reserveCapacity(snapshot.places.count)
+        let knownPlacesByID = Dictionary(
+            try modelContext.fetch(FetchDescriptor<KnownPlace>()).map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        var placesByID = Dictionary(
+            try modelContext.fetch(FetchDescriptor<VisitPlace>()).map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let removedPlaceIDs = snapshot.removedPlaceIDs.map { Set($0) }
 
         for placeSnapshot in snapshot.places {
-            let place = VisitPlace(
-                arrivalDate: placeSnapshot.arrivalDate,
-                departureDate: placeSnapshot.departureDate,
-                latitude: placeSnapshot.latitude,
-                longitude: placeSnapshot.longitude,
-                horizontalAccuracy: placeSnapshot.horizontalAccuracy,
-                userLabel: placeSnapshot.userLabel,
-                autoLabel: placeSnapshot.autoLabel,
-                comment: placeSnapshot.comment
-            )
-            place.id = placeSnapshot.id
-            place.createdAt = placeSnapshot.createdAt
-            if let dayKey = placeSnapshot.dayKey {
-                place.dayTimeline = timelinesByDayKey[dayKey]
+            let place: VisitPlace
+            if let live = placesByID[placeSnapshot.id] {
+                place = live
+            } else if removedPlaceIDs?.contains(placeSnapshot.id) ?? true {
+                place = VisitPlace(
+                    arrivalDate: placeSnapshot.arrivalDate,
+                    departureDate: placeSnapshot.departureDate,
+                    latitude: placeSnapshot.latitude,
+                    longitude: placeSnapshot.longitude,
+                    horizontalAccuracy: placeSnapshot.horizontalAccuracy
+                )
+                place.id = placeSnapshot.id
+                place.createdAt = placeSnapshot.createdAt
+                modelContext.insert(place)
+                placesByID[place.id] = place
+            } else {
+                continue
             }
-            modelContext.insert(place)
-            placesByID[place.id] = place
+            apply(placeSnapshot, to: place, timelinesByDayKey: timelinesByDayKey, knownPlacesByID: knownPlacesByID)
         }
 
-        var movesByID: [UUID: MoveSegment] = [:]
-        movesByID.reserveCapacity(snapshot.moves.count)
+        var movesByID = Dictionary(
+            try modelContext.fetch(FetchDescriptor<MoveSegment>()).map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let removedMoveIDs = snapshot.removedMoveIDs.map { Set($0) }
 
         for moveSnapshot in snapshot.moves {
-            let move = MoveSegment(
-                dedupeKey: moveSnapshot.dedupeKey,
-                startDate: moveSnapshot.startDate,
-                endDate: moveSnapshot.endDate,
-                transportMode: TransportMode(rawValue: moveSnapshot.transportModeRawValue) ?? .unknown,
-                distanceMeters: moveSnapshot.distanceMeters,
-                stepCount: moveSnapshot.stepCount,
-                comment: moveSnapshot.comment
-            )
-            move.id = moveSnapshot.id
-            move.createdAt = moveSnapshot.createdAt
-            move.transportModeRawValue = moveSnapshot.transportModeRawValue
-            move.routeCacheSignature = moveSnapshot.routeCacheSignature
-            move.routeCacheCoordinatesData = moveSnapshot.routeCacheCoordinatesData
-            move.manualRouteCoordinatesData = moveSnapshot.manualRouteCoordinatesData
-            if let dayKey = moveSnapshot.dayKey {
-                move.dayTimeline = timelinesByDayKey[dayKey]
+            let move: MoveSegment
+            if let live = movesByID[moveSnapshot.id] {
+                move = live
+            } else if removedMoveIDs?.contains(moveSnapshot.id) ?? true {
+                move = MoveSegment(
+                    dedupeKey: moveSnapshot.dedupeKey,
+                    startDate: moveSnapshot.startDate,
+                    endDate: moveSnapshot.endDate,
+                    transportMode: TransportMode(rawValue: moveSnapshot.transportModeRawValue) ?? .unknown,
+                    distanceMeters: moveSnapshot.distanceMeters,
+                    stepCount: moveSnapshot.stepCount,
+                    comment: moveSnapshot.comment
+                )
+                move.id = moveSnapshot.id
+                move.createdAt = moveSnapshot.createdAt
+                modelContext.insert(move)
+                movesByID[move.id] = move
+            } else {
+                continue
             }
-            move.startPlace = moveSnapshot.startPlaceID.flatMap { placesByID[$0] }
-            move.endPlace = moveSnapshot.endPlaceID.flatMap { placesByID[$0] }
-            modelContext.insert(move)
-            movesByID[move.id] = move
+            apply(moveSnapshot, to: move, timelinesByDayKey: timelinesByDayKey, placesByID: placesByID)
         }
 
-        for sampleSnapshot in snapshot.samples {
-            let location = CLLocation(
-                coordinate: CLLocationCoordinate2D(
-                    latitude: sampleSnapshot.latitude,
-                    longitude: sampleSnapshot.longitude
-                ),
-                altitude: sampleSnapshot.altitude,
-                horizontalAccuracy: sampleSnapshot.horizontalAccuracy,
-                verticalAccuracy: -1,
-                course: -1,
-                speed: sampleSnapshot.speed,
-                timestamp: sampleSnapshot.timestamp
+        // Deduplication only re-links fixes and photos, so the rows themselves are still here.
+        if !snapshot.samples.isEmpty {
+            let samplesByKey = Dictionary(
+                try modelContext.fetch(FetchDescriptor<LocationSample>()).map { ($0.dedupeKey, $0) },
+                uniquingKeysWith: { first, _ in first }
             )
-            let sample = LocationSample(
-                location: location,
-                source: LocationSampleSource(rawValue: sampleSnapshot.sourceRawValue) ?? .significantChange,
-                dedupeKey: sampleSnapshot.dedupeKey
+            for sampleSnapshot in snapshot.samples {
+                samplesByKey[sampleSnapshot.dedupeKey]?.moveSegment = sampleSnapshot.moveID.flatMap { movesByID[$0] }
+            }
+        }
+
+        if let photoLinks = snapshot.photos, !photoLinks.isEmpty {
+            let photosByIdentifier = Dictionary(
+                try modelContext.fetch(FetchDescriptor<PhotoAttachment>()).map { ($0.assetLocalIdentifier, $0) },
+                uniquingKeysWith: { first, _ in first }
             )
-            sample.timestamp = sampleSnapshot.timestamp
-            sample.latitude = sampleSnapshot.latitude
-            sample.longitude = sampleSnapshot.longitude
-            sample.altitude = sampleSnapshot.altitude
-            sample.horizontalAccuracy = sampleSnapshot.horizontalAccuracy
-            sample.speed = sampleSnapshot.speed
-            sample.sourceRawValue = sampleSnapshot.sourceRawValue
-            sample.createdAt = sampleSnapshot.createdAt
-            if let dayKey = sampleSnapshot.dayKey {
-                sample.dayTimeline = timelinesByDayKey[dayKey]
+            for link in photoLinks {
+                guard let place = link.visitPlaceID.flatMap({ placesByID[$0] }) else { continue }
+                photosByIdentifier[link.assetLocalIdentifier]?.visitPlace = place
             }
-            if let moveID = sampleSnapshot.moveID {
-                sample.moveSegment = movesByID[moveID]
-            }
-            modelContext.insert(sample)
         }
 
         try saveIfNeeded()
+    }
+
+    private func apply(
+        _ snapshot: VisitPlaceSnapshot,
+        to place: VisitPlace,
+        timelinesByDayKey: [String: DayTimeline],
+        knownPlacesByID: [UUID: KnownPlace]
+    ) {
+        place.arrivalDate = snapshot.arrivalDate
+        place.departureDate = snapshot.departureDate
+        place.latitude = snapshot.latitude
+        place.longitude = snapshot.longitude
+        place.horizontalAccuracy = snapshot.horizontalAccuracy
+        place.userLabel = snapshot.userLabel
+        place.autoLabel = snapshot.autoLabel
+        place.comment = snapshot.comment
+        if let dayKey = snapshot.dayKey {
+            place.dayTimeline = timelinesByDayKey[dayKey]
+        }
+        place.originRaw = snapshot.originRaw ?? place.originRaw
+        place.isHiddenAsShortStop = snapshot.isHiddenAsShortStop ?? place.isHiddenAsShortStop
+        place.countryCode = snapshot.countryCode ?? place.countryCode
+        place.locality = snapshot.locality ?? place.locality
+        place.administrativeArea = snapshot.administrativeArea ?? place.administrativeArea
+        place.thoroughfare = snapshot.thoroughfare ?? place.thoroughfare
+        place.formattedAddress = snapshot.formattedAddress ?? place.formattedAddress
+        place.reviewStateRaw = snapshot.reviewStateRaw ?? place.reviewStateRaw
+
+        // A snapshot saved before these fields existed says nothing about the assignment.
+        guard let assignmentSourceRaw = snapshot.assignmentSourceRaw else { return }
+        let knownPlace = snapshot.knownPlaceID.flatMap { knownPlacesByID[$0] }
+        let knownPlaceIsGone = snapshot.knownPlaceID != nil && knownPlace == nil
+        place.knownPlace = knownPlace
+        place.assignmentSourceRaw = knownPlaceIsGone ? PlaceAssignmentSource.none.rawValue : assignmentSourceRaw
+        place.assignmentConfidence = knownPlaceIsGone ? 0 : snapshot.assignmentConfidence ?? 0
+    }
+
+    private func apply(
+        _ snapshot: MoveSegmentSnapshot,
+        to move: MoveSegment,
+        timelinesByDayKey: [String: DayTimeline],
+        placesByID: [UUID: VisitPlace]
+    ) {
+        move.startDate = snapshot.startDate
+        move.endDate = snapshot.endDate
+        move.transportModeRawValue = snapshot.transportModeRawValue
+        move.distanceMeters = snapshot.distanceMeters
+        move.stepCount = snapshot.stepCount
+        move.comment = snapshot.comment
+        move.routeCacheSignature = snapshot.routeCacheSignature
+        move.routeCacheCoordinatesData = snapshot.routeCacheCoordinatesData
+        move.manualRouteCoordinatesData = snapshot.manualRouteCoordinatesData
+        move.routeMatchPolicyRaw = snapshot.routeMatchPolicyRaw ?? move.routeMatchPolicyRaw
+        move.routeMatchConfidenceRaw = snapshot.routeMatchConfidenceRaw ?? move.routeMatchConfidenceRaw
+        move.routeMatchSummary = snapshot.routeMatchSummary ?? move.routeMatchSummary
+        move.transportModeSourceRaw = snapshot.transportModeSourceRaw ?? move.transportModeSourceRaw
+        move.originRaw = snapshot.originRaw ?? move.originRaw
+        move.speedProfileData = snapshot.speedProfileData ?? move.speedProfileData
+        move.reviewStateRaw = snapshot.reviewStateRaw ?? move.reviewStateRaw
+        if let dayKey = snapshot.dayKey {
+            move.dayTimeline = timelinesByDayKey[dayKey]
+        }
+        move.startPlace = snapshot.startPlaceID.flatMap { placesByID[$0] }
+        move.endPlace = snapshot.endPlaceID.flatMap { placesByID[$0] }
     }
 
     func runHistoricalDeduplication() throws -> HistoricalDeduplicationReport {
@@ -1747,6 +1919,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                 .map(\.arrivalDate)
                 .min()
 
+            let previousArrivalDay = Calendar.current.startOfDay(for: match.arrivalDate)
             if stay.arrivalDate < match.arrivalDate,
                match.arrivalDate.timeIntervalSince(stay.arrivalDate) <= Self.logPlaceExtendLimit {
                 match.arrivalDate = max(stay.arrivalDate, previousDeparture ?? stay.arrivalDate)
@@ -1761,10 +1934,11 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                 match.departureDate = max(wantedDeparture, match.arrivalDate)
             }
             match.horizontalAccuracy = min(match.horizontalAccuracy, Self.logPlaceAccuracy(for: stay))
-            if match.dayTimeline == nil {
+            if match.dayTimeline == nil
+                || Calendar.current.startOfDay(for: match.arrivalDate) != previousArrivalDay {
                 match.dayTimeline = try timeline(for: match.arrivalDate)
             }
-            applyGoogleStayMetadata(stay, to: match, source: source)
+            try applyGoogleStayMetadata(stay, to: match, source: source)
             return (match, false)
         }
 
@@ -1778,7 +1952,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         place.dayTimeline = try timeline(for: stay.arrivalDate)
         modelContext.insert(place)
         try applyPlaceLearning(to: place)
-        applyGoogleStayMetadata(stay, to: place, source: source)
+        try applyGoogleStayMetadata(stay, to: place, source: source)
         bulkCreatedPlaceIDs?.insert(place.id)
         return (place, true)
     }
@@ -1892,9 +2066,16 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         _ stay: LocationLogStay,
         to place: VisitPlace,
         source: LocationSampleSource
-    ) {
+    ) throws {
         applyImportedOrigin(to: place, source: source)
-        if let name = stay.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+        guard let name = stay.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else {
+            return
+        }
+        let radius = PlaceLearningEngine.rejectedLabelSearchRadius
+        let nearby = try bulkKnownPlaces?.filter { known in
+            Self.distanceMeters(from: place.coordinate, to: known.coordinate) <= radius
+        } ?? knownPlaces(near: place.coordinate, within: radius)
+        if !PlaceLearningEngine.shouldSuppress(name, nearbyPlaces: nearby) {
             place.autoLabel = name
         }
     }
@@ -2741,6 +2922,16 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             }
 
             recordRemoval(of: visit)
+            visit.keepPhotosOnDay()
+
+            // Earlier dissolves can leave several legs meeting here. Those join the same
+            // neighbours as the kept legs instead of losing their endpoint with the visit.
+            for move in visit.incomingMoves where move.id != incoming.id {
+                move.endPlace = outgoing.endPlace
+            }
+            for move in visit.outgoingMoves where move.id != outgoing.id {
+                move.startPlace = incoming.startPlace
+            }
 
             if incoming.transportMode == outgoing.transportMode {
                 return .merged(mergeSameModeLegs(incoming: incoming, outgoing: outgoing, visit: visit))
@@ -2959,20 +3150,32 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             }
 
             for move in visit.incomingMoves {
+                let previousStart = move.startDate
                 move.endDate = arrival
                 if move.endDate < move.startDate {
                     move.startDate = arrival.addingTimeInterval(-max(move.timelineDuration, 1))
                 }
+                try refileIfStartChangedDay(move, previousStart: previousStart)
             }
 
             if let departure {
                 for move in visit.outgoingMoves {
+                    let previousStart = move.startDate
                     move.startDate = departure
                     if move.endDate < move.startDate {
                         move.endDate = departure.addingTimeInterval(max(move.timelineDuration, 1))
                     }
+                    try refileIfStartChangedDay(move, previousStart: previousStart)
                 }
             }
+        }
+    }
+
+    /// Moves are filed under the day they start, and the day's stats read that list.
+    private func refileIfStartChangedDay(_ move: MoveSegment, previousStart: Date) throws {
+        let calendar = Calendar.current
+        if calendar.startOfDay(for: move.startDate) != calendar.startOfDay(for: previousStart) {
+            move.dayTimeline = try timeline(for: move.startDate)
         }
     }
 
@@ -3273,10 +3476,12 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         return try modelContext.fetch(descriptor)
     }
 
-    private func maxDeparture(_ lhs: Date?, _ rhs: Date?) -> Date? {
-        switch (lhs, rhs) {
+    /// The departure of a merged stay. When the later stay has none the person is still
+    /// there, so the merged stay stays open.
+    private func maxDeparture(_ earlier: Date?, _ later: Date?) -> Date? {
+        switch (earlier, later) {
         case let (a?, b?): return max(a, b)
-        case let (a?, nil): return a
+        case (_?, nil): return nil
         case let (nil, b?): return b
         case (nil, nil): return nil
         }
@@ -3400,21 +3605,24 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             ? lastLocation.timestamp
             : record.endDate > record.startDate ? record.endDate : record.startDate.addingTimeInterval(1)
 
+        // A figure no trip can reach (or NaN) counts as the file not reporting a distance.
+        let reportedDistance = record.distanceMeters.flatMap { reported in
+            reported > 0 && reported < Self.maximumReportedMoveDistance ? reported : nil
+        }
         let samples = try appendSamples(from: locations, source: .fileRouteImport)
         let existing = try findSimilarMove(
             startCoordinate: startPlace.coordinate,
             endCoordinate: endPlace.coordinate,
             startDate: record.startDate,
             endDate: endDate,
-            distanceMeters: record.distanceMeters ?? Self.totalDistance(for: locations),
+            distanceMeters: reportedDistance ?? Self.totalDistance(for: locations),
             transportMode: record.transportMode
         )
         let transportMode = record.transportMode != .unknown
             ? record.transportMode
             : existing?.transportMode ?? .unknown
-        let distance = (record.distanceMeters ?? 0) > 0
-            ? record.distanceMeters!
-            : max(Self.totalDistance(for: locations), existing?.distanceMeters ?? 0)
+        let distance = reportedDistance
+            ?? max(Self.totalDistance(for: locations), existing?.distanceMeters ?? 0)
         let stepCount = record.stepCount ?? existing?.stepCount
 
         let move = try upsertMove(
@@ -3571,14 +3779,15 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         }
     }
 
-    private static let exportedDayKeyParser: DateFormatter = {
+    /// Built per use so it reads today's time zone; only runs when a day is new to the store.
+    private static var exportedDayKeyParser: DateFormatter {
         let formatter = DateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = Calendar.current.timeZone
         formatter.dateFormat = "yyyy-MM-dd"
         return formatter
-    }()
+    }
 
     private func timeline(for date: Date) throws -> DayTimeline {
         let dayStart = Calendar.current.startOfDay(for: date)
@@ -3736,32 +3945,6 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         )
         descriptor.fetchLimit = 1
         return try modelContext.fetch(descriptor).first
-    }
-
-    private func deleteAllTimelineData() throws {
-        let allSamples = try modelContext.fetch(FetchDescriptor<LocationSample>())
-        allSamples.forEach(modelContext.delete)
-
-        let allMoves = try modelContext.fetch(FetchDescriptor<MoveSegment>())
-        allMoves.forEach(modelContext.delete)
-
-        let allPhotos = try modelContext.fetch(FetchDescriptor<PhotoAttachment>())
-        allPhotos.forEach(modelContext.delete)
-
-        let allPlaces = try modelContext.fetch(FetchDescriptor<VisitPlace>())
-        allPlaces.forEach(modelContext.delete)
-
-        let allKnownPlaces = try modelContext.fetch(FetchDescriptor<KnownPlace>())
-        allKnownPlaces.forEach(modelContext.delete)
-
-        let allCorrections = try modelContext.fetch(FetchDescriptor<PlaceCorrectionEvent>())
-        allCorrections.forEach(modelContext.delete)
-
-        let allCells = try modelContext.fetch(FetchDescriptor<VisitedCell>())
-        allCells.forEach(modelContext.delete)
-
-        let allTimelines = try modelContext.fetch(FetchDescriptor<DayTimeline>())
-        allTimelines.forEach(modelContext.delete)
     }
 
     private func findSimilarMove(

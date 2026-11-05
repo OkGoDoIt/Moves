@@ -220,6 +220,7 @@ struct PlaceMapDetailView: View {
         let undoManager = undoController.manager
 
         SwiftDataTimelineRepository(modelContext: modelContext).recordRemoval(of: place)
+        place.keepPhotosOnDay()
         modelContext.delete(place)
         do {
             try modelContext.save()
@@ -805,7 +806,10 @@ struct MoveMapDetailView: View {
         segment.clearCachedRouteCoordinates()
         segment.clearManualRouteCoordinates()
         routeCoordinates = MoveRouteGeometry.rawCoordinates(for: segment)
-        segment.distanceMeters = routeDistance(for: routeCoordinates)
+        // A trip with no fixes between its ends has no path to measure; keep what it recorded.
+        if routeCoordinates.count > 1, routeDistance(for: routeCoordinates) > 0 {
+            segment.distanceMeters = routeDistance(for: routeCoordinates)
+        }
         refreshMoveGPXShareFile()
         manualRouteWaypointCoordinates = isEditingManualRoute
             ? ManualRouteGeometry.waypoints(for: routeCoordinates, transportMode: newMode)

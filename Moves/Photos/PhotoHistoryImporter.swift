@@ -81,7 +81,8 @@ struct PhotoHistoryStay: Sendable {
 /// unless the implied speed is above 200 km/h (plane).
 ///
 /// Days that already have sensor, imported, or manual timeline items are never
-/// rewritten: overlapping photos are attached only.
+/// rewritten, and neither is a stay inside a recorded visit that began on an earlier
+/// day: overlapping photos are attached only.
 struct PhotoHistoryImporter {
     struct Configuration: Sendable {
         /// New stay when the gap between consecutive photos exceeds this.
@@ -273,7 +274,7 @@ struct PhotoHistoryImporter {
         }
 
         progress?(0.88, "Connecting visits…")
-        for index in 1..<stayVisits.count {
+        for index in stayVisits.indices.dropFirst() {
             guard let start = stayVisits[index - 1], let end = stayVisits[index] else {
                 continue
             }
@@ -405,12 +406,13 @@ struct PhotoHistoryImporter {
         _ stay: PhotoHistoryStay
     ) throws -> (visit: VisitPlace?, created: Bool, skippedSensorDay: Bool) {
         let day = try timeline(for: stay.arrivalDate)
-        if day.isProtectedFromPhotoBackfill {
-            let match = matchingVisit(for: stay, in: day)
+        let overlapping = try visitsOverlapping(stay)
+        let match = matchingVisit(for: stay, among: overlapping)
+        if day.isProtectedFromPhotoBackfill || overlapping.contains(where: { $0.origin != .photoInferred }) {
             return (match, false, true)
         }
 
-        if let existing = matchingVisit(for: stay, in: day) {
+        if let existing = match {
             if existing.origin == .photoInferred {
                 extendPhotoInferredVisit(existing, with: stay)
             }
@@ -527,18 +529,32 @@ struct PhotoHistoryImporter {
         _ = try repository.appendSamples(from: locations, source: .photoLibrary)
     }
 
-    private func matchingVisit(for stay: PhotoHistoryStay, in day: DayTimeline) -> VisitPlace? {
+    /// Visits whose time range touches the stay, whichever day they are filed under: a
+    /// hotel visit from Monday covers Tuesday's photos though Tuesday has no rows.
+    private func visitsOverlapping(_ stay: PhotoHistoryStay) throws -> [VisitPlace] {
         let slack = configuration.visitMatchSlack
+        let windowStart = stay.arrivalDate.addingTimeInterval(-8 * 24 * 60 * 60)
+        let windowEnd = stay.departureDate.addingTimeInterval(slack)
+        let descriptor = FetchDescriptor<VisitPlace>(
+            predicate: #Predicate { place in
+                place.arrivalDate >= windowStart && place.arrivalDate <= windowEnd
+            }
+        )
+        return try modelContext.fetch(descriptor).filter { place in
+            Self.timeRangesOverlap(
+                startA: stay.arrivalDate.addingTimeInterval(-slack),
+                endA: windowEnd,
+                startB: place.arrivalDate,
+                endB: place.departureDate ?? place.outgoingMoves.map(\.startDate).min() ?? .distantFuture
+            )
+        }
+    }
+
+    private func matchingVisit(for stay: PhotoHistoryStay, among visits: [VisitPlace]) -> VisitPlace? {
         let radius = max(configuration.visitMatchRadius, stay.radius)
-        return day.places
+        return visits
             .filter { place in
-                Self.timeRangesOverlap(
-                    startA: stay.arrivalDate.addingTimeInterval(-slack),
-                    endA: stay.departureDate.addingTimeInterval(slack),
-                    startB: place.arrivalDate,
-                    endB: place.departureDate ?? place.arrivalDate.addingTimeInterval(slack)
-                )
-                && LocationLogGeometry.distance(from: stay.coordinate, to: place.coordinate) <= radius
+                LocationLogGeometry.distance(from: stay.coordinate, to: place.coordinate) <= radius
             }
             .min { lhs, rhs in
                 LocationLogGeometry.distance(from: stay.coordinate, to: lhs.coordinate)

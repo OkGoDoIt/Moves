@@ -331,7 +331,6 @@ final class TimelineEditController: TimelineItemActions {
                 for move in moves {
                     _ = await RoadRouteMatcher.matchedCoordinates(for: move)
                 }
-                try? context.save()
             }
         }
     }
@@ -360,6 +359,7 @@ final class TimelineEditController: TimelineItemActions {
         let payload = TimelineDeletedPlacePayload(place: visit)
         performStructural(named: String(localized: "Deleted")) { repo, context in
             repo.recordRemoval(of: visit)
+            visit.keepPhotosOnDay()
             context.delete(visit)
             try context.save()
             registerRestore(payload, on: context)
@@ -509,6 +509,36 @@ private protocol TimelineUndoRestoring {
     func restore(in context: ModelContext)
 }
 
+/// Undo payloads outlive the rows they describe, so they keep IDs and find the live row
+/// when they run. A reference they held could be a deleted instance by then.
+private enum LiveTimelineRows {
+    static func visit(_ id: UUID?, in context: ModelContext) -> VisitPlace? {
+        guard let id else { return nil }
+        return (try? context.fetch(FetchDescriptor<VisitPlace>()))?.first { $0.id == id }
+    }
+
+    static func move(_ id: UUID?, in context: ModelContext) -> MoveSegment? {
+        guard let id else { return nil }
+        return (try? context.fetch(FetchDescriptor<MoveSegment>()))?.first { $0.id == id }
+    }
+
+    static func moves(_ ids: [UUID], in context: ModelContext) -> [MoveSegment] {
+        guard !ids.isEmpty else { return [] }
+        return ((try? context.fetch(FetchDescriptor<MoveSegment>())) ?? []).filter { ids.contains($0.id) }
+    }
+
+    static func knownPlace(_ id: UUID?, in context: ModelContext) -> KnownPlace? {
+        guard let id else { return nil }
+        return (try? context.fetch(FetchDescriptor<KnownPlace>()))?.first { $0.id == id }
+    }
+
+    static func photos(_ identifiers: [String], in context: ModelContext) -> [PhotoAttachment] {
+        guard !identifiers.isEmpty else { return [] }
+        return ((try? context.fetch(FetchDescriptor<PhotoAttachment>())) ?? [])
+            .filter { identifiers.contains($0.assetLocalIdentifier) }
+    }
+}
+
 private struct TimelineDeletedPlacePayload: TimelineUndoRestoring {
     let id: UUID
     let arrivalDate: Date
@@ -527,11 +557,14 @@ private struct TimelineDeletedPlacePayload: TimelineUndoRestoring {
     let countryCode: String?
     let locality: String?
     let administrativeArea: String?
+    let thoroughfare: String?
+    let formattedAddress: String?
     let reviewStateRaw: String
     let dayTimeline: DayTimeline?
-    let knownPlace: KnownPlace?
-    let outgoingMoves: [MoveSegment]
-    let incomingMoves: [MoveSegment]
+    let knownPlaceID: UUID?
+    let outgoingMoveIDs: [UUID]
+    let incomingMoveIDs: [UUID]
+    let photoIdentifiers: [String]
 
     init(place: VisitPlace) {
         id = place.id
@@ -551,19 +584,19 @@ private struct TimelineDeletedPlacePayload: TimelineUndoRestoring {
         countryCode = place.countryCode
         locality = place.locality
         administrativeArea = place.administrativeArea
+        thoroughfare = place.thoroughfare
+        formattedAddress = place.formattedAddress
         reviewStateRaw = place.reviewStateRaw
         dayTimeline = place.dayTimeline
-        knownPlace = place.knownPlace
-        outgoingMoves = place.outgoingMoves
-        incomingMoves = place.incomingMoves
+        knownPlaceID = place.knownPlace?.id
+        outgoingMoveIDs = place.outgoingMoves.map(\.id)
+        incomingMoveIDs = place.incomingMoves.map(\.id)
+        photoIdentifiers = place.photoAttachments.map(\.assetLocalIdentifier)
     }
 
+    /// Re-creates the visit and points its surviving moves and photos back at it.
     func restore(in context: ModelContext) {
-        restore(in: context, relinkMoves: true)
-    }
-
-    func restore(in context: ModelContext, relinkMoves: Bool) {
-        guard !Self.containsPlace(id, in: context) else { return }
+        guard LiveTimelineRows.visit(id, in: context) == nil else { return }
         let restored = VisitPlace(
             arrivalDate: arrivalDate,
             departureDate: departureDate,
@@ -583,23 +616,25 @@ private struct TimelineDeletedPlacePayload: TimelineUndoRestoring {
         restored.countryCode = countryCode
         restored.locality = locality
         restored.administrativeArea = administrativeArea
+        restored.thoroughfare = thoroughfare
+        restored.formattedAddress = formattedAddress
         restored.reviewStateRaw = reviewStateRaw
         restored.dayTimeline = dayTimeline
-        restored.knownPlace = knownPlace
-        context.insert(restored)
-        if relinkMoves {
-            let liveMoveIDs = Set(((try? context.fetch(FetchDescriptor<MoveSegment>())) ?? []).map(\.id))
-            for move in outgoingMoves where liveMoveIDs.contains(move.id) {
-                move.startPlace = restored
-            }
-            for move in incomingMoves where liveMoveIDs.contains(move.id) {
-                move.endPlace = restored
-            }
+        restored.knownPlace = LiveTimelineRows.knownPlace(knownPlaceID, in: context)
+        if knownPlaceID != nil, restored.knownPlace == nil {
+            restored.assignmentSource = .none
+            restored.assignmentConfidence = 0
         }
-    }
-
-    private static func containsPlace(_ id: UUID, in context: ModelContext) -> Bool {
-        (try? context.fetch(FetchDescriptor<VisitPlace>()).contains { $0.id == id }) ?? false
+        context.insert(restored)
+        for move in LiveTimelineRows.moves(outgoingMoveIDs, in: context) {
+            move.startPlace = restored
+        }
+        for move in LiveTimelineRows.moves(incomingMoveIDs, in: context) {
+            move.endPlace = restored
+        }
+        for photo in LiveTimelineRows.photos(photoIdentifiers, in: context) {
+            photo.visitPlace = restored
+        }
     }
 }
 
@@ -613,12 +648,13 @@ private struct TimelineDeletedMovePayload: TimelineUndoRestoring {
     let stepCount: Int?
     let comment: String?
     let createdAt: Date
-    let startPlace: VisitPlace?
-    let endPlace: VisitPlace?
+    let startPlaceID: UUID?
+    let endPlaceID: UUID?
     let dayTimeline: DayTimeline?
     let routeCacheSignature: String?
     let routeCacheCoordinatesData: Data?
     let manualRouteCoordinatesData: Data?
+    let speedProfileData: Data?
     let transportModeSourceRaw: String
     let originRaw: String
     let routeMatchPolicyRaw: String
@@ -637,12 +673,13 @@ private struct TimelineDeletedMovePayload: TimelineUndoRestoring {
         stepCount = segment.stepCount
         comment = segment.comment
         createdAt = segment.createdAt
-        startPlace = segment.startPlace
-        endPlace = segment.endPlace
+        startPlaceID = segment.startPlace?.id
+        endPlaceID = segment.endPlace?.id
         dayTimeline = segment.dayTimeline
         routeCacheSignature = segment.routeCacheSignature
         routeCacheCoordinatesData = segment.routeCacheCoordinatesData
         manualRouteCoordinatesData = segment.manualRouteCoordinatesData
+        speedProfileData = segment.speedProfileData
         transportModeSourceRaw = segment.transportModeSourceRaw
         originRaw = segment.originRaw
         routeMatchPolicyRaw = segment.routeMatchPolicyRaw
@@ -653,15 +690,7 @@ private struct TimelineDeletedMovePayload: TimelineUndoRestoring {
     }
 
     func restore(in context: ModelContext) {
-        restore(in: context, startPlaceOverride: nil, endPlaceOverride: nil)
-    }
-
-    func restore(
-        in context: ModelContext,
-        startPlaceOverride: VisitPlace?,
-        endPlaceOverride: VisitPlace?
-    ) {
-        guard !Self.containsMove(id, in: context) else { return }
+        guard LiveTimelineRows.move(id, in: context) == nil else { return }
         let restored = MoveSegment(
             dedupeKey: dedupeKey,
             startDate: startDate,
@@ -673,12 +702,13 @@ private struct TimelineDeletedMovePayload: TimelineUndoRestoring {
         )
         restored.id = id
         restored.createdAt = createdAt
-        restored.startPlace = startPlaceOverride ?? startPlace
-        restored.endPlace = endPlaceOverride ?? endPlace
+        restored.startPlace = LiveTimelineRows.visit(startPlaceID, in: context)
+        restored.endPlace = LiveTimelineRows.visit(endPlaceID, in: context)
         restored.dayTimeline = dayTimeline
         restored.routeCacheSignature = routeCacheSignature
         restored.routeCacheCoordinatesData = routeCacheCoordinatesData
         restored.manualRouteCoordinatesData = manualRouteCoordinatesData
+        restored.speedProfileData = speedProfileData
         restored.transportModeSourceRaw = transportModeSourceRaw
         restored.originRaw = originRaw
         restored.routeMatchPolicyRaw = routeMatchPolicyRaw
@@ -689,10 +719,6 @@ private struct TimelineDeletedMovePayload: TimelineUndoRestoring {
         for sample in samples {
             sample.moveSegment = restored
         }
-    }
-
-    private static func containsMove(_ id: UUID, in context: ModelContext) -> Bool {
-        (try? context.fetch(FetchDescriptor<MoveSegment>()).contains { $0.id == id }) ?? false
     }
 }
 
@@ -709,6 +735,10 @@ private struct DissolvedVisitUndoPayload: TimelineUndoRestoring {
     let incomingCacheSignature: String?
     let incomingCacheData: Data?
     let incomingManualData: Data?
+    let incomingPolicyRaw: String
+    let incomingConfidenceRaw: String
+    let incomingSummary: String?
+    let incomingSpeedProfile: Data?
     let outgoingStartDate: Date
     let outgoingCacheSignature: String?
     let outgoingCacheData: Data?
@@ -732,6 +762,10 @@ private struct DissolvedVisitUndoPayload: TimelineUndoRestoring {
         incomingCacheSignature = incoming.routeCacheSignature
         incomingCacheData = incoming.routeCacheCoordinatesData
         incomingManualData = incoming.manualRouteCoordinatesData
+        incomingPolicyRaw = incoming.routeMatchPolicyRaw
+        incomingConfidenceRaw = incoming.routeMatchConfidenceRaw
+        incomingSummary = incoming.routeMatchSummary
+        incomingSpeedProfile = incoming.speedProfileData
         outgoingStartDate = outgoing.startDate
         outgoingCacheSignature = outgoing.routeCacheSignature
         outgoingCacheData = outgoing.routeCacheCoordinatesData
@@ -739,24 +773,21 @@ private struct DissolvedVisitUndoPayload: TimelineUndoRestoring {
     }
 
     func restore(in context: ModelContext) {
-        visit.restore(in: context, relinkMoves: false)
-        let restoredVisit = (try? context.fetch(FetchDescriptor<VisitPlace>()))?.first { $0.id == visit.id }
+        visit.restore(in: context)
         if didDeleteOutgoing {
-            outgoing.restore(
-                in: context,
-                startPlaceOverride: restoredVisit,
-                endPlaceOverride: outgoing.endPlace
-            )
+            outgoing.restore(in: context)
         } else {
-            let liveOutgoing = (try? context.fetch(FetchDescriptor<MoveSegment>()))?.first { $0.id == outgoing.id }
-            liveOutgoing?.startPlace = restoredVisit
+            let liveOutgoing = LiveTimelineRows.move(outgoing.id, in: context)
             liveOutgoing?.startDate = outgoingStartDate
             liveOutgoing?.routeCacheSignature = outgoingCacheSignature
             liveOutgoing?.routeCacheCoordinatesData = outgoingCacheData
             liveOutgoing?.manualRouteCoordinatesData = outgoingManualData
+            liveOutgoing?.routeMatchPolicyRaw = outgoing.routeMatchPolicyRaw
+            liveOutgoing?.routeMatchConfidenceRaw = outgoing.routeMatchConfidenceRaw
+            liveOutgoing?.routeMatchSummary = outgoing.routeMatchSummary
+            liveOutgoing?.speedProfileData = outgoing.speedProfileData
         }
-        let incoming = (try? context.fetch(FetchDescriptor<MoveSegment>()))?.first { $0.id == incomingID }
-        incoming?.endPlace = restoredVisit
+        let incoming = LiveTimelineRows.move(incomingID, in: context)
         incoming?.endDate = incomingEndDate
         incoming?.distanceMeters = incomingDistance
         incoming?.transportMode = incomingMode
@@ -765,7 +796,10 @@ private struct DissolvedVisitUndoPayload: TimelineUndoRestoring {
         incoming?.routeCacheSignature = incomingCacheSignature
         incoming?.routeCacheCoordinatesData = incomingCacheData
         incoming?.manualRouteCoordinatesData = incomingManualData
-        incoming?.clearCachedRouteCoordinates()
+        incoming?.routeMatchPolicyRaw = incomingPolicyRaw
+        incoming?.routeMatchConfidenceRaw = incomingConfidenceRaw
+        incoming?.routeMatchSummary = incomingSummary
+        incoming?.speedProfileData = incomingSpeedProfile
     }
 }
 
@@ -778,13 +812,11 @@ private struct MergedVisitsUndoPayload: TimelineUndoRestoring {
     let keeperUserLabel: String?
     let keeperAutoLabel: String?
     let keeperComment: String?
-    let keeperKnownPlace: KnownPlace?
+    let keeperKnownPlaceID: UUID?
     let keeperAssignmentSourceRaw: String
     let keeperAssignmentConfidence: Double
     let removed: TimelineDeletedPlacePayload
     let connectingMoves: [TimelineDeletedMovePayload]
-    let reassignedIncoming: [MoveSegment]
-    let reassignedOutgoing: [MoveSegment]
 
     init(keeper: VisitPlace, removed: VisitPlace) {
         keeperID = keeper.id
@@ -795,7 +827,7 @@ private struct MergedVisitsUndoPayload: TimelineUndoRestoring {
         keeperUserLabel = keeper.userLabel
         keeperAutoLabel = keeper.autoLabel
         keeperComment = keeper.comment
-        keeperKnownPlace = keeper.knownPlace
+        keeperKnownPlaceID = keeper.knownPlace?.id
         keeperAssignmentSourceRaw = keeper.assignmentSourceRaw
         keeperAssignmentConfidence = keeper.assignmentConfidence
         self.removed = TimelineDeletedPlacePayload(place: removed)
@@ -804,12 +836,6 @@ private struct MergedVisitsUndoPayload: TimelineUndoRestoring {
                 || (move.startPlace?.id == removed.id && move.endPlace?.id == keeper.id)
         }
         connectingMoves = connecting.map(TimelineDeletedMovePayload.init)
-        reassignedIncoming = removed.incomingMoves.filter { move in
-            !connecting.contains(where: { $0.id == move.id })
-        }
-        reassignedOutgoing = removed.outgoingMoves.filter { move in
-            !connecting.contains(where: { $0.id == move.id })
-        }
     }
 
     func restore(in context: ModelContext) {
@@ -817,7 +843,7 @@ private struct MergedVisitsUndoPayload: TimelineUndoRestoring {
         for payload in connectingMoves {
             payload.restore(in: context)
         }
-        let keeper = (try? context.fetch(FetchDescriptor<VisitPlace>()))?.first { $0.id == keeperID }
+        let keeper = LiveTimelineRows.visit(keeperID, in: context)
         keeper?.departureDate = keeperDeparture
         keeper?.latitude = keeperLatitude
         keeper?.longitude = keeperLongitude
@@ -825,16 +851,8 @@ private struct MergedVisitsUndoPayload: TimelineUndoRestoring {
         keeper?.userLabel = keeperUserLabel
         keeper?.autoLabel = keeperAutoLabel
         keeper?.comment = keeperComment
-        keeper?.knownPlace = keeperKnownPlace
+        keeper?.knownPlace = LiveTimelineRows.knownPlace(keeperKnownPlaceID, in: context)
         keeper?.assignmentSourceRaw = keeperAssignmentSourceRaw
         keeper?.assignmentConfidence = keeperAssignmentConfidence
-
-        let restored = (try? context.fetch(FetchDescriptor<VisitPlace>()))?.first { $0.id == removed.id }
-        for move in reassignedIncoming {
-            move.endPlace = restored
-        }
-        for move in reassignedOutgoing {
-            move.startPlace = restored
-        }
     }
 }

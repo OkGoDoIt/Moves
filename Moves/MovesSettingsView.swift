@@ -586,6 +586,9 @@ struct MovesSettingsView: View {
                 try TimelineDeduplicationSnapshotStore.save(snapshot)
 
                 let report = try repository.runHistoricalDeduplication()
+                try TimelineDeduplicationSnapshotStore.save(
+                    snapshot.changes(comparedTo: repository.createUndoSnapshot())
+                )
                 hasDedupeUndoSnapshot = TimelineDeduplicationSnapshotStore.hasSnapshot
 
                 if report.totalRemovedCount == 0 {
@@ -618,7 +621,7 @@ struct MovesSettingsView: View {
                 try repository.restoreFromUndoSnapshot(snapshot)
                 try TimelineDeduplicationSnapshotStore.clear()
                 hasDedupeUndoSnapshot = TimelineDeduplicationSnapshotStore.hasSnapshot
-                maintenanceMessage = "Restored the previous timeline snapshot from before deduplication."
+                maintenanceMessage = "Put back what the last deduplication merged."
             } catch {
                 maintenanceMessage = "Could not restore snapshot: \(error.localizedDescription)"
             }

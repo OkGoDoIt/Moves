@@ -213,9 +213,16 @@ enum RoadRouteMatcher {
 
     static func matchedCoordinates(for move: MoveSegment) async -> [CLLocationCoordinate2D] {
         let coordinates = await resolveDisplayedCoordinates(for: move)
+        // The stored distance is what was measured or imported, and totals read it, so
+        // showing a path leaves it alone. Only a path the person drew, or a move with no
+        // distance yet, takes the displayed length.
         let displayedDistance = routeDistance(for: coordinates)
-        if abs(move.distanceMeters - displayedDistance) > 0.01 {
-            move.distanceMeters = displayedDistance
+        if displayedDistance > 0,
+           move.manualRouteCoordinatesData != nil || move.distanceMeters <= 0,
+           abs(move.distanceMeters - displayedDistance) > 0.01 {
+            move.writeDerivedRouteData {
+                move.distanceMeters = displayedDistance
+            }
         }
         return coordinates
     }
@@ -227,7 +234,9 @@ enum RoadRouteMatcher {
         }
 
         if move.routeMatchPolicy == .manual {
-            move.routeMatchPolicy = .auto
+            move.writeDerivedRouteData {
+                move.routeMatchPolicy = .auto
+            }
         }
 
         let fallback = MoveRouteGeometry.rawCoordinates(for: move)
@@ -245,7 +254,7 @@ enum RoadRouteMatcher {
                 summary: RouteMatchSummaries.recorded(usesRouteTracking: move.usesHighAccuracyRouteTracking)
             )
             await memo.storePersistent(coordinates, for: cacheKey)
-            move.storeCachedRouteCoordinates(coordinates, signature: cacheSignature)
+            storeCache(coordinates, signature: cacheSignature, on: move)
             apply(resolution: resolution, to: move)
             return coordinates
         }
@@ -258,7 +267,7 @@ enum RoadRouteMatcher {
         if let cached = await memo.cached(for: cacheKey) {
             switch cached {
             case .persistent(let coordinates):
-                move.storeCachedRouteCoordinates(coordinates, signature: cacheSignature)
+                storeCache(coordinates, signature: cacheSignature, on: move)
                 return coordinates
             case .transient(let coordinates):
                 return coordinates
@@ -334,7 +343,7 @@ enum RoadRouteMatcher {
         }
         if result.cacheable {
             await memo.storePersistent(result.coordinates, for: cacheKey)
-            move.storeCachedRouteCoordinates(result.coordinates, signature: cacheSignature)
+            storeCache(result.coordinates, signature: cacheSignature, on: move)
         } else {
             await memo.storeTransient(
                 result.coordinates,
@@ -345,10 +354,28 @@ enum RoadRouteMatcher {
     }
 
     private static func apply(resolution: RouteMatchResolution, to move: MoveSegment) {
-        move.routeMatchConfidence = resolution.confidence
-        move.routeMatchSummary = resolution.summary
-        if resolution.summary == RouteMatchSummaries.manual {
-            move.routeMatchPolicy = .manual
+        let becomesManual = resolution.summary == RouteMatchSummaries.manual && move.routeMatchPolicy != .manual
+        guard becomesManual
+            || move.routeMatchConfidence != resolution.confidence
+            || move.routeMatchSummary != resolution.summary
+        else { return }
+        move.writeDerivedRouteData {
+            move.routeMatchConfidence = resolution.confidence
+            move.routeMatchSummary = resolution.summary
+            if becomesManual {
+                move.routeMatchPolicy = .manual
+            }
+        }
+    }
+
+    private static func storeCache(
+        _ coordinates: [CLLocationCoordinate2D],
+        signature: String,
+        on move: MoveSegment
+    ) {
+        guard move.routeCacheSignature != signature || move.routeCacheCoordinatesData == nil else { return }
+        move.writeDerivedRouteData {
+            move.storeCachedRouteCoordinates(coordinates, signature: signature)
         }
     }
 
@@ -1566,6 +1593,7 @@ enum RouteMatchBackgroundTask {
         let work = Task {
             do {
                 let container = try await MainActor.run { try MovesApp.sharedContainer() }
+                await TimelineSchemaUpgrader.waitUntilFinished()
                 await rematchPendingMoves(in: container)
                 task.setTaskCompleted(success: !Task.isCancelled)
             } catch {

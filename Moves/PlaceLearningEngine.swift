@@ -31,6 +31,9 @@ enum PlaceLearningEngine {
     static let negativeEventsBeforeShrink = 3
     static let maxVisitsForFootprint = 200
     static let maxStayDurationSamples = 50
+    /// How far a stored center or radius can sit from a rebuild and still count as learned.
+    static let handSetCenterTolerance: CLLocationDistance = 1
+    static let handSetRadiusTolerance: CLLocationDistance = 0.5
 
     static let proximityWeight = 0.45
     static let hourWeight = 0.20
@@ -378,6 +381,10 @@ enum PlaceLearningEngine {
 
     /// Rebuilds `place`'s footprint from user-confirmed visits. No-ops when
     /// `visit` is not a `.user` assignment to this place.
+    ///
+    /// A stored center or radius the earlier confirmed visits do not produce was set on
+    /// purpose (a moved pin, a shrink), so it stays. A kept radius grows only as far as
+    /// this visit needs.
     static func learn(
         from visit: VisitPlace,
         onto place: KnownPlace,
@@ -385,7 +392,29 @@ enum PlaceLearningEngine {
     ) {
         guard visit.assignmentSource == .user else { return }
         guard visit.knownPlace?.id == place.id else { return }
-        apply(learnedFootprint(from: confirmedVisits(on: place, including: visit), calendar: calendar), to: place)
+        let visits = confirmedVisits(on: place, including: visit)
+        var footprint = learnedFootprint(from: visits, calendar: calendar)
+        let earlier = visits.filter { $0.id != visit.id }
+        if !earlier.isEmpty {
+            let rebuilt = learnedFootprint(from: earlier, calendar: calendar)
+            let rebuiltCenter = CLLocationCoordinate2D(
+                latitude: rebuilt.centerLatitude,
+                longitude: rebuilt.centerLongitude
+            )
+            if distance(from: place.coordinate, to: rebuiltCenter) > handSetCenterTolerance {
+                footprint.centerLatitude = place.centerLatitude
+                footprint.centerLongitude = place.centerLongitude
+            }
+            if abs(place.footprintRadius - rebuilt.footprintRadius) > handSetRadiusTolerance {
+                let center = CLLocationCoordinate2D(
+                    latitude: footprint.centerLatitude,
+                    longitude: footprint.centerLongitude
+                )
+                let reach = distance(from: center, to: visit.coordinate) * radiusGrowthFactor
+                footprint.footprintRadius = max(place.footprintRadius, reach)
+            }
+        }
+        apply(footprint, to: place)
     }
 
     /// Pure footprint math. `visits` must already be the confirmed set.
@@ -515,6 +544,9 @@ enum PlaceLearningEngine {
         let confirmed = destination.visits
             .filter { $0.assignmentSource == .user }
             .map(VisitSnapshot.init)
+        // With no confirmed visits there is nothing to learn from; an empty footprint
+        // would move the destination to (0, 0).
+        guard !confirmed.isEmpty else { return }
         apply(learnedFootprint(from: confirmed, calendar: calendar), to: destination)
     }
 
@@ -522,7 +554,9 @@ enum PlaceLearningEngine {
     static func suppressedAutoLabels(from places: [KnownPlace]) -> Set<String> {
         Set(
             places
-                .flatMap(\.rejectedAutoLabels)
+                .flatMap { place in
+                    place.rejectedAutoLabels.filter { !isSameName($0, place.name) }
+                }
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
                 .filter { !$0.isEmpty }
         )
@@ -602,10 +636,19 @@ enum PlaceLearningEngine {
     private static func appendRejectedAutoLabel(_ label: String?, to place: KnownPlace) {
         let trimmed = label?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !trimmed.isEmpty else { return }
+        // Keeping the suggested name is accepting it, not rejecting it.
+        guard !isSameName(trimmed, place.name) else { return }
         let existing = place.rejectedAutoLabels
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
         if existing.contains(trimmed.lowercased()) { return }
         place.rejectedAutoLabels.append(trimmed)
+    }
+
+    private static func isSameName(_ lhs: String, _ rhs: String) -> Bool {
+        lhs.trimmingCharacters(in: .whitespacesAndNewlines).compare(
+            rhs.trimmingCharacters(in: .whitespacesAndNewlines),
+            options: [.caseInsensitive, .diacriticInsensitive]
+        ) == .orderedSame
     }
 
     private static func confirmedVisits(on place: KnownPlace, including visit: VisitPlace) -> [VisitSnapshot] {

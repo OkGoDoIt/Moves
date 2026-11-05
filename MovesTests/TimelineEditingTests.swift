@@ -608,6 +608,178 @@ final class TimelineEditingTests: XCTestCase {
         XCTAssertEqual(manual.routeMatchPolicy, .manual)
     }
 
+    func testUndoingAMergeReconnectsTheMoveAndPhotosToTheRestoredStop() throws {
+        let (_, context, _) = try makeRepository()
+        let first = insertPlace(in: context, arrival: date(12, 0), departure: date(12, 20), latitude: 52.5200, longitude: 13.4050, userLabel: "Home")
+        let second = insertPlace(in: context, arrival: date(12, 25), departure: date(13, 0), latitude: 52.5204, longitude: 13.4053, userLabel: "Home")
+        let later = insertPlace(in: context, arrival: date(13, 30), departure: nil, latitude: 52.53, longitude: 13.41)
+        let connecting = insertMove(in: context, from: first, to: second, start: date(12, 20), end: date(12, 25), mode: .walking, distance: 40)
+        let onward = insertMove(in: context, from: second, to: later, start: date(13, 0), end: date(13, 30), mode: .walking, distance: 900)
+        let photo = insertPhoto(in: context, identifier: "asset", on: second)
+        try context.save()
+        let secondID = second.id
+        let connectingID = connecting.id
+        let onwardID = onward.id
+        let firstID = first.id
+
+        let (controller, undoController) = makeEditController(for: context)
+        grouped(undoController) { controller.mergeWithNextPlace(first) }
+        XCTAssertEqual(photo.visitPlace?.id, firstID)
+
+        controller.undoLastChange()
+
+        let restored = try XCTUnwrap(try context.fetch(FetchDescriptor<VisitPlace>()).first { $0.id == secondID })
+        let moves = try context.fetch(FetchDescriptor<MoveSegment>())
+        let restoredConnecting = try XCTUnwrap(moves.first { $0.id == connectingID })
+        XCTAssertEqual(restoredConnecting.startPlace?.id, firstID)
+        XCTAssertEqual(restoredConnecting.endPlace?.id, secondID)
+        XCTAssertEqual(Set(restored.incomingMoves.map(\.id)), [connectingID])
+        XCTAssertEqual(Set(restored.outgoingMoves.map(\.id)), [onwardID])
+        XCTAssertEqual(restored.photoAttachments.map(\.assetLocalIdentifier), ["asset"])
+        XCTAssertNoThrow(try context.save())
+    }
+
+    func testDeletingAPlaceThenItsMoveUndoesInReverseOrder() throws {
+        let (_, context, _) = try makeRepository()
+        let home = insertPlace(in: context, arrival: date(9, 0), departure: date(10, 0), latitude: 52.52, longitude: 13.40)
+        let cafe = insertPlace(in: context, arrival: date(10, 20), departure: date(10, 50), latitude: 52.53, longitude: 13.41)
+        let move = insertMove(in: context, from: home, to: cafe, start: date(10, 0), end: date(10, 20), mode: .walking, distance: 900)
+        try context.save()
+        let cafeID = cafe.id
+        let moveID = move.id
+        let homeID = home.id
+
+        let (controller, undoController) = makeEditController(for: context)
+        grouped(undoController) { controller.requestDeletePlace(cafe) }
+        grouped(undoController) { controller.requestDeleteMove(move) }
+        XCTAssertNil(try context.fetch(FetchDescriptor<VisitPlace>()).first { $0.id == cafeID })
+        XCTAssertNil(try context.fetch(FetchDescriptor<MoveSegment>()).first { $0.id == moveID })
+
+        controller.undoLastChange()
+        controller.undoLastChange()
+
+        let restoredCafe = try XCTUnwrap(try context.fetch(FetchDescriptor<VisitPlace>()).first { $0.id == cafeID })
+        let restoredMove = try XCTUnwrap(try context.fetch(FetchDescriptor<MoveSegment>()).first { $0.id == moveID })
+        XCTAssertEqual(restoredMove.startPlace?.id, homeID)
+        XCTAssertEqual(restoredMove.endPlace?.id, cafeID)
+        XCTAssertEqual(restoredCafe.incomingMoves.map(\.id), [moveID])
+        XCTAssertNoThrow(try context.save())
+    }
+
+    func testUndoingNotAStopBringsBackPhotosAndRouteState() throws {
+        let (_, context, _) = try makeRepository()
+        let home = insertPlace(in: context, arrival: date(9, 50), departure: date(10, 0), latitude: 52.52, longitude: 13.40)
+        let brief = insertPlace(in: context, arrival: date(10, 10), departure: date(10, 12), latitude: 52.521, longitude: 13.405)
+        brief.thoroughfare = "Linienstrasse"
+        let cafe = insertPlace(in: context, arrival: date(10, 32), departure: date(11, 0), latitude: 52.53, longitude: 13.41)
+        let incoming = insertMove(in: context, from: home, to: brief, start: date(10, 0), end: date(10, 10), mode: .walking, distance: 800)
+        incoming.storeCachedRouteCoordinates([home.coordinate, brief.coordinate], signature: "incoming-route")
+        incoming.speedProfileData = Data([1, 2, 3])
+        let outgoing = insertMove(in: context, from: brief, to: cafe, start: date(10, 12), end: date(10, 32), mode: .walking, distance: 1_600)
+        let tracked = insertSample(in: context, at: date(10, 20), latitude: 52.525, longitude: 13.408, move: outgoing)
+        tracked.source = .routeTracking
+        _ = insertPhoto(in: context, identifier: "asset", on: brief)
+        try context.save()
+        let briefID = brief.id
+        let outgoingID = outgoing.id
+
+        let (controller, undoController) = makeEditController(for: context)
+        grouped(undoController) { controller.markNotAStop(brief) }
+
+        XCTAssertEqual(incoming.routeMatchPolicy, .recorded)
+        let kept = try XCTUnwrap(try context.fetch(FetchDescriptor<PhotoAttachment>()).first)
+        XCTAssertNil(kept.visitPlace)
+        XCTAssertNotNil(kept.dayTimeline)
+
+        controller.undoLastChange()
+
+        let restored = try XCTUnwrap(try context.fetch(FetchDescriptor<VisitPlace>()).first { $0.id == briefID })
+        XCTAssertEqual(restored.thoroughfare, "Linienstrasse")
+        XCTAssertEqual(restored.photoAttachments.map(\.assetLocalIdentifier), ["asset"])
+        XCTAssertEqual(incoming.routeMatchPolicy, .auto)
+        XCTAssertEqual(incoming.routeCacheSignature, "incoming-route")
+        XCTAssertEqual(incoming.speedProfileData, Data([1, 2, 3]))
+        XCTAssertEqual(incoming.endPlace?.id, briefID)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<MoveSegment>()).first { $0.id == outgoingID }?.startPlace?.id, briefID)
+    }
+
+    func testDissolvingAStopKeepsEveryLegThatMeetsThereConnected() throws {
+        let (_, context, _) = try makeRepository()
+        let start = insertPlace(in: context, arrival: date(9, 0), departure: date(10, 0), latitude: 52.50, longitude: 13.40)
+        let first = insertPlace(in: context, arrival: date(10, 10), departure: date(10, 12), latitude: 52.51, longitude: 13.41)
+        let second = insertPlace(in: context, arrival: date(10, 30), departure: date(10, 32), latitude: 52.52, longitude: 13.42)
+        let end = insertPlace(in: context, arrival: date(10, 50), departure: nil, latitude: 52.53, longitude: 13.43)
+        let walk = insertMove(in: context, from: start, to: first, start: date(10, 0), end: date(10, 10), mode: .walking, distance: 800)
+        let drive = insertMove(in: context, from: first, to: second, start: date(10, 12), end: date(10, 30), mode: .automotive, distance: 4_000)
+        let walkOn = insertMove(in: context, from: second, to: end, start: date(10, 32), end: date(10, 50), mode: .walking, distance: 900)
+        try context.save()
+        let secondID = second.id
+        let startID = start.id
+        let endID = end.id
+
+        let (controller, undoController) = makeEditController(for: context)
+        grouped(undoController) { controller.markNotAStop(first) }
+        grouped(undoController) { controller.markNotAStop(second) }
+
+        XCTAssertEqual(walk.endPlace?.id, endID)
+        XCTAssertEqual(drive.endPlace?.id, endID)
+        XCTAssertEqual(walkOn.startPlace?.id, startID)
+
+        controller.undoLastChange()
+
+        let restored = try XCTUnwrap(try context.fetch(FetchDescriptor<VisitPlace>()).first { $0.id == secondID })
+        XCTAssertEqual(Set(restored.incomingMoves.map(\.id)), [walk.id, drive.id])
+        XCTAssertEqual(restored.outgoingMoves.map(\.id), [walkOn.id])
+    }
+
+    func testMergingIntoAStayThatIsStillOpenLeavesItOpen() throws {
+        let (repository, context, _) = try makeRepository()
+        let earlier = insertPlace(in: context, arrival: date(8, 0), departure: date(9, 0), latitude: 52.52, longitude: 13.40, userLabel: "Home")
+        let current = insertPlace(in: context, arrival: date(9, 10), departure: nil, latitude: 52.52, longitude: 13.40, userLabel: "Home")
+        try context.save()
+
+        let merged = try repository.mergeVisits(earlier, current)
+
+        XCTAssertNil(merged.departureDate)
+    }
+
+    func testEditingADepartureIntoTheNextDayRefilesTheTrip() throws {
+        let (repository, context, _) = try makeRepository()
+        let visit = insertPlace(in: context, arrival: date(10, 0), departure: date(11, 0), latitude: 52.52, longitude: 13.40)
+        let next = insertPlace(in: context, arrival: date(11, 20), departure: nil, latitude: 52.53, longitude: 13.41)
+        let outgoing = insertMove(in: context, from: visit, to: next, start: date(11, 0), end: date(11, 20), mode: .walking, distance: 500)
+        try context.save()
+        let nextDay = date(11, 0).addingTimeInterval(24 * 60 * 60)
+
+        try repository.updateTimes(of: visit, arrival: date(10, 0), departure: nextDay)
+
+        XCTAssertEqual(outgoing.dayTimeline?.dayKey, DayTimeline.makeDayKey(for: nextDay))
+    }
+
+    func testRouteMatchingAfterNotAStopDoesNotGetBetweenThePersonAndUndo() async throws {
+        RoadRouteMatcher.snappingLevelOverride = .off
+        defer { RoadRouteMatcher.snappingLevelOverride = nil }
+        let (_, context, _) = try makeRepository()
+        let home = insertPlace(in: context, arrival: date(9, 50), departure: date(10, 0), latitude: 52.52, longitude: 13.40)
+        let brief = insertPlace(in: context, arrival: date(10, 10), departure: date(10, 12), latitude: 52.521, longitude: 13.405)
+        let cafe = insertPlace(in: context, arrival: date(10, 32), departure: date(11, 0), latitude: 52.53, longitude: 13.41)
+        _ = insertMove(in: context, from: home, to: brief, start: date(10, 0), end: date(10, 10), mode: .walking, distance: 800)
+        _ = insertMove(in: context, from: brief, to: cafe, start: date(10, 12), end: date(10, 32), mode: .walking, distance: 1_600)
+        try context.save()
+        let briefID = brief.id
+
+        let (controller, undoController) = makeEditController(for: context)
+        grouped(undoController) { controller.markNotAStop(brief) }
+        let merged = try XCTUnwrap(try context.fetch(FetchDescriptor<MoveSegment>()).first)
+        _ = await RoadRouteMatcher.matchedCoordinates(for: merged)
+        XCTAssertNotNil(merged.routeMatchSummary)
+
+        controller.undoLastChange()
+
+        XCTAssertNotNil(try context.fetch(FetchDescriptor<VisitPlace>()).first { $0.id == briefID })
+        XCTAssertEqual(try context.fetch(FetchDescriptor<MoveSegment>()).count, 2)
+    }
+
     func testPhotoLibrarySamplesAreNotRouteTracks() {
         XCTAssertEqual(LocationSampleSource.photoLibrary.priority, 1)
         XCTAssertFalse(LocationSampleSource.photoLibrary.isRouteTrack)
@@ -615,6 +787,28 @@ final class TimelineEditingTests: XCTestCase {
         XCTAssertTrue(LocationSampleSource.googleTimelineImport.isRouteTrack)
         XCTAssertEqual(LocationSampleSource.fileRouteImport.priority, 7)
         XCTAssertTrue(LocationSampleSource.routeTracking.isRouteTrack)
+    }
+
+    private func makeEditController(for context: ModelContext) -> (TimelineEditController, AppUndoController) {
+        let controller = TimelineEditController()
+        let undoController = AppUndoController()
+        undoController.manager.groupsByEvent = false
+        controller.attach(modelContext: context, undoController: undoController, toast: UndoToastPresenter())
+        return (controller, undoController)
+    }
+
+    private func grouped(_ undoController: AppUndoController, _ action: () -> Void) {
+        undoController.manager.beginUndoGrouping()
+        action()
+        undoController.manager.endUndoGrouping()
+    }
+
+    private func insertPhoto(in context: ModelContext, identifier: String, on visit: VisitPlace) -> PhotoAttachment {
+        let photo = PhotoAttachment(assetLocalIdentifier: identifier, capturedAt: visit.arrivalDate)
+        photo.visitPlace = visit
+        photo.dayTimeline = visit.dayTimeline
+        context.insert(photo)
+        return photo
     }
 
     private func makeRepository() throws -> (SwiftDataTimelineRepository, ModelContext, ModelContainer) {

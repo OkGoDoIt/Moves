@@ -128,7 +128,9 @@ enum SpeedProfileBuilder {
     /// Persists a profile next to the route cache so it invalidates with the matched path.
     static func store(_ fractions: [Float], on move: MoveSegment, signature: String) {
         guard move.routeCacheSignature == signature else { return }
-        move.speedProfileData = encode(fractions)
+        move.writeDerivedRouteData {
+            move.speedProfileData = encode(fractions)
+        }
     }
 
     /// Builds the profile off the main actor, then writes the cache on the calling actor.

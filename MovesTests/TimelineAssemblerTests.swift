@@ -1302,7 +1302,8 @@ final class TimelineAssemblerTests: XCTestCase {
 
     func testUndoSnapshotRestoresPreviousTimelineState() throws {
         let container = try makeInMemoryContainer()
-        let repository = SwiftDataTimelineRepository(modelContainer: container)
+        let context = ModelContext(container)
+        let repository = SwiftDataTimelineRepository(modelContext: context)
 
         let startDate = Date(timeIntervalSince1970: 1_710_000_000)
         let endDate = startDate.addingTimeInterval(15 * 60)
@@ -1341,10 +1342,9 @@ final class TimelineAssemblerTests: XCTestCase {
 
         let snapshot = try repository.createUndoSnapshot()
 
-        let mutationContext = ModelContext(container)
-        let allMoves = try mutationContext.fetch(FetchDescriptor<MoveSegment>())
-        allMoves.forEach(mutationContext.delete)
-        try mutationContext.save()
+        let allMoves = try context.fetch(FetchDescriptor<MoveSegment>())
+        allMoves.forEach(context.delete)
+        try context.save()
 
         try repository.restoreFromUndoSnapshot(snapshot)
 
@@ -1352,6 +1352,150 @@ final class TimelineAssemblerTests: XCTestCase {
         let restoredMoves = try verificationContext.fetch(FetchDescriptor<MoveSegment>())
         XCTAssertEqual(restoredMoves.count, 1)
         XCTAssertEqual(restoredMoves.first?.transportMode, .cycling)
+    }
+
+    func testUndoingDeduplicationPutsBackWhatItMergedAndKeepsEverythingElse() throws {
+        let container = try makeInMemoryContainer()
+        let context = ModelContext(container)
+        let repository = SwiftDataTimelineRepository(modelContext: context)
+
+        let arrival = Date(timeIntervalSince1970: 1_710_000_000)
+        let timeline = DayTimeline(dayStart: arrival)
+        context.insert(timeline)
+        let known = KnownPlace(name: "Cafe", latitude: 52.5200, longitude: 13.4050)
+        context.insert(known)
+
+        let shortStay = VisitPlace(
+            arrivalDate: arrival,
+            departureDate: arrival.addingTimeInterval(6 * 60),
+            latitude: 52.5200,
+            longitude: 13.4050,
+            horizontalAccuracy: 20,
+            userLabel: "Cafe"
+        )
+        shortStay.dayTimeline = timeline
+        shortStay.knownPlace = known
+        shortStay.assignmentSource = .user
+        shortStay.assignmentConfidence = 1
+        shortStay.reviewState = .confirmed
+        context.insert(shortStay)
+
+        let longStay = VisitPlace(
+            arrivalDate: arrival.addingTimeInterval(15),
+            departureDate: arrival.addingTimeInterval(9 * 60),
+            latitude: 52.5201,
+            longitude: 13.4051,
+            horizontalAccuracy: 18
+        )
+        longStay.dayTimeline = timeline
+        context.insert(longStay)
+
+        let photo = PhotoAttachment(assetLocalIdentifier: "asset", capturedAt: arrival)
+        photo.visitPlace = shortStay
+        photo.dayTimeline = timeline
+        context.insert(photo)
+        context.insert(
+            PlaceCorrectionEvent(
+                visitPlaceID: shortStay.id,
+                toKnownPlaceID: known.id,
+                latitude: 52.5200,
+                longitude: 13.4050,
+                arrivalHour: 9,
+                weekday: 1,
+                stayDuration: 360
+            )
+        )
+        context.insert(VisitedCell(cellKey: "cell", visitedAt: arrival))
+        try context.save()
+
+        let shortStayID = shortStay.id
+        let longStayID = longStay.id
+        let before = try repository.createUndoSnapshot()
+        let report = try repository.runHistoricalDeduplication()
+        XCTAssertEqual(report.removedPlaceCount, 1)
+        let changes = before.changes(comparedTo: try repository.createUndoSnapshot())
+        XCTAssertEqual(changes.removedPlaceIDs, [shortStayID])
+        XCTAssertEqual(photo.visitPlace?.id, longStayID)
+
+        let recordedSince = VisitPlace(
+            arrivalDate: arrival.addingTimeInterval(2 * 60 * 60),
+            departureDate: nil,
+            latitude: 52.6000,
+            longitude: 13.5000,
+            horizontalAccuracy: 20
+        )
+        recordedSince.dayTimeline = timeline
+        context.insert(recordedSince)
+        try context.save()
+        let recordedSinceID = recordedSince.id
+
+        try repository.restoreFromUndoSnapshot(changes)
+
+        let places = try context.fetch(FetchDescriptor<VisitPlace>())
+        XCTAssertEqual(Set(places.map(\.id)), [shortStayID, longStayID, recordedSinceID])
+        let restored = try XCTUnwrap(places.first { $0.id == shortStayID })
+        XCTAssertEqual(restored.userLabel, "Cafe")
+        XCTAssertEqual(restored.knownPlace?.id, known.id)
+        XCTAssertEqual(restored.assignmentSource, .user)
+        XCTAssertEqual(restored.reviewState, .confirmed)
+        XCTAssertEqual(restored.photoAttachments.map(\.assetLocalIdentifier), ["asset"])
+        XCTAssertNil(places.first { $0.id == longStayID }?.userLabel)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<KnownPlace>()).count, 1)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<PlaceCorrectionEvent>()).count, 1)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<VisitedCell>()).count, 1)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<PhotoAttachment>()).count, 1)
+    }
+
+    func testImportedMoveWithAnAbsurdDistanceFallsBackToItsPath() throws {
+        let container = try makeInMemoryContainer()
+        let context = ModelContext(container)
+        let repository = SwiftDataTimelineRepository(modelContext: context)
+        let start = Date(timeIntervalSince1970: 1_710_000_000)
+        let move = TimelineArchiveMove(
+            startDate: start,
+            endDate: start.addingTimeInterval(10 * 60),
+            transportMode: .walking,
+            distanceMeters: 1e30,
+            stepCount: nil,
+            startPlaceTitle: nil,
+            endPlaceTitle: nil,
+            comment: nil,
+            dayKey: nil,
+            points: [
+                TimelineArchivePoint(latitude: 52.5200, longitude: 13.4050, elevation: nil, timestamp: start),
+                TimelineArchivePoint(
+                    latitude: 52.5300,
+                    longitude: 13.4100,
+                    elevation: nil,
+                    timestamp: start.addingTimeInterval(10 * 60)
+                ),
+            ],
+            source: .csv
+        )
+
+        _ = try repository.importTimelineArchive(TimelineArchive(places: [], moves: [move], formats: [.csv]))
+
+        let imported = try XCTUnwrap(try context.fetch(FetchDescriptor<MoveSegment>()).first)
+        XCTAssertGreaterThan(imported.distanceMeters, 0)
+        XCTAssertLessThan(imported.distanceMeters, 10_000)
+    }
+
+    func testDayKeyFollowsTheTimeZoneAfterAFlight() throws {
+        let original = NSTimeZone.default
+        defer { NSTimeZone.default = original }
+
+        NSTimeZone.default = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
+        _ = DayTimeline.makeDayKey(for: .now)
+        NSTimeZone.default = try XCTUnwrap(TimeZone(identifier: "Europe/Berlin"))
+        try XCTSkipUnless(
+            Calendar.current.timeZone.identifier == "Europe/Berlin",
+            "Calendar.current did not pick up the new default time zone"
+        )
+
+        let berlinMorning = try XCTUnwrap(
+            Calendar.current.date(from: DateComponents(year: 2026, month: 11, day: 5, hour: 0, minute: 30))
+        )
+        XCTAssertEqual(DayTimeline.makeDayKey(for: berlinMorning), "2026-11-05")
     }
 
     func testDeleteMoveUndoRegistrationRestoresMoveSnapshot() throws {

@@ -136,6 +136,53 @@ final class RouteMatchPolicyTests: XCTestCase {
         XCTAssertEqual(move.routeMatchSummary, RouteMatchSummaries.estimatedNoFixes)
     }
 
+    func testDisplayingAMoveKeepsItsStoredDistance() async throws {
+        let move = makeEndpointCarMove()
+        move.distanceMeters = 12_345
+        RoadRouteMatcher.directionsProvider = FakeDirectionsProvider(style: .close)
+
+        _ = await RoadRouteMatcher.matchedCoordinates(for: move)
+
+        XCTAssertEqual(move.distanceMeters, 12_345, accuracy: 0.01)
+    }
+
+    func testRoundTripWithoutFixesKeepsItsStoredDistance() async throws {
+        let move = makeEndpointCarMove()
+        move.endPlace = move.startPlace
+        move.distanceMeters = 5_000
+        RoadRouteMatcher.directionsProvider = FakeDirectionsProvider(style: .close)
+
+        _ = await RoadRouteMatcher.matchedCoordinates(for: move)
+
+        XCTAssertEqual(move.distanceMeters, 5_000, accuracy: 0.01)
+    }
+
+    func testMoveWithNoDistanceTakesItsDisplayedLength() async throws {
+        let move = makeEndpointCarMove()
+        move.distanceMeters = 0
+        RoadRouteMatcher.directionsProvider = FakeDirectionsProvider(style: .close)
+
+        let coordinates = await RoadRouteMatcher.matchedCoordinates(for: move)
+
+        XCTAssertEqual(move.distanceMeters, routeDistance(for: coordinates), accuracy: 0.01)
+        XCTAssertGreaterThan(move.distanceMeters, 0)
+    }
+
+    func testMatchingAMoveStaysOffTheUndoStack() async throws {
+        let fixture = try loadFixture("dense-walk")
+        let move = makeMove(from: fixture, includePlaces: true, policy: .recorded)
+        try context.save()
+        let undoManager = UndoManager()
+        context.undoManager = undoManager
+
+        _ = await RoadRouteMatcher.matchedCoordinates(for: move)
+        try context.save()
+
+        XCTAssertNotNil(move.routeCacheCoordinatesData)
+        XCTAssertFalse(undoManager.canUndo)
+        XCTAssertTrue(context.undoManager === undoManager)
+    }
+
     func testTrainNeverCallsDirections() async throws {
         let fixture = try loadFixture("dense-walk")
         let move = makeMove(from: fixture, includePlaces: true, mode: .train)
