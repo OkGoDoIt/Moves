@@ -71,6 +71,64 @@ final class VisitedCellStoreTests: XCTestCase {
         XCTAssertEqual(cells[0].sampleCount, 1)
     }
 
+    func testEnsureBuiltBackfillsHistoryOnceEvenWithACellAlreadyCaptured() throws {
+        let (context, _) = try makeContext()
+        let suiteName = "VisitedCellStoreTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        // An upgraded install: months of samples, and capture got one in before the first Map open.
+        let history = sample(latitude: 40.758, longitude: -73.9855, at: date(8, 0))
+        let captured = sample(latitude: 52.52, longitude: 13.405, at: date(9, 0))
+        context.insert(history)
+        context.insert(captured)
+        try context.save()
+        try VisitedCellStore.record([captured], in: context)
+        try context.save()
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<VisitedCell>()), 1)
+
+        try VisitedCellStore.ensureBuilt(in: context, defaults: defaults)
+
+        let cells = try context.fetch(FetchDescriptor<VisitedCell>())
+        XCTAssertEqual(cells.count, 2)
+        XCTAssertEqual(cells.map(\.sampleCount), [1, 1])
+
+        // It only needs doing once. Later samples arrive through `appendSamples`.
+        context.insert(sample(latitude: -33.8611, longitude: 151.2109, at: date(10, 0)))
+        try context.save()
+        try VisitedCellStore.ensureBuilt(in: context, defaults: defaults)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<VisitedCell>()), 2)
+    }
+
+    func testEnsureBuiltStillFillsAnEmptyCacheAfterTheOneTimeBackfill() throws {
+        let (context, _) = try makeContext()
+        let suiteName = "VisitedCellStoreTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(VisitedCellStore.builtVersion, forKey: VisitedCellStore.builtVersionKey)
+
+        context.insert(sample(latitude: 40.758, longitude: -73.9855, at: date(8, 0)))
+        try context.save()
+
+        try VisitedCellStore.ensureBuilt(in: context, defaults: defaults)
+
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<VisitedCell>()), 1)
+    }
+
+    func testRebuildReadsEveryPageOfSamples() throws {
+        let (context, _) = try makeContext()
+        for index in 0..<5_100 {
+            context.insert(sample(latitude: 40.758, longitude: -73.9855, at: date(8, 0).addingTimeInterval(Double(index))))
+        }
+        try context.save()
+
+        try VisitedCellStore.rebuild(in: context)
+
+        let cells = try context.fetch(FetchDescriptor<VisitedCell>())
+        XCTAssertEqual(cells.count, 1)
+        XCTAssertEqual(cells.first?.sampleCount, 5_100)
+    }
+
     func testCityZoomAggregatesThreeByThreeWhileStreetZoomStaysNative() throws {
         let (context, _) = try makeContext()
         let originLat = -33_861

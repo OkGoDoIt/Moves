@@ -5,6 +5,7 @@ struct MapRangeSheet: View {
     @Binding var selection: MapRangeSelection
     var now: Date = .now
     var calendar: Calendar = .autoupdatingCurrent
+    var firstRecorded: Date? = nil
     var onDismiss: () -> Void
 
     @State private var customStart: Date
@@ -14,14 +15,17 @@ struct MapRangeSheet: View {
         selection: Binding<MapRangeSelection>,
         now: Date = .now,
         calendar: Calendar = .autoupdatingCurrent,
+        firstRecorded: Date? = nil,
         onDismiss: @escaping () -> Void
     ) {
         _selection = selection
         self.now = now
         self.calendar = calendar
+        self.firstRecorded = firstRecorded
         self.onDismiss = onDismiss
-        _customStart = State(initialValue: selection.wrappedValue.focus.start)
-        _customEnd = State(initialValue: selection.wrappedValue.focus.end.addingTimeInterval(-1))
+        let pickerDates = selection.wrappedValue.customPickerDates(now: now)
+        _customStart = State(initialValue: pickerDates.start)
+        _customEnd = State(initialValue: pickerDates.end)
     }
 
     var body: some View {
@@ -30,7 +34,7 @@ struct MapRangeSheet: View {
                 Section(String(localized: "Presets")) {
                     ForEach(MapRangePreset.allCases) { preset in
                         Button {
-                            selection = .preset(preset, now: now, calendar: calendar)
+                            selection = .preset(preset, now: now, calendar: calendar, firstRecorded: firstRecorded)
                             onDismiss()
                         } label: {
                             HStack {
@@ -57,7 +61,7 @@ struct MapRangeSheet: View {
                     DatePicker(
                         String(localized: "End"),
                         selection: $customEnd,
-                        in: customStart...now.addingTimeInterval(60),
+                        in: MapRangeSelection.customEndRange(start: customStart, now: now),
                         displayedComponents: [.date, .hourAndMinute]
                     )
                     Button(String(localized: "Apply")) {

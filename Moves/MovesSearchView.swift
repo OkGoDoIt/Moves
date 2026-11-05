@@ -9,22 +9,11 @@ struct MovesSearchView: View {
 
     let dayTimelines: [DayTimeline]
     @State private var query = ""
+    @State private var sections: [MovesSearchSection] = []
+    /// The query `sections` answers. Differs from `query` while a search is pending.
+    @State private var searchedQuery = ""
 
     private var calendar: Calendar { Calendar.autoupdatingCurrent }
-
-    private var parsed: SearchQueryParser.ParsedQuery {
-        SearchQueryParser.parse(query, now: .now, calendar: calendar)
-    }
-
-    private var sections: [MovesSearchSection] {
-        MovesSearchIndex.results(
-            parsed: parsed,
-            knownPlaces: knownPlaces,
-            days: dayTimelines,
-            now: .now,
-            calendar: calendar
-        )
-    }
 
     var body: some View {
         Group {
@@ -35,7 +24,11 @@ struct MovesSearchView: View {
                     Text(String(localized: "Places, last Tuesday, Tue 3pm, or a note you wrote."))
                 }
             } else if sections.isEmpty {
-                ContentUnavailableView.search(text: query)
+                if searchedQuery == query {
+                    ContentUnavailableView.search(text: query)
+                } else {
+                    Color.clear
+                }
             } else {
                 List {
                     ForEach(sections) { section in
@@ -65,6 +58,26 @@ struct MovesSearchView: View {
                 Button(String(localized: "Done")) { dismiss() }
             }
         }
+        .task(id: query) {
+            await runSearch(for: query)
+        }
+    }
+
+    /// Walks every day on the main thread, so it waits for a pause in typing. The next
+    /// keystroke cancels this task.
+    private func runSearch(for text: String) async {
+        if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            try? await Task.sleep(for: .milliseconds(180))
+            guard !Task.isCancelled else { return }
+        }
+        sections = MovesSearchIndex.results(
+            parsed: SearchQueryParser.parse(text, now: .now, calendar: calendar),
+            knownPlaces: knownPlaces,
+            days: dayTimelines,
+            now: .now,
+            calendar: calendar
+        )
+        searchedQuery = text
     }
 
     private func open(_ hit: MovesSearchHit) {

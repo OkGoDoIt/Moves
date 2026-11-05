@@ -1,4 +1,5 @@
 import Foundation
+import SwiftData
 import XCTest
 @testable import Moves
 
@@ -159,6 +160,119 @@ final class MapRangeSelectionTests: XCTestCase {
         formatter.formatOptions = [.withInternetDateTime]
         XCTAssertEqual(interval.start, formatter.date(from: "2026-09-20T13:00:00Z"))
         XCTAssertEqual(interval.end, formatter.date(from: "2026-09-20T18:00:00Z"))
+    }
+
+    func testCustomPickersStayValidWhenTheFocusStartsInTheFuture() {
+        let calendar = Self.newYorkCalendar()
+        let now = Self.date(2026, 9, 20, 15, 0, calendar: calendar)
+        let today = MapRangeSelection.preset(.today, now: now, calendar: calendar)
+        let cropped = today.withFocus(
+            DateInterval(start: now.addingTimeInterval(3_600), end: today.interval.end)
+        )
+        let linked = MapRangeSelection.custom(
+            start: Self.date(2030, 1, 1, 0, 0, calendar: calendar),
+            end: Self.date(2030, 1, 2, 0, 0, calendar: calendar),
+            calendar: calendar
+        )
+
+        for selection in [cropped, linked] {
+            let dates = selection.customPickerDates(now: now)
+            XCTAssertLessThanOrEqual(dates.start, now)
+            XCTAssertLessThanOrEqual(dates.start, dates.end)
+            XCTAssertLessThanOrEqual(dates.end, now.addingTimeInterval(60))
+
+            // Building a closed range traps when its bounds invert.
+            let range = MapRangeSelection.customEndRange(start: selection.focus.start, now: now)
+            XCTAssertEqual(range.upperBound, now.addingTimeInterval(60))
+        }
+    }
+
+    func testAllTimeRunsFromTheFirstRecordedDayThroughToday() {
+        let calendar = Self.newYorkCalendar()
+        let now = Self.date(2026, 9, 20, 15, 0, calendar: calendar)
+        let firstRecorded = Self.date(2025, 3, 14, 9, 30, calendar: calendar)
+        let allTime = MapRangeSelection.preset(.allTime, now: now, calendar: calendar, firstRecorded: firstRecorded)
+
+        XCTAssertEqual(allTime.interval.start, calendar.startOfDay(for: firstRecorded))
+        XCTAssertEqual(calendar.component(.day, from: allTime.interval.end), 21)
+        XCTAssertEqual(allTime.matchingPreset(now: now, calendar: calendar), .allTime)
+        XCTAssertEqual(allTime.title(now: now, calendar: calendar), "All time")
+
+        let buckets = allTime.scrubberBuckets(calendar: calendar)
+        XCTAssertGreaterThan(buckets.count, 1)
+        XCTAssertEqual(buckets.first?.start, allTime.interval.start)
+        XCTAssertEqual(buckets.last?.end, allTime.interval.end)
+    }
+
+    func testAllTimeWithNothingRecordedIsJustToday() {
+        let calendar = Self.newYorkCalendar()
+        let now = Self.date(2026, 9, 20, 15, 0, calendar: calendar)
+        let allTime = MapRangeSelection.preset(.allTime, now: now, calendar: calendar)
+
+        XCTAssertEqual(allTime.interval.start, calendar.startOfDay(for: now))
+        XCTAssertEqual(allTime.granularity, .allTime)
+    }
+
+    func testPinchingIntoAllTimeStaysInsideTheRecordedHistory() {
+        let calendar = Self.newYorkCalendar()
+        let now = Self.date(2026, 9, 20, 15, 0, calendar: calendar)
+        let firstRecorded = Self.date(2025, 3, 14, 9, 30, calendar: calendar)
+        let allTime = MapRangeSelection.preset(.allTime, now: now, calendar: calendar, firstRecorded: firstRecorded)
+        let midpoint = allTime.focus.start.addingTimeInterval(allTime.focus.duration / 2)
+
+        let year = allTime.switchingGranularity(to: .year, around: midpoint, now: now, calendar: calendar)
+
+        XCTAssertEqual(calendar.component(.year, from: year.interval.start), 2025)
+    }
+
+    @MainActor
+    func testHistogramKeepsBarsOutsideTheCroppedFocus() throws {
+        let schema = Schema(MovesTimelineSchema.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)
+        )
+        let context = ModelContext(container)
+        let calendar = Self.newYorkCalendar()
+        let now = Self.date(2026, 9, 20, 20, 0, calendar: calendar)
+        context.insert(
+            MoveSegment(
+                dedupeKey: "morning",
+                startDate: Self.date(2026, 9, 20, 8, 0, calendar: calendar),
+                endDate: Self.date(2026, 9, 20, 9, 0, calendar: calendar),
+                transportMode: .walking,
+                distanceMeters: 1_000,
+                stepCount: nil
+            )
+        )
+        context.insert(
+            MoveSegment(
+                dedupeKey: "evening",
+                startDate: Self.date(2026, 9, 20, 18, 0, calendar: calendar),
+                endDate: Self.date(2026, 9, 20, 19, 0, calendar: calendar),
+                transportMode: .cycling,
+                distanceMeters: 5_000,
+                stepCount: nil
+            )
+        )
+        try context.save()
+
+        let today = MapRangeSelection.preset(.today, now: now, calendar: calendar)
+        let evening = today.withFocus(
+            DateInterval(start: Self.date(2026, 9, 20, 17, 0, calendar: calendar), end: today.interval.end)
+        )
+        let loader = MapWindowLoader()
+        loader.refreshHistogram(selection: evening, modelContext: context, calendar: calendar)
+
+        func minutes(atHour hour: Int, in buckets: [MapHistogramBucket]) -> Double {
+            buckets.first { calendar.component(.hour, from: $0.interval.start) == hour }?.movingMinutes ?? 0
+        }
+        XCTAssertEqual(minutes(atHour: 8, in: loader.histogram), 60, accuracy: 1)
+        XCTAssertEqual(minutes(atHour: 18, in: loader.histogram), 60, accuracy: 1)
+
+        let noWalking = loader.filteredBuckets(hiding: [.walking], selection: evening, calendar: calendar)
+        XCTAssertEqual(minutes(atHour: 8, in: noWalking), 0, accuracy: 0.01)
+        XCTAssertEqual(minutes(atHour: 18, in: noWalking), 60, accuracy: 1)
     }
 
     private static func newYorkCalendar() -> Calendar {

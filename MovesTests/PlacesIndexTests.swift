@@ -592,6 +592,94 @@ final class PlacesIndexTests: XCTestCase {
         XCTAssertTrue(try context.fetch(FetchDescriptor<KnownPlace>()).allSatisfy { $0.id != duplicate.id })
     }
 
+    func testUndoingADeletedPlaceBringsItBackWithItsVisits() throws {
+        let schema = Schema(MovesTimelineSchema.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)
+        )
+        let context = ModelContext(container)
+        let place = KnownPlace(name: "Studio", latitude: 52.52, longitude: 13.40, footprintRadius: 60)
+        place.category = KnownPlaceCategory.gym.rawValue
+        context.insert(place)
+        let visit = VisitPlace(
+            arrivalDate: now,
+            departureDate: now.addingTimeInterval(600),
+            latitude: 52.52,
+            longitude: 13.40,
+            horizontalAccuracy: 10,
+            userLabel: "Studio"
+        )
+        visit.knownPlace = place
+        visit.assignmentSource = .user
+        visit.assignmentConfidence = 1
+        context.insert(visit)
+        try context.save()
+        let placeID = place.id
+
+        let undoManager = UndoManager()
+        undoManager.groupsByEvent = false
+        context.undoManager = undoManager
+
+        try PlacesLibrary.deletePlace(place, in: context)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<KnownPlace>()), 0)
+        XCTAssertNil(visit.knownPlace)
+
+        undoManager.undo()
+
+        let restored = try XCTUnwrap(try context.fetch(FetchDescriptor<KnownPlace>()).first)
+        XCTAssertEqual(restored.id, placeID)
+        XCTAssertEqual(restored.name, "Studio")
+        XCTAssertEqual(restored.footprintRadius, 60)
+        XCTAssertEqual(restored.category, KnownPlaceCategory.gym.rawValue)
+        XCTAssertEqual(visit.knownPlace?.id, placeID)
+        XCTAssertEqual(visit.assignmentSource, .user)
+        XCTAssertEqual(visit.assignmentConfidence, 1)
+    }
+
+    func testUndoingAMergeRestoresBothPlaces() throws {
+        let schema = Schema(MovesTimelineSchema.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)
+        )
+        let context = ModelContext(container)
+        let keeper = KnownPlace(name: "Home", latitude: 52.52, longitude: 13.40, footprintRadius: 40)
+        let duplicate = KnownPlace(name: "Home 2", latitude: 52.5204, longitude: 13.405, footprintRadius: 50)
+        duplicate.rejectedAutoLabels = ["Corner shop"]
+        context.insert(keeper)
+        context.insert(duplicate)
+        let visit = VisitPlace(
+            arrivalDate: now,
+            departureDate: now.addingTimeInterval(600),
+            latitude: 52.5204,
+            longitude: 13.405,
+            horizontalAccuracy: 10,
+            userLabel: "Home 2"
+        )
+        visit.knownPlace = duplicate
+        visit.assignmentSource = .user
+        context.insert(visit)
+        try context.save()
+        let duplicateID = duplicate.id
+
+        let undoManager = UndoManager()
+        undoManager.groupsByEvent = false
+        context.undoManager = undoManager
+
+        try PlacesLibrary.merge(duplicate, into: keeper, in: context)
+        XCTAssertEqual(visit.knownPlace?.id, keeper.id)
+        XCTAssertEqual(keeper.rejectedAutoLabels, ["Corner shop"])
+
+        undoManager.undo()
+
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<KnownPlace>()), 2)
+        XCTAssertEqual(visit.knownPlace?.id, duplicateID)
+        XCTAssertEqual(visit.knownPlace?.rejectedAutoLabels, ["Corner shop"])
+        XCTAssertEqual(keeper.rejectedAutoLabels, [])
+        XCTAssertEqual(keeper.footprintRadius, 40)
+    }
+
     func testShrinkFootprintUsesEngineClamp() throws {
         let schema = Schema(MovesTimelineSchema.models)
         let container = try ModelContainer(

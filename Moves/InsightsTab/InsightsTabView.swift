@@ -64,7 +64,8 @@ struct InsightsTabView: View {
             openTripsListIfRequested()
         }
         .onChange(of: dataSignature) { _, _ in reload() }
-        .onChange(of: store.period) { _, _ in reload() }
+        .onChange(of: store.period) { _, _ in store.reloadCurrentPeriod(now: .now, calendar: calendar) }
+        .onReceive(NotificationCenter.default.publisher(for: .NSUndoManagerDidUndoChange)) { _ in reload() }
         .onChange(of: rootController.requestedTripID) { _, _ in applyRequestedTrip() }
         .onChange(of: rootController.shouldOpenTripsList) { _, _ in
             openTripsListIfRequested()
@@ -383,8 +384,8 @@ struct InsightsTabView: View {
 
     private var dataSignature: String {
         let last = dayTimelines.last?.dayKey ?? ""
-        let moves = dayTimelines.reduce(0) { $0 + $1.moves.count }
-        let visits = dayTimelines.reduce(0) { $0 + $1.places.count }
+        let moves = (try? modelContext.fetchCount(FetchDescriptor<MoveSegment>())) ?? 0
+        let visits = (try? modelContext.fetchCount(FetchDescriptor<VisitPlace>())) ?? 0
         return "\(dayTimelines.count)|\(last)|\(moves)|\(visits)"
     }
 
@@ -468,7 +469,7 @@ enum InsightsRoute: Hashable {
     case trips
 }
 
-/// Copies SwiftData days, then builds snapshots off-main and memoizes by year + data signature.
+/// Copies SwiftData days, then builds snapshots off-main and memoizes by year until the rows change.
 @MainActor
 @Observable
 final class InsightsStore {
@@ -480,6 +481,8 @@ final class InsightsStore {
     private var cache: [String: InsightsSnapshot] = [:]
     @ObservationIgnored
     private var generation = 0
+    @ObservationIgnored
+    private var records: [InsightsDayRecord] = []
 
     init(now: Date = .now, calendar: Calendar = .autoupdatingCurrent) {
         let year = calendar.component(.year, from: now)
@@ -489,18 +492,28 @@ final class InsightsStore {
     }
 
     func reload(days: [DayTimeline], now: Date = .now, calendar: Calendar = .autoupdatingCurrent) {
-        let records = days.map(InsightsDayRecord.init)
-        let signature = "\(days.count)|\(days.last?.dayKey ?? "")|\(days.reduce(0) { $0 + $1.moves.count })"
-        let key = "\(period.id)|\(signature)"
+        let latest = days.map(InsightsDayRecord.init)
+        if latest != records {
+            records = latest
+            cache.removeAll()
+        }
+        reloadCurrentPeriod(now: now, calendar: calendar)
+    }
+
+    /// Switching a year chip reuses the rows already copied off SwiftData.
+    func reloadCurrentPeriod(now: Date = .now, calendar: Calendar = .autoupdatingCurrent) {
+        generation += 1
+        // Streaks and the activity grid depend on today as well as on the rows.
+        let key = "\(period.id)|\(calendar.startOfDay(for: now).timeIntervalSinceReferenceDate)"
         if let cached = cache[key] {
             snapshot = cached
             isComputing = false
             return
         }
 
-        generation += 1
         let gen = generation
         let selected = period
+        let records = records
         isComputing = true
         Task.detached(priority: .userInitiated) {
             let built = InsightsSnapshotBuilder.build(

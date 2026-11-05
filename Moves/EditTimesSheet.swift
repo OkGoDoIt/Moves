@@ -1,6 +1,33 @@
 import SwiftData
 import SwiftUI
 
+/// Decides whether a visit may be left without a departure.
+enum EditTimesRules {
+    /// When the next timeline item starts, or nil when nothing starts after `visit`.
+    ///
+    /// Only a visit with nothing after it could still be in progress.
+    static func nextItemStart(after visit: VisitPlace, in context: ModelContext?) -> Date? {
+        let outgoing = visit.outgoingMoves.map(\.startDate).min()
+        guard let context else { return outgoing }
+
+        let arrival = visit.arrivalDate
+        var visits = FetchDescriptor<VisitPlace>(
+            predicate: #Predicate { $0.arrivalDate > arrival },
+            sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .forward)]
+        )
+        visits.fetchLimit = 1
+        var moves = FetchDescriptor<MoveSegment>(
+            predicate: #Predicate { $0.startDate > arrival },
+            sortBy: [SortDescriptor(\MoveSegment.startDate, order: .forward)]
+        )
+        moves.fetchLimit = 1
+
+        let nextVisit = (try? context.fetch(visits))?.first?.arrivalDate
+        let nextMove = (try? context.fetch(moves))?.first?.startDate
+        return [outgoing, nextVisit, nextMove].compactMap { $0 }.min()
+    }
+}
+
 /// Two time pickers clamped to neighbouring items.
 struct EditTimesSheet: View {
     @Environment(\.dismiss) private var dismiss
@@ -12,15 +39,17 @@ struct EditTimesSheet: View {
     @State private var arrival: Date
     @State private var departure: Date
     @State private var hasDeparture: Bool
+    @State private var canStayOpen: Bool
 
     init(visit: VisitPlace, bounds: EditTimesBounds, editController: TimelineEditController) {
         self.visit = visit
         self.bounds = bounds
         self.editController = editController
         _arrival = State(initialValue: visit.arrivalDate)
-        let initialDeparture = visit.departureDate ?? visit.outgoingMoves.map(\.startDate).min() ?? visit.arrivalDate
-        _departure = State(initialValue: initialDeparture)
-        _hasDeparture = State(initialValue: visit.departureDate != nil)
+        let nextStart = EditTimesRules.nextItemStart(after: visit, in: visit.modelContext)
+        _departure = State(initialValue: visit.departureDate ?? nextStart ?? visit.arrivalDate)
+        _hasDeparture = State(initialValue: visit.departureDate != nil || nextStart != nil)
+        _canStayOpen = State(initialValue: nextStart == nil)
     }
 
     var body: some View {
@@ -32,7 +61,9 @@ struct EditTimesSheet: View {
                     in: arrivalRange,
                     displayedComponents: [.hourAndMinute, .date]
                 )
-                Toggle(String(localized: "Has a departure"), isOn: $hasDeparture)
+                if canStayOpen {
+                    Toggle(String(localized: "Has a departure"), isOn: $hasDeparture)
+                }
                 if hasDeparture {
                     DatePicker(
                         String(localized: "Left"),

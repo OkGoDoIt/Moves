@@ -108,7 +108,8 @@ struct MapRangeSelection: Equatable, Sendable {
     static func preset(
         _ preset: MapRangePreset,
         now: Date = .now,
-        calendar: Calendar = .autoupdatingCurrent
+        calendar: Calendar = .autoupdatingCurrent,
+        firstRecorded: Date? = nil
     ) -> MapRangeSelection {
         let interval: DateInterval
         switch preset {
@@ -133,7 +134,7 @@ struct MapRangeSelection: Equatable, Sendable {
         case .thisYear:
             interval = period(containing: now, granularity: .year, calendar: calendar)
         case .allTime:
-            interval = allTimeInterval(now: now, calendar: calendar)
+            interval = allTimeInterval(now: now, calendar: calendar, firstRecorded: firstRecorded)
         }
         return MapRangeSelection(
             interval: interval,
@@ -197,10 +198,26 @@ struct MapRangeSelection: Equatable, Sendable {
         }
     }
 
-    /// Distant past through the start of tomorrow, so “now” is always inside.
-    static func allTimeInterval(now: Date, calendar: Calendar) -> DateInterval {
+    /// The first recorded day through the start of tomorrow, so “now” is always inside.
+    /// With nothing recorded yet, that is just today.
+    static func allTimeInterval(now: Date, calendar: Calendar, firstRecorded: Date? = nil) -> DateInterval {
+        let start = calendar.startOfDay(for: min(firstRecorded ?? now, now))
         let end = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: now)) ?? now
-        return DateInterval(start: .distantPast, end: end)
+        return DateInterval(start: start, end: max(start, end))
+    }
+
+    /// Starting values for the custom pickers, which can't show a time after `customEndRange`.
+    /// The focus can sit in the future: a handle dragged past now, or a deep link.
+    func customPickerDates(now: Date) -> (start: Date, end: Date) {
+        let start = min(focus.start, now)
+        let end = min(focus.end.addingTimeInterval(-1), now.addingTimeInterval(60))
+        return (start, max(start, end))
+    }
+
+    /// Range for the custom End picker. Always a valid range, wherever `start` sits.
+    static func customEndRange(start: Date, now: Date) -> ClosedRange<Date> {
+        let latest = now.addingTimeInterval(60)
+        return min(start, latest)...latest
     }
 
     /// Picks a grain from a custom duration so the scrubber axis stays readable.
@@ -269,13 +286,15 @@ struct MapRangeSelection: Equatable, Sendable {
         to granularity: MapGranularity,
         around date: Date,
         now: Date = .now,
-        calendar: Calendar = .autoupdatingCurrent
+        calendar: Calendar = .autoupdatingCurrent,
+        firstRecorded: Date? = nil
     ) -> MapRangeSelection {
         if granularity == .allTime {
+            let allTime = Self.allTimeInterval(now: now, calendar: calendar, firstRecorded: firstRecorded)
             return MapRangeSelection(
-                interval: Self.allTimeInterval(now: now, calendar: calendar),
+                interval: allTime,
                 granularity: .allTime,
-                focus: Self.allTimeInterval(now: now, calendar: calendar),
+                focus: allTime,
                 isCustom: false
             )
         }
@@ -329,9 +348,19 @@ struct MapRangeSelection: Equatable, Sendable {
         Self.buckets(
             from: interval.start,
             to: interval.end,
-            component: granularity.scrubberBucketComponent,
+            component: scrubberBucketComponent,
             calendar: calendar
         )
+    }
+
+    /// All Time spans whatever was recorded, so its bars size to the history, not to whole years.
+    private var scrubberBucketComponent: Calendar.Component {
+        guard granularity == .allTime else { return granularity.scrubberBucketComponent }
+        switch interval.duration / 86_400 {
+        case ...62: return .day
+        case ...(5 * 366): return .month
+        default: return .year
+        }
     }
 
     /// Whole calendar days overlapping `focus`, used to filter share timelines.
@@ -346,6 +375,8 @@ struct MapRangeSelection: Equatable, Sendable {
         guard !isCustom, abs(focus.start.timeIntervalSince(interval.start)) < 1,
               abs(focus.end.timeIntervalSince(interval.end)) < 1 else { return nil }
         return MapRangePreset.allCases.first { candidate in
+            // All Time's start depends on the recorded data. Custom ranges already returned above.
+            if candidate == .allTime { return granularity == .allTime }
             let other = Self.preset(candidate, now: now, calendar: calendar)
             return other.granularity == granularity
                 && abs(other.interval.start.timeIntervalSince(interval.start)) < 1

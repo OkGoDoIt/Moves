@@ -7,6 +7,7 @@ struct MapTimeScrubber: View {
     @Binding var selection: MapRangeSelection
     var calendar: Calendar = .autoupdatingCurrent
     var now: Date = .now
+    var firstRecorded: Date? = nil
 
     @State private var drag: DragKind?
     @GestureState private var pinchScale: CGFloat = 1
@@ -122,9 +123,9 @@ struct MapTimeScrubber: View {
             .onEnded { value in
                 let midpoint = selection.focus.start.addingTimeInterval(selection.focus.duration / 2)
                 if value > 1.18, let finer = selection.granularity.finer {
-                    selection = selection.switchingGranularity(to: finer, around: midpoint, now: now, calendar: calendar)
+                    selection = selection.switchingGranularity(to: finer, around: midpoint, now: now, calendar: calendar, firstRecorded: firstRecorded)
                 } else if value < 0.84, let coarser = selection.granularity.coarser {
-                    selection = selection.switchingGranularity(to: coarser, around: midpoint, now: now, calendar: calendar)
+                    selection = selection.switchingGranularity(to: coarser, around: midpoint, now: now, calendar: calendar, firstRecorded: firstRecorded)
                 }
             }
     }

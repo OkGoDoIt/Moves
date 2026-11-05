@@ -22,6 +22,7 @@ struct PlaceConfirmForm: View {
     @State private var pinCoordinate: CLLocationCoordinate2D
     @State private var chips: [NearbyPlaceCandidate] = []
     @State private var existingPlaceID: UUID?
+    @State private var appliedChipName: String?
     @State private var nameTouched = false
     @State private var isGeocoding = false
     @State private var extraCategories: [String] = []
@@ -96,8 +97,11 @@ struct PlaceConfirmForm: View {
             TextField(String(localized: "Name"), text: $name)
                 .textInputAutocapitalization(.words)
                 .submitLabel(.done)
-                .onChange(of: name) { _, _ in
+                .onChange(of: name) { _, newValue in
                     nameTouched = true
+                    // A chip sets the name and its place together. Only a different name clears the place.
+                    guard newValue != appliedChipName else { return }
+                    appliedChipName = nil
                     existingPlaceID = nil
                 }
         }
@@ -203,6 +207,7 @@ struct PlaceConfirmForm: View {
     }
 
     private func applyChip(_ chip: NearbyPlaceCandidate) {
+        appliedChipName = chip.name
         name = chip.name
         nameTouched = true
         if let subtitle = chip.subtitle, !subtitle.isEmpty {

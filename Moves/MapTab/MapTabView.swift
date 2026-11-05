@@ -31,8 +31,14 @@ struct MapTabView: View {
     @State private var isShowingTrips = false
     @State private var presentedTripID: UUID?
     @State private var knownModes: Set<TransportMode> = []
+    @State private var coverageRefresh: Task<Void, Never>?
 
     private var calendar: Calendar { .autoupdatingCurrent }
+
+    /// Where All Time starts.
+    private var firstRecordedDate: Date? {
+        dayTimelines.first(where: \.hasRecordedActivity)?.dayStart
+    }
 
     /// Honors `MOVES_MAP_LAYER` so agents can screenshot Heat / Fog without tapping.
     private static func initialLayer() -> MapCoverageLayer {
@@ -76,16 +82,21 @@ struct MapTabView: View {
                 .padding(.horizontal, 14)
                 .padding(.bottom, 8)
 
-                MapTimeScrubber(buckets: filteredHistogram, selection: $selection)
+                MapTimeScrubber(buckets: filteredHistogram, selection: $selection, firstRecorded: firstRecordedDate)
                     .padding(.horizontal, 14)
                     .padding(.bottom, 8)
             }
         }
         .task(id: loadKey) {
+            // Every scrubber tick changes the key. This task is cancelled by the next one,
+            // so a drag only loads once it pauses.
+            try? await Task.sleep(for: .milliseconds(120))
+            guard !Task.isCancelled else { return }
             await loader.load(
                 selection: selection,
                 modelContext: modelContext,
                 cameraRegion: visibleRegion,
+                includeCoverage: layer != .routes,
                 calendar: calendar
             )
             syncEnabledModes()
@@ -93,21 +104,34 @@ struct MapTabView: View {
         .onChange(of: loader.cameraFitKey) { _, _ in
             fitCamera()
         }
-        .onChange(of: layer) { _, _ in
+        .onChange(of: layer) { _, newLayer in
             fitCamera()
-            loader.refreshCoverage(selection: selection, cameraRegion: visibleRegion)
+            guard newLayer != .routes else { return }
+            Task { @MainActor in
+                await loader.loadCoverage(
+                    selection: selection,
+                    modelContext: modelContext,
+                    cameraRegion: visibleRegion
+                )
+                fitCamera()
+            }
         }
         .onChange(of: controller.requestedMapInterval) { _, newValue in
             applyRequestedInterval(newValue)
         }
+        .onChange(of: firstRecordedDate) { _, newValue in
+            guard selection.granularity == .allTime, !selection.isCustom else { return }
+            selection = .preset(.allTime, now: .now, calendar: calendar, firstRecorded: newValue)
+        }
         .onAppear {
+            loader.invalidateHistogram()
             applyRequestedInterval(controller.requestedMapInterval)
         }
         .task {
             await applyScreenshotLaunchFlags()
         }
         .sheet(isPresented: $isShowingRangeSheet) {
-            MapRangeSheet(selection: $selection) {
+            MapRangeSheet(selection: $selection, firstRecorded: firstRecordedDate) {
                 isShowingRangeSheet = false
             }
         }
@@ -127,7 +151,7 @@ struct MapTabView: View {
             NavigationStack {
                 TripListView()
                     .navigationDestination(for: UUID.self) { tripID in
-                        TripDetailView(tripID: tripID)
+                        TripDetailView(tripID: tripID, onLeave: { isShowingTrips = false })
                     }
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) {
@@ -144,7 +168,7 @@ struct MapTabView: View {
         )) {
             if let presentedTripID {
                 NavigationStack {
-                    TripDetailView(tripID: presentedTripID)
+                    TripDetailView(tripID: presentedTripID, onLeave: { self.presentedTripID = nil })
                         .toolbar {
                             ToolbarItem(placement: .cancellationAction) {
                                 Button(String(localized: "Done")) {
@@ -170,16 +194,15 @@ struct MapTabView: View {
     }
 
     private var filteredHistogram: [MapHistogramBucket] {
-        let routes = displayedRoutes
-        guard routes.count != loader.routes.count else { return loader.histogram }
-        return MapWindowLoader.makeHistogram(routes: routes, selection: selection, calendar: calendar)
+        let hidden: Set<TransportMode> = enabledModes.isEmpty ? [] : Set(loader.presentModes).subtracting(enabledModes)
+        return loader.filteredBuckets(hiding: hidden, selection: selection, calendar: calendar)
     }
 
     private var shareTimelines: [DayTimeline] {
-        let starts = Set(selection.overlappingDayStarts(calendar: calendar).map { DayTimeline.makeDayKey(for: $0) })
         if selection.granularity == .allTime {
             return Array(dayTimelines)
         }
+        let starts = Set(selection.overlappingDayStarts(calendar: calendar).map { DayTimeline.makeDayKey(for: $0) })
         return dayTimelines.filter { starts.contains($0.dayKey) }
     }
 
@@ -244,9 +267,7 @@ struct MapTabView: View {
             }
             .onMapCameraChange(frequency: .continuous) { context in
                 visibleRegion = context.region
-                if layer != .routes {
-                    loader.refreshCoverage(selection: selection, cameraRegion: context.region)
-                }
+                scheduleCoverageRefresh(for: context.region)
             }
             .simultaneousGesture(
                 SpatialTapGesture().onEnded { event in
@@ -258,12 +279,26 @@ struct MapTabView: View {
         }
     }
 
+    /// Regrouping every cell on every camera frame stalls Heat and Fog on a long history. The cells
+    /// on screen pan with the map, padded past its edges, so regroup once it pauses.
+    private func scheduleCoverageRefresh(for region: MKCoordinateRegion) {
+        guard layer != .routes else { return }
+        coverageRefresh?.cancel()
+        coverageRefresh = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(120))
+            guard !Task.isCancelled else { return }
+            loader.refreshCoverage(selection: selection, cameraRegion: region)
+        }
+    }
+
     @MapContentBuilder
     private var routeContent: some MapContent {
+        // The selected route can scrub out of the window. Nothing dims while it is gone.
+        let visibleSelection = selectedRoute?.id
         ForEach(displayedRoutes) { item in
             let route = item.rendered
-            let isSelected = item.id == selectedRouteID
-            let dims = selectedRouteID != nil && !isSelected
+            let isSelected = item.id == visibleSelection
+            let dims = visibleSelection != nil && !isSelected
             let emphasis = dims ? 0.28 : 1.0
             let width = isSelected ? route.lineWidth + 3.5 : route.lineWidth
 

@@ -19,6 +19,11 @@ struct PlacesTabView: View {
     @State private var didOpenLaunchPlace = false
     @State private var clusterToConfirm: PlacesSuggestedCluster?
 
+    #if targetEnvironment(simulator)
+    /// The demo seed lands once per launch, while this tab appears many times.
+    @MainActor private static var didClusterSeededVisits = false
+    #endif
+
     var body: some View {
         NavigationStack(path: $path) {
             Group {
@@ -63,20 +68,21 @@ struct PlacesTabView: View {
                 path.append(PlacesRoute.known(place.id))
             }
         }
-        .onAppear(perform: rebuild)
+        .onAppear {
+            rebuild()
+            openRequestedPlace()
+        }
         .onChange(of: dataSignature) { _, _ in rebuild() }
-        .onChange(of: index.sort) { _, _ in rebuild() }
-        .onChange(of: index.query) { _, _ in rebuild() }
+        .onChange(of: index.sort) { _, _ in index.refilter() }
+        .onChange(of: index.query) { _, _ in index.refilter() }
         .onChange(of: index.snapshot.placeCount) { _, _ in
             openFirstPlaceIfRequested()
         }
         .onChange(of: index.snapshot.suggested.count) { _, _ in
             openConfirmIfRequested()
         }
-        .onChange(of: rootController.requestedKnownPlaceID) { _, placeID in
-            guard let placeID else { return }
-            path.append(PlacesRoute.known(placeID))
-            rootController.requestedKnownPlaceID = nil
+        .onChange(of: rootController.requestedKnownPlaceID) { _, _ in
+            openRequestedPlace()
         }
         .task {
             await clusterLabeledVisitsAfterSeed()
@@ -186,16 +192,30 @@ struct PlacesTabView: View {
         )
     }
 
+    /// A deep link or search result can name a place before this tab has ever appeared,
+    /// when `onChange` has nothing to compare against. Clearing the ID lets a repeat fire.
+    private func openRequestedPlace() {
+        guard let placeID = rootController.requestedKnownPlaceID else { return }
+        rootController.requestedKnownPlaceID = nil
+        path.append(PlacesRoute.known(placeID))
+    }
+
     /// Simulator seed and `runIfNeeded` race: labeled visits can land after the
     /// one-shot upgrader has already marked itself done. Wait for rows, then
-    /// cluster — `upgrade(in:)` is idempotent.
+    /// cluster once. Never runs on a real store: the upgrade rewrites route policies,
+    /// recreates deleted places from visit labels, and repairs duplicate stops.
     private func clusterLabeledVisitsAfterSeed() async {
+        #if targetEnvironment(simulator)
+        guard !Self.didClusterSeededVisits else { return }
+        Self.didClusterSeededVisits = true
         for _ in 0..<80 {
             let visitCount = (try? modelContext.fetchCount(FetchDescriptor<VisitPlace>())) ?? 0
             if visitCount > 0 { break }
             try? await Task.sleep(for: .milliseconds(250))
         }
+        await TimelineSchemaUpgrader.waitUntilFinished()
         try? TimelineSchemaUpgrader.upgrade(in: modelContext)
+        #endif
     }
 
     /// Screenshot-agent flag `MOVES_OPEN_CONFIRM=1` presents the confirm sheet.

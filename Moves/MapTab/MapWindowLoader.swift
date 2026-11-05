@@ -12,6 +12,13 @@ struct MapHistogramBucket: Identifiable, Equatable, Sendable {
     var id: TimeInterval { interval.start.timeIntervalSinceReferenceDate }
 }
 
+/// A move's time span and mode: all the scrubber needs, wherever the focus sits.
+struct MapHistogramSpan: Equatable {
+    let start: Date
+    let end: Date
+    let mode: TransportMode
+}
+
 /// A route drawn on the Map tab, independent of SwiftData object identity.
 struct MapDisplayedRoute: Identifiable, Equatable {
     let id: UUID
@@ -50,6 +57,7 @@ final class MapWindowLoader {
     var routes: [MapDisplayedRoute] = []
     var visits: [MapVisitMarker] = []
     var histogram: [MapHistogramBucket] = []
+    private(set) var histogramSpans: [MapHistogramSpan] = []
     var coverageCells: [VisitedCellStore.DisplayCell] = []
     var presentModes: [TransportMode] = []
     var isLoading = false
@@ -59,11 +67,23 @@ final class MapWindowLoader {
     private var loadGeneration = 0
     @ObservationIgnored
     private var storedCells: [VisitedCell] = []
+    @ObservationIgnored
+    private var histogramSource: HistogramSource?
+    @ObservationIgnored
+    private var filteredHistogram: (hidden: Set<TransportMode>, buckets: [MapHistogramBucket])?
+
+    /// What `histogram` was built from. Scrubbing the handles leaves all of this alone.
+    private struct HistogramSource: Equatable {
+        let interval: DateInterval
+        let granularity: MapGranularity
+        let moveCount: Int
+    }
 
     func load(
         selection: MapRangeSelection,
         modelContext: ModelContext,
         cameraRegion: MKCoordinateRegion,
+        includeCoverage: Bool = false,
         calendar: Calendar = .autoupdatingCurrent
     ) async {
         loadGeneration += 1
@@ -75,12 +95,12 @@ final class MapWindowLoader {
             }
         }
 
-        do {
-            try VisitedCellStore.ensureBuilt(in: modelContext)
-            storedCells = try VisitedCellStore.fetchAll(in: modelContext)
-        } catch {
-            storedCells = []
+        if includeCoverage {
+            await loadStoredCells(modelContext: modelContext)
+            guard generation == loadGeneration else { return }
         }
+
+        refreshHistogram(selection: selection, modelContext: modelContext, calendar: calendar)
 
         let repository = SwiftDataTimelineRepository(modelContext: modelContext)
         let dayCount = max(
@@ -109,8 +129,30 @@ final class MapWindowLoader {
             )
         }
 
-        guard generation == loadGeneration else { return }
+        guard generation == loadGeneration, includeCoverage else { return }
         refreshCoverage(selection: selection, cameraRegion: cameraRegion)
+    }
+
+    /// Readies Heat and Fog when one is first shown, without reloading routes.
+    func loadCoverage(
+        selection: MapRangeSelection,
+        modelContext: ModelContext,
+        cameraRegion: MKCoordinateRegion
+    ) async {
+        await loadStoredCells(modelContext: modelContext)
+        refreshCoverage(selection: selection, cameraRegion: cameraRegion)
+    }
+
+    private func loadStoredCells(modelContext: ModelContext) async {
+        do {
+            try await VisitedCellStore.ensureBuilt(container: modelContext.container)
+            let count = try modelContext.fetchCount(FetchDescriptor<VisitedCell>())
+            if count != storedCells.count {
+                storedCells = try VisitedCellStore.fetchAll(in: modelContext)
+            }
+        } catch {
+            storedCells = []
+        }
     }
 
     func refreshCoverage(selection: MapRangeSelection, cameraRegion: MKCoordinateRegion) {
@@ -120,6 +162,54 @@ final class MapWindowLoader {
             region: cameraRegion,
             overlapping: selection.focus
         )
+    }
+
+    /// The scrubber's bars cover the whole interval, so they read moves for all of it rather
+    /// than the focused routes. Keeps the last result while only the handles move.
+    func refreshHistogram(
+        selection: MapRangeSelection,
+        modelContext: ModelContext,
+        calendar: Calendar
+    ) {
+        let source = HistogramSource(
+            interval: selection.interval,
+            granularity: selection.granularity,
+            moveCount: (try? modelContext.fetchCount(FetchDescriptor<MoveSegment>())) ?? 0
+        )
+        guard source != histogramSource else { return }
+        histogramSource = source
+        filteredHistogram = nil
+
+        let moves = (try? SwiftDataTimelineRepository(modelContext: modelContext)
+            .moves(in: selection.interval, modes: nil)) ?? []
+        histogramSpans = moves.map { move in
+            MapHistogramSpan(start: move.startDate, end: move.endDate, mode: move.transportMode)
+        }
+        histogram = Self.makeHistogram(spans: histogramSpans, selection: selection, calendar: calendar)
+    }
+
+    /// Forces the next load to reread moves, for edits made while the Map was off screen.
+    func invalidateHistogram() {
+        histogramSource = nil
+    }
+
+    /// `histogram` without the modes switched off on the chips.
+    func filteredBuckets(
+        hiding hidden: Set<TransportMode>,
+        selection: MapRangeSelection,
+        calendar: Calendar
+    ) -> [MapHistogramBucket] {
+        guard !hidden.isEmpty else { return histogram }
+        if let filteredHistogram, filteredHistogram.hidden == hidden {
+            return filteredHistogram.buckets
+        }
+        let buckets = Self.makeHistogram(
+            spans: histogramSpans.filter { !hidden.contains($0.mode) },
+            selection: selection,
+            calendar: calendar
+        )
+        filteredHistogram = (hidden, buckets)
+        return buckets
     }
 
     private func loadMoves(
@@ -143,20 +233,29 @@ final class MapWindowLoader {
             displayedRoute(from: move, coordinates: cachedOrRawCoordinates(for: move))
         }
         guard generation == loadGeneration else { return }
-        apply(routes: immediate, visits: visits, selection: selection, calendar: calendar)
+        apply(routes: immediate, visits: visits, selection: selection)
 
         guard allowDirections else { return }
 
+        // Route matching suspends, and a move can be deleted while it waits. A deleted model
+        // traps when read, so check before touching each one on either side of the wait.
         var refined: [MapDisplayedRoute] = []
         refined.reserveCapacity(moves.count)
         for move in moves {
+            guard Self.isLive(move) else { continue }
             let coordinates = await RoadRouteMatcher.matchedCoordinates(for: move)
+            if generation != loadGeneration { return }
+            guard Self.isLive(move) else { continue }
             if let route = displayedRoute(from: move, coordinates: coordinates) {
                 refined.append(route)
             }
-            if generation != loadGeneration { return }
         }
-        apply(routes: refined, visits: visits, selection: selection, calendar: calendar)
+        // `visits` went stale the same way during the wait.
+        apply(routes: refined, visits: visits.filter { Self.isLive($0) }, selection: selection)
+    }
+
+    private static func isLive<Model: PersistentModel>(_ model: Model) -> Bool {
+        model.modelContext != nil && !model.isDeleted
     }
 
     private func loadAggregates(
@@ -244,7 +343,7 @@ final class MapWindowLoader {
 
         let visitRows = (try? repository.visits(in: interval)) ?? []
         guard generation == loadGeneration else { return }
-        apply(routes: routes, visits: visitRows, selection: selection, calendar: calendar)
+        apply(routes: routes, visits: visitRows, selection: selection)
 
         let container = modelContext.container
         let periodStart = interval.start
@@ -256,8 +355,7 @@ final class MapWindowLoader {
     private func apply(
         routes: [MapDisplayedRoute],
         visits: [VisitPlace],
-        selection: MapRangeSelection,
-        calendar: Calendar
+        selection: MapRangeSelection
     ) {
         self.routes = routes
         self.visits = visits.map { place in
@@ -271,7 +369,6 @@ final class MapWindowLoader {
         presentModes = TransportMode.allCases.filter { mode in
             mode != .stationary && routes.contains { $0.transportMode == mode }
         }
-        histogram = Self.makeHistogram(routes: routes, selection: selection, calendar: calendar)
         cameraFitKey = [
             selection.focus.start.timeIntervalSinceReferenceDate,
             selection.focus.end.timeIntervalSinceReferenceDate,
@@ -283,14 +380,14 @@ final class MapWindowLoader {
     }
 
     static func makeHistogram(
-        routes: [MapDisplayedRoute],
+        spans: [MapHistogramSpan],
         selection: MapRangeSelection,
         calendar: Calendar
     ) -> [MapHistogramBucket] {
         let buckets = selection.scrubberBuckets(calendar: calendar)
         return buckets.map { bucket in
-            let seconds = routes.reduce(0.0) { partial, route in
-                partial + overlap(bucket, DateInterval(start: route.startDate, end: max(route.endDate, route.startDate.addingTimeInterval(1))))
+            let seconds = spans.reduce(0.0) { partial, span in
+                partial + overlap(bucket, DateInterval(start: span.start, end: max(span.end, span.start.addingTimeInterval(1))))
             }
             return MapHistogramBucket(interval: bucket, movingMinutes: seconds / 60)
         }

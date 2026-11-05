@@ -1,3 +1,4 @@
+import SwiftData
 import XCTest
 @testable import Moves
 
@@ -175,6 +176,68 @@ final class InsightsSnapshotTests: XCTestCase {
         XCTAssertEqual(first.builtAt, second.builtAt)
         XCTAssertLessThan(cacheElapsed, 0.01)
         XCTAssertLessThan(cacheElapsed, elapsed)
+    }
+
+    func testCurrentStreakRunsThroughJanuaryFirst() {
+        let days = [
+            day(2026, 12, 30, distance: 800),
+            day(2026, 12, 31, distance: 800),
+            day(2027, 1, 1, distance: 800)
+        ]
+        let snapshot = InsightsSnapshotBuilder.build(
+            days: days,
+            period: .year(2027),
+            now: date(2027, 1, 1, 18, 0),
+            calendar: calendar
+        )
+
+        XCTAssertEqual(snapshot.currentStreakDays, 3)
+        XCTAssertEqual(snapshot.longestStreakDays, 3)
+        XCTAssertEqual(snapshot.activeDayCount, 1)
+    }
+
+    @MainActor
+    func testEditingAMoveReplacesTheCachedSnapshot() async throws {
+        let schema = Schema(MovesTimelineSchema.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)
+        )
+        let context = ModelContext(container)
+        let now = date(2026, 9, 17, 18, 0)
+        let timeline = DayTimeline(dayStart: now)
+        context.insert(timeline)
+        let move = MoveSegment(
+            dedupeKey: "edit-me",
+            startDate: now.addingTimeInterval(-3_600),
+            endDate: now,
+            transportMode: .walking,
+            distanceMeters: 1_000,
+            stepCount: nil
+        )
+        move.dayTimeline = timeline
+        context.insert(move)
+        try context.save()
+
+        let store = InsightsStore(now: now, calendar: calendar)
+        store.reload(days: [timeline], now: now, calendar: calendar)
+        try await waitUntilSettled(store)
+        XCTAssertEqual(store.snapshot.modes.map(\.modeRaw), [TransportMode.walking.rawValue])
+
+        // Same counts as before: only the rows can tell these apart.
+        move.transportMode = .cycling
+        store.reload(days: [timeline], now: now, calendar: calendar)
+        try await waitUntilSettled(store)
+        XCTAssertEqual(store.snapshot.modes.map(\.modeRaw), [TransportMode.cycling.rawValue])
+    }
+
+    @MainActor
+    private func waitUntilSettled(_ store: InsightsStore) async throws {
+        var attempts = 0
+        while store.isComputing, attempts < 500 {
+            attempts += 1
+            try await Task.sleep(for: .milliseconds(10))
+        }
     }
 
     func testPastYearHidesCurrentStreak() {

@@ -121,10 +121,6 @@ struct MovesRootView: View {
                 InsightsTabView()
             }
         }
-        .environmentObject(controller)
-        .environment(\.timelineItemActions, editController)
-        .environment(\.timelineEditController, editController)
-        .environment(\.undoToastPresenter, undoToast)
         .onAppear {
             modelContext.undoManager = undoController.manager
             editController.attach(
@@ -175,8 +171,15 @@ struct MovesRootView: View {
         .onOpenURL(perform: handleDeepLink)
         .sheet(isPresented: $controller.isShowingReviewInbox) {
             ReviewInboxView()
+                .sheet(item: $editor.presentedSheet) { sheet in
+                    editSheet(sheet)
+                }
         }
-        .sheet(item: $editor.presentedSheet) { sheet in
+        // A view can present only one sheet at a time, so the inbox presents its own edits.
+        .sheet(item: Binding(
+            get: { controller.isShowingReviewInbox ? nil : editController.presentedSheet },
+            set: { editController.presentedSheet = $0 }
+        )) { sheet in
             editSheet(sheet)
         }
         .confirmationDialog(
@@ -243,6 +246,11 @@ struct MovesRootView: View {
             .opacity(0.01)
             .accessibilityHidden(true)
         }
+        // Outermost so every sheet above can read these too, not only the tabs.
+        .environmentObject(controller)
+        .environment(\.timelineItemActions, editController)
+        .environment(\.timelineEditController, editController)
+        .environment(\.undoToastPresenter, undoToast)
     }
 
     /// First-launch onboarding stays off while demo data seeds or screenshot flags are set.

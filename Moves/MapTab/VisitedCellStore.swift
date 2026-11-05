@@ -14,6 +14,14 @@ enum VisitedCellStore {
     static let cityZoomLatitudeDelta = 0.025
     /// Cap on overlay primitives so a country-scale fog stays cheap.
     static let maximumDisplayCells = 2_400
+    /// Raise to rebuild once more from existing history on the next Heat or Fog view.
+    static let builtVersion = 1
+    static let builtVersionKey = "moves.visitedCells.builtVersion"
+    private static let rebuildPageSize = 5_000
+
+    @MainActor private static var buildTask: Task<Void, Error>?
+
+    private typealias CellTally = (first: Date, last: Date, count: Int)
 
     /// A raster cell after optional 3×3 (or coarser) aggregation.
     struct DisplayCell: Identifiable, Hashable, Sendable {
@@ -90,20 +98,9 @@ enum VisitedCellStore {
     static func record(_ samples: [LocationSample], in context: ModelContext) throws {
         guard !samples.isEmpty else { return }
 
-        var pending: [String: (first: Date, last: Date, count: Int)] = [:]
+        var pending: [String: CellTally] = [:]
         pending.reserveCapacity(samples.count)
-        for sample in samples {
-            let key = cellKey(latitude: sample.latitude, longitude: sample.longitude)
-            if let existing = pending[key] {
-                pending[key] = (
-                    min(existing.first, sample.timestamp),
-                    max(existing.last, sample.timestamp),
-                    existing.count + 1
-                )
-            } else {
-                pending[key] = (sample.timestamp, sample.timestamp, 1)
-            }
-        }
+        tally(samples, into: &pending)
 
         for (key, delta) in pending {
             if let cell = try fetchCell(key: key, in: context) {
@@ -118,25 +115,103 @@ enum VisitedCellStore {
         }
     }
 
-    /// Drops every cell and rebuilds from `LocationSample`. Used when the cache is empty
-    /// (demo seeder and imports insert samples without going through `appendSamples`).
-    static func rebuild(in context: ModelContext) throws {
-        let existing = try context.fetch(FetchDescriptor<VisitedCell>())
-        existing.forEach(context.delete)
+    private static func tally(_ samples: [LocationSample], into pending: inout [String: CellTally]) {
+        for sample in samples {
+            let key = cellKey(latitude: sample.latitude, longitude: sample.longitude)
+            if let existing = pending[key] {
+                pending[key] = (
+                    min(existing.first, sample.timestamp),
+                    max(existing.last, sample.timestamp),
+                    existing.count + 1
+                )
+            } else {
+                pending[key] = (sample.timestamp, sample.timestamp, 1)
+            }
+        }
+    }
 
-        let samples = try context.fetch(FetchDescriptor<LocationSample>())
-        try record(samples, in: context)
+    /// Makes the cells match `LocationSample`, reading a page of samples at a time. Used when the
+    /// cache is empty (demo seeder and imports insert samples without going through
+    /// `appendSamples`) and once for history recorded before cells existed.
+    ///
+    /// Updates cells in place and deletes only the ones with no samples behind them, so capture
+    /// can keep writing to a cell on another context while this runs.
+    static func rebuild(in context: ModelContext) throws {
+        if context.hasChanges {
+            try context.save()
+        }
+
+        var pending: [String: CellTally] = [:]
+        var offset = 0
+        while true {
+            var descriptor = FetchDescriptor<LocationSample>()
+            descriptor.includePendingChanges = false
+            descriptor.fetchOffset = offset
+            descriptor.fetchLimit = rebuildPageSize
+            let pageCount = try autoreleasepool { () throws -> Int in
+                let page = try context.fetch(descriptor)
+                tally(page, into: &pending)
+                return page.count
+            }
+            offset += pageCount
+            if pageCount < rebuildPageSize { break }
+        }
+
+        var existing: [String: VisitedCell] = [:]
+        for cell in try context.fetch(FetchDescriptor<VisitedCell>()) {
+            if existing[cell.cellKey] == nil {
+                existing[cell.cellKey] = cell
+            } else {
+                context.delete(cell)
+            }
+        }
+        for (key, delta) in pending {
+            if let cell = existing.removeValue(forKey: key) {
+                cell.firstVisitedAt = delta.first
+                cell.lastVisitedAt = delta.last
+                cell.sampleCount = delta.count
+            } else {
+                let cell = VisitedCell(cellKey: key, visitedAt: delta.first, sampleCount: delta.count)
+                cell.lastVisitedAt = delta.last
+                context.insert(cell)
+            }
+        }
+        for cell in existing.values {
+            context.delete(cell)
+        }
+
         if context.hasChanges {
             try context.save()
         }
     }
 
-    /// Rebuilds only when the cache has never been populated.
-    static func ensureBuilt(in context: ModelContext) throws {
+    /// Rebuilds when the cache is empty, and once per `builtVersion` regardless of how many cells
+    /// it holds: capture can ingest a sample before the first Map open on an upgraded install,
+    /// and a cell count of one says nothing about the months of history behind it.
+    static func ensureBuilt(in context: ModelContext, defaults: UserDefaults = .standard) throws {
         let count = try context.fetchCount(FetchDescriptor<VisitedCell>())
-        if count == 0 {
+        if count == 0 || defaults.integer(forKey: builtVersionKey) < builtVersion {
             try rebuild(in: context)
+            defaults.set(builtVersion, forKey: builtVersionKey)
         }
+    }
+
+    /// `ensureBuilt` on its own context off the main thread, one build at a time.
+    @MainActor
+    static func ensureBuilt(container: ModelContainer, defaults: UserDefaults = .standard) async throws {
+        if let buildTask {
+            try await buildTask.value
+            return
+        }
+        let task = Task.detached(priority: .userInitiated) {
+            await TimelineSchemaUpgrader.waitUntilFinished()
+            let context = ModelContext(container)
+            context.autosaveEnabled = false
+            try ensureBuilt(in: context, defaults: defaults)
+        }
+        buildTask = task
+        defer { buildTask = nil }
+        try await task.value
     }
 
     /// Adaptive display set: native 100 m at street zoom, 3×3 (~250 m) at city zoom,

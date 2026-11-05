@@ -838,6 +838,8 @@ final class PlacesIndex {
 
     @ObservationIgnored
     private var generation = 0
+    @ObservationIgnored
+    private var ingested: (known: [PlacesKnownRecord], visits: [PlacesVisitRecord], userCoordinate: CLLocationCoordinate2D?)?
 
     /// Copies SwiftData rows into sendable records, then groups off-main.
     func ingest(
@@ -849,12 +851,23 @@ final class PlacesIndex {
     ) {
         let knownRecords = knownPlaces.map(PlacesKnownRecord.init)
         let visitRecords = visits.map(PlacesVisitRecord.init)
+        ingested = (knownRecords, visitRecords, userCoordinate)
         rebuild(
             knownRecords: knownRecords,
             visitRecords: visitRecords,
             now: now,
             calendar: calendar,
             userCoordinate: userCoordinate
+        )
+    }
+
+    /// Re-applies `query` and `sort` to the last ingested rows, so typing never copies SwiftData again.
+    func refilter() {
+        guard let ingested else { return }
+        rebuild(
+            knownRecords: ingested.known,
+            visitRecords: ingested.visits,
+            userCoordinate: ingested.userCoordinate
         )
     }
 
@@ -977,22 +990,38 @@ enum PlacesLibrary {
 
     static func merge(_ source: KnownPlace, into target: KnownPlace, in context: ModelContext) throws {
         guard source.id != target.id else { return }
-        try performingUndoableChange(named: String(localized: "Merged places"), in: context) {
-            PlaceLearningEngine.merge(source, into: target)
-            context.delete(source)
-        }
+        let sourcePayload = KnownPlaceUndoPayload(source)
+        let targetPayload = KnownPlaceUndoPayload(target)
+        try performingRestorableDelete(
+            named: String(localized: "Merged places"),
+            in: context,
+            restore: { context in
+                sourcePayload.recreate(in: context)
+                targetPayload.overwriteExisting(in: context)
+            },
+            {
+                PlaceLearningEngine.merge(source, into: target)
+                context.delete(source)
+            }
+        )
     }
 
     /// Unassigns visits and deletes the learned place. Visits stay on the timeline.
     static func deletePlace(_ place: KnownPlace, in context: ModelContext) throws {
-        try performingUndoableChange(named: String(localized: "Deleted place"), in: context) {
-            for visit in place.visits {
-                visit.knownPlace = nil
-                visit.assignmentSource = .none
-                visit.assignmentConfidence = 0
+        let payload = KnownPlaceUndoPayload(place)
+        try performingRestorableDelete(
+            named: String(localized: "Deleted place"),
+            in: context,
+            restore: { context in payload.recreate(in: context) },
+            {
+                for visit in place.visits {
+                    visit.knownPlace = nil
+                    visit.assignmentSource = .none
+                    visit.assignmentConfidence = 0
+                }
+                context.delete(place)
             }
-            context.delete(place)
-        }
+        )
     }
 
     private static func fetchVisits(ids: [UUID], in context: ModelContext) throws -> [VisitPlace] {
@@ -1014,6 +1043,132 @@ enum PlacesLibrary {
         if context.hasChanges {
             try context.save()
         }
+    }
+
+    /// SwiftData auto-undo of a delete can crash, so these changes run with undo registration
+    /// off and put back a copy of what they removed, the way `TimelineEditController` does.
+    private static func performingRestorableDelete(
+        named name: String,
+        in context: ModelContext,
+        restore: @escaping (ModelContext) -> Void,
+        _ body: () throws -> Void
+    ) throws {
+        let undoManager = context.undoManager
+        context.undoManager = nil
+        defer { context.undoManager = undoManager }
+        try body()
+        if context.hasChanges {
+            try context.save()
+        }
+        guard let undoManager else { return }
+        undoManager.beginUndoGrouping()
+        undoManager.setActionName(name)
+        undoManager.registerUndo(withTarget: context) { target in
+            let previous = target.undoManager
+            target.undoManager = nil
+            restore(target)
+            if target.hasChanges {
+                try? target.save()
+            }
+            target.undoManager = previous
+        }
+        undoManager.endUndoGrouping()
+    }
+}
+
+/// Everything a `KnownPlace` stores, so an undone delete or merge can bring it back.
+private struct KnownPlaceUndoPayload {
+    let id: UUID
+    let name: String
+    let centerLatitude: Double
+    let centerLongitude: Double
+    let footprintRadius: Double
+    let confirmedVisitCount: Int
+    let category: String?
+    let countryCode: String?
+    let locality: String?
+    let administrativeArea: String?
+    let thoroughfare: String?
+    let formattedAddress: String?
+    let rejectedAutoLabels: [String]
+    let arrivalHourHistogram: [Int]
+    let weekdayHistogram: [Int]
+    let stayDurationSamples: [Double]
+    let createdAt: Date
+    let lastVisitAt: Date?
+    let visits: [(id: UUID, source: PlaceAssignmentSource, confidence: Double)]
+
+    init(_ place: KnownPlace) {
+        id = place.id
+        name = place.name
+        centerLatitude = place.centerLatitude
+        centerLongitude = place.centerLongitude
+        footprintRadius = place.footprintRadius
+        confirmedVisitCount = place.confirmedVisitCount
+        category = place.category
+        countryCode = place.countryCode
+        locality = place.locality
+        administrativeArea = place.administrativeArea
+        thoroughfare = place.thoroughfare
+        formattedAddress = place.formattedAddress
+        rejectedAutoLabels = place.rejectedAutoLabels
+        arrivalHourHistogram = place.arrivalHourHistogram
+        weekdayHistogram = place.weekdayHistogram
+        stayDurationSamples = place.stayDurationSamples
+        createdAt = place.createdAt
+        lastVisitAt = place.lastVisitAt
+        visits = place.visits.map { ($0.id, $0.assignmentSource, $0.assignmentConfidence) }
+    }
+
+    /// Inserts the removed place under its old ID and hands its visits back.
+    func recreate(in context: ModelContext) {
+        let place = KnownPlace(
+            name: name,
+            latitude: centerLatitude,
+            longitude: centerLongitude,
+            footprintRadius: footprintRadius
+        )
+        place.id = id
+        context.insert(place)
+        write(to: place)
+
+        let assignments = Dictionary(visits.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let allVisits = (try? context.fetch(FetchDescriptor<VisitPlace>())) ?? []
+        for visit in allVisits {
+            guard let assignment = assignments[visit.id] else { continue }
+            visit.knownPlace = place
+            visit.assignmentSource = assignment.source
+            visit.assignmentConfidence = assignment.confidence
+        }
+    }
+
+    /// Rolls a merge target's learned fields back to what they were before the merge.
+    func overwriteExisting(in context: ModelContext) {
+        let identifier = id
+        var descriptor = FetchDescriptor<KnownPlace>(predicate: #Predicate { $0.id == identifier })
+        descriptor.fetchLimit = 1
+        guard let place = try? context.fetch(descriptor).first else { return }
+        place.name = name
+        place.centerLatitude = centerLatitude
+        place.centerLongitude = centerLongitude
+        place.footprintRadius = footprintRadius
+        write(to: place)
+    }
+
+    private func write(to place: KnownPlace) {
+        place.confirmedVisitCount = confirmedVisitCount
+        place.category = category
+        place.countryCode = countryCode
+        place.locality = locality
+        place.administrativeArea = administrativeArea
+        place.thoroughfare = thoroughfare
+        place.formattedAddress = formattedAddress
+        place.rejectedAutoLabels = rejectedAutoLabels
+        place.arrivalHourHistogram = arrivalHourHistogram
+        place.weekdayHistogram = weekdayHistogram
+        place.stayDurationSamples = stayDurationSamples
+        place.createdAt = createdAt
+        place.lastVisitAt = lastVisitAt
     }
 }
 

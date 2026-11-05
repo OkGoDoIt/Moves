@@ -1,4 +1,5 @@
 import CoreLocation
+import SwiftData
 import XCTest
 @testable import Moves
 
@@ -8,6 +9,79 @@ final class TimelineTabTests: XCTestCase {
         XCTAssertEqual(TransportMode.automotive.chipTitle, "Drive")
         XCTAssertEqual(TransportMode.running.chipTitle, "Run")
         XCTAssertEqual(TransportMode.cycling.chipTitle, "Bike")
+    }
+
+    func testOpenDepartureIsOnlyOfferedWhenNothingStartsAfterTheVisit() throws {
+        let schema = Schema(MovesTimelineSchema.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)
+        )
+        let context = ModelContext(container)
+        let earlier = VisitPlace(
+            arrivalDate: date(9, 0),
+            departureDate: date(10, 0),
+            latitude: 52.52,
+            longitude: 13.40,
+            horizontalAccuracy: 10
+        )
+        let latest = VisitPlace(
+            arrivalDate: date(12, 0),
+            departureDate: nil,
+            latitude: 52.53,
+            longitude: 13.41,
+            horizontalAccuracy: 10
+        )
+        context.insert(earlier)
+        context.insert(latest)
+        try context.save()
+
+        XCTAssertEqual(EditTimesRules.nextItemStart(after: earlier, in: context), date(12, 0))
+        XCTAssertNil(EditTimesRules.nextItemStart(after: latest, in: context))
+
+        context.insert(
+            MoveSegment(
+                dedupeKey: "later-move",
+                startDate: date(13, 0),
+                endDate: date(13, 30),
+                transportMode: .walking,
+                distanceMeters: 800,
+                stepCount: nil
+            )
+        )
+        try context.save()
+
+        XCTAssertEqual(EditTimesRules.nextItemStart(after: latest, in: context), date(13, 0))
+    }
+
+    func testWidgetSnapshotFromAnotherDayReadsAsAnEmptyToday() {
+        let now = Date()
+        let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: now)!
+        func snapshot(for day: Date) -> TimelineWidgetSnapshot {
+            TimelineWidgetSnapshot(
+                generatedAt: day,
+                dayKey: DayTimeline.makeDayKey(for: day),
+                dayTitle: "Published",
+                totalDistanceMeters: 4_200,
+                visitedLocationCount: 3,
+                moveCount: 2,
+                transportMetrics: [],
+                routePoints: [TimelineWidgetRoutePoint(latitude: 52.52, longitude: 13.40)]
+            )
+        }
+
+        XCTAssertEqual(TimelineWidgetSnapshot.dayKey(for: now), DayTimeline.makeDayKey(for: now))
+
+        let current = snapshot(for: now).forDisplay(now: now)
+        XCTAssertEqual(current.dayTitle, "Published")
+        XCTAssertEqual(current.moveCount, 2)
+
+        let stale = snapshot(for: yesterday).forDisplay(now: now)
+        XCTAssertEqual(stale.dayKey, DayTimeline.makeDayKey(for: now))
+        XCTAssertEqual(stale.totalDistanceMeters, 0)
+        XCTAssertEqual(stale.visitedLocationCount, 0)
+        XCTAssertEqual(stale.moveCount, 0)
+        XCTAssertTrue(stale.routePoints.isEmpty)
     }
 
     func testActivityChipRowStaysCompact() {

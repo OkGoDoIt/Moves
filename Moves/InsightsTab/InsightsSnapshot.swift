@@ -251,12 +251,25 @@ enum InsightsSnapshotBuilder {
             }
         )
         let showsCurrent = periodContainsToday(period, now: now, calendar: calendar)
-        let streaks = streakCounts(
+        let longest = streakCounts(
             activeDays: activeDays,
             now: now,
             calendar: calendar,
-            includeCurrent: showsCurrent
-        )
+            includeCurrent: false
+        ).longest
+        // A streak running through January 1 keeps counting, so it reads every day, not this period's.
+        let current = showsCurrent
+            ? streakCounts(
+                activeDays: Set(
+                    dailyDistance(in: days, calendar: calendar).compactMap { key, meters in
+                        isActiveDay(distanceMeters: meters) ? key : nil
+                    }
+                ),
+                now: now,
+                calendar: calendar,
+                includeCurrent: true
+            ).current
+            : 0
         let monthly = monthlyDistance(
             distanceByDay: distanceByDay,
             period: period,
@@ -278,8 +291,8 @@ enum InsightsSnapshotBuilder {
             countries: geography.countries,
             cities: geography.cities,
             calendarDays: calendarDays,
-            currentStreakDays: streaks.current,
-            longestStreakDays: streaks.longest,
+            currentStreakDays: current,
+            longestStreakDays: max(longest, current),
             showsCurrentStreak: showsCurrent,
             monthlyDistance: monthly,
             hourDurations: hours,

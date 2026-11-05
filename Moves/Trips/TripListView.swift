@@ -60,6 +60,7 @@ private struct TripListRow: View {
     let trip: NamedTrip
     @Environment(\.modelContext) private var modelContext
     @State private var summary = TripListSummary.empty
+    @State private var didLoadSummary = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -82,6 +83,9 @@ private struct TripListRow: View {
         }
         .padding(.vertical, 4)
         .task(id: trip.id) {
+            // Each summary reads the store on the main thread, so a row scrolling back doesn't redo it.
+            guard !didLoadSummary else { return }
+            didLoadSummary = true
             summary = TripRangeStats.summary(for: trip, in: modelContext)
         }
     }

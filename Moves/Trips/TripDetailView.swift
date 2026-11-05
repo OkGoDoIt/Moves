@@ -5,6 +5,8 @@ import SwiftUI
 /// Map, notes, photos in range, and a day-by-day storyline for one `NamedTrip`.
 struct TripDetailView: View {
     let tripID: UUID
+    /// Closes the sheet around this view before another tab opens. Nil when it isn't in a sheet.
+    var onLeave: (() -> Void)?
 
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
@@ -26,8 +28,9 @@ struct TripDetailView: View {
 
     private var calendar: Calendar { .autoupdatingCurrent }
 
-    init(tripID: UUID) {
+    init(tripID: UUID, onLeave: (() -> Void)? = nil) {
         self.tripID = tripID
+        self.onLeave = onLeave
         let identifier = tripID
         _trips = Query(filter: #Predicate<NamedTrip> { $0.id == identifier })
     }
@@ -207,9 +210,17 @@ struct TripDetailView: View {
     private func reloadLens() async {
         guard let trip else { return }
         fillDraftsIfNeeded(from: trip)
+        // Road matching can take a while, so everything that doesn't need it goes first.
+        let interval = trip.interval
+        photos = (try? TripRangeStats.photos(in: interval, context: modelContext)) ?? []
+        daySections = Self.makeDaySections(
+            interval: interval,
+            dayTimelines: dayTimelines,
+            calendar: calendar
+        )
         let selection = MapRangeSelection.custom(
-            start: trip.interval.start,
-            end: trip.interval.end,
+            start: interval.start,
+            end: interval.end,
             calendar: calendar
         )
         await loader.load(
@@ -219,12 +230,6 @@ struct TripDetailView: View {
                 center: CLLocationCoordinate2D(latitude: 0, longitude: 0),
                 span: MKCoordinateSpan(latitudeDelta: 0.2, longitudeDelta: 0.2)
             ),
-            calendar: calendar
-        )
-        photos = (try? TripRangeStats.photos(in: trip.interval, context: modelContext)) ?? []
-        daySections = Self.makeDaySections(
-            interval: trip.interval,
-            dayTimelines: dayTimelines,
             calendar: calendar
         )
         fitCamera()
@@ -240,10 +245,15 @@ struct TripDetailView: View {
         guard let trip else { return }
         rootController.selectedTab = .map
         rootController.requestedMapInterval = trip.interval
-        dismiss()
+        if let onLeave {
+            onLeave()
+        } else {
+            dismiss()
+        }
     }
 
     private func openInTimeline(_ date: Date) {
+        onLeave?()
         if let url = MapDeepLink.timelineURL(at: date) {
             openURL(url)
         } else {
