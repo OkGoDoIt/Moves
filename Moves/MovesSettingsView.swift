@@ -18,7 +18,10 @@ struct MovesSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var locationServiceSyncManager: LocationServiceSyncManager
+    @EnvironmentObject private var webhookSyncManager: WebhookSyncManager
+    @EnvironmentObject private var cloudDataPresencePublisher: MovesCloudDataPresencePublisher
     @AppStorage(MapMarkerDisplaySettings.showsBigMarkersKey) private var showsBigMarkers = false
+    @AppStorage(RouteSnappingLevel.storageKey) private var snappingLevel = RouteSnappingLevel.normal.rawValue
     @AppStorage(LandscapeLayoutSettings.controlsOnLeftKey) private var landscapeControlsOnLeft = false
     @AppStorage(DailyTimelineBackup.isEnabledKey) private var dailyBackupIsEnabled = false
     @AppStorage(DailyTimelineBackup.formatKey) private var dailyBackupFormat = DailyTimelineBackupFormat.gpx.rawValue
@@ -44,6 +47,9 @@ struct MovesSettingsView: View {
     @State private var isShowingDailyBackupMessage = false
     @State private var isRunningDailyBackup = false
     @State private var dailyBackupDidFail = false
+    /// Screenshot flag `MOVES_OPEN_WEBHOOK=1` pushes the webhook destination.
+    @State private var isShowingWebhookScreenshot =
+        ProcessInfo.processInfo.environment["MOVES_OPEN_WEBHOOK"] == "1"
 
     init(
         dayTimelines: [DayTimeline],
@@ -57,6 +63,37 @@ struct MovesSettingsView: View {
 
     private var selectedDay: DayTimeline? {
         dayTimelines.first(where: { $0.dayKey == selectedDayKey })
+    }
+
+    /// Earliest day that already has GPS, imported, or manual timeline items.
+    private var firstProtectedDayStart: Date? {
+        dayTimelines
+            .filter(\.isProtectedFromPhotoBackfill)
+            .map(\.dayStart)
+            .min()
+    }
+
+    /// `MOVES_OPEN_GOOGLE_IMPORT=1` and `MOVES_OPEN_WEBHOOK=1` scroll Settings to those rows.
+    private func scrollToScreenshotAnchorIfNeeded(_ proxy: ScrollViewProxy) {
+        let env = ProcessInfo.processInfo.environment
+        let anchor: String?
+        if env["MOVES_OPEN_GOOGLE_IMPORT"] == "1" {
+            anchor = SettingsScreenshotAnchor.importCard
+        } else if env["MOVES_OPEN_WEBHOOK"] == "1" {
+            anchor = SettingsScreenshotAnchor.webhookRow
+        } else if env["MOVES_OPEN_ICLOUD"] == "1" {
+            anchor = SettingsScreenshotAnchor.iCloudCard
+        } else if env["MOVES_OPEN_PRIVACY"] == "1" {
+            anchor = SettingsScreenshotAnchor.privacyCard
+        } else {
+            anchor = nil
+        }
+        guard let anchor else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            withAnimation(.easeInOut(duration: 0.25)) {
+                proxy.scrollTo(anchor, anchor: .top)
+            }
+        }
     }
 
     private var dailyICloudBackupSettings: some View {
@@ -94,6 +131,7 @@ struct MovesSettingsView: View {
                 .font(.system(size: 12, weight: .medium, design: .rounded))
                 .foregroundStyle(.secondary)
         }
+        .id(SettingsScreenshotAnchor.dailyBackupCard)
     }
 
     private var dailyBackupDescription: String {
@@ -107,6 +145,7 @@ struct MovesSettingsView: View {
 
     var body: some View {
         NavigationStack {
+            ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 14) {
                     SettingsCard(title: "Map Appearance") {
@@ -114,6 +153,27 @@ struct MovesSettingsView: View {
                             Toggle("Show big map markers", isOn: $showsBigMarkers)
 
                             Text("When this is off, maps use small dots so more of the map stays visible.")
+                                .font(.system(size: 12, weight: .medium, design: .rounded))
+                                .foregroundStyle(.secondary)
+
+                            Divider()
+
+                            MapAppearanceSpeedShadeToggle()
+
+                            Divider()
+
+                            Text("Path")
+                                .font(.system(size: 14, weight: .semibold, design: .rounded))
+
+                            Picker("Path", selection: $snappingLevel) {
+                                ForEach(RouteSnappingLevel.allCases) { level in
+                                    Text(level.title).tag(level.rawValue)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .accessibilityLabel("Path matching")
+
+                            Text("Conservative only fits dense recordings onto roads. Off keeps the recorded line.")
                                 .font(.system(size: 12, weight: .medium, design: .rounded))
                                 .foregroundStyle(.secondary)
 
@@ -129,6 +189,16 @@ struct MovesSettingsView: View {
 
                     AppIconPickerSection()
 
+                    ICloudSettingsCard(publisher: cloudDataPresencePublisher) {
+                        withAnimation(.easeInOut(duration: 0.25)) {
+                            proxy.scrollTo(SettingsScreenshotAnchor.dailyBackupCard, anchor: .top)
+                        }
+                    }
+                    .id(SettingsScreenshotAnchor.iCloudCard)
+
+                    PrivacyZonesSettingsCard()
+                        .id(SettingsScreenshotAnchor.privacyCard)
+
                     SettingsCard(title: "Integrations") {
                         ForEach(LocationService.allCases) { service in
                             NavigationLink {
@@ -143,10 +213,22 @@ struct MovesSettingsView: View {
                             .buttonStyle(.plain)
                         }
 
-                        Text("Optionally upload recorded points to one or more supported cloud or self-hosted location servers.")
+                        NavigationLink {
+                            WebhookSettingsView()
+                        } label: {
+                            SettingsNavigationRow(
+                                title: "Webhook",
+                                systemImage: "link",
+                                status: webhookSyncManager.connectionSummary
+                            )
+                        }
+                        .buttonStyle(.plain)
+
+                        Text("Optionally upload recorded points to one or more supported cloud or self-hosted location servers, or to any HTTPS webhook.")
                             .font(.system(size: 12, weight: .medium, design: .rounded))
                             .foregroundStyle(.secondary)
                     }
+                    .id(SettingsScreenshotAnchor.webhookRow)
 
                     SettingsCard(title: "GPX Export") {
                         SettingsActionRow(
@@ -190,11 +272,46 @@ struct MovesSettingsView: View {
                         ) {
                             export(.csv, scope: .allDays)
                         }
+
+                        SettingsActionRow(
+                            title: "Selected Day (.kml)",
+                            systemImage: "globe.europe.africa",
+                            isDisabled: dayTimelines.isEmpty
+                        ) {
+                            export(.kml, scope: .selectedDay)
+                        }
+
+                        SettingsActionRow(
+                            title: "All Days (.kml)",
+                            systemImage: "globe",
+                            isDisabled: dayTimelines.isEmpty
+                        ) {
+                            export(.kml, scope: .allDays)
+                        }
+
+                        SettingsActionRow(
+                            title: "Everything (.zip)",
+                            systemImage: "archivebox",
+                            isDisabled: dayTimelines.isEmpty
+                        ) {
+                            exportZip()
+                        }
                     }
 
                     dailyICloudBackupSettings
 
                     SettingsCard(title: "Import") {
+                        NavigationLink {
+                            GoogleTimelineImportSettingsView(modelContext: modelContext)
+                        } label: {
+                            SettingsNavigationRow(
+                                title: "Google Timeline",
+                                systemImage: "globe",
+                                status: nil
+                            )
+                        }
+                        .buttonStyle(.plain)
+
                         NavigationLink {
                             TimelineArchiveImportSettingsView(modelContext: modelContext)
                         } label: {
@@ -228,12 +345,13 @@ struct MovesSettingsView: View {
                         }
                         .buttonStyle(.plain)
 
-                        Text("Use Moves timeline export to restore another Moves install from its GPX, GeoJSON, and CSV files. Files import rebuilds places and trips from any timestamped GPS log, such as an export from another tracking app. Health import adds workout routes.")
+                        Text("Google Timeline imports a Takeout Location History folder (semantic months first, then Records.json). Use Moves timeline export to restore another Moves install from GPX, GeoJSON, CSV, or zip. Files import rebuilds places and trips from any timestamped GPS log. Health import adds workout routes.")
                             .font(.system(size: 12, weight: .medium, design: .rounded))
                             .foregroundStyle(.secondary)
                     }
+                    .id(SettingsScreenshotAnchor.importCard)
 
-
+                    PhotosSettingsCard(firstRecordedDayStart: firstProtectedDayStart)
 
                     SettingsCard(title: "Data Maintenance") {
                         SettingsActionRow(
@@ -278,15 +396,21 @@ struct MovesSettingsView: View {
                 )
                 .ignoresSafeArea()
             }
-
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
+            .navigationDestination(isPresented: $isShowingWebhookScreenshot) {
+                WebhookSettingsView()
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") {
                         dismiss()
                     }
                 }
+            }
+            .onAppear {
+                scrollToScreenshotAnchorIfNeeded(proxy)
+            }
             }
         }
 
@@ -378,7 +502,43 @@ struct MovesSettingsView: View {
         guard let payload = TimelineExporter.makePayload(
             days: days,
             format: format,
-            fileStem: "moves-\(scopeName)"
+            fileStem: "moves-\(scopeName)",
+            privacyZones: currentExportPrivacyZones()
+        ) else {
+            exportMessage = "Could not build export file."
+            isShowingExportMessage = true
+            return
+        }
+
+        exportDocument = TimelineExportDocument(data: payload.data)
+        exportContentType = payload.contentType
+        exportFilename = payload.filename
+        isExporting = true
+    }
+
+    private func currentExportPrivacyZones(places: [KnownPlace]? = nil) -> [PrivacyZone] {
+        PrivacyZoneResolver.exportZones(
+            from: places ?? PrivacyZoneResolver.loadPlaces(from: modelContext)
+        )
+    }
+
+    /// Writes GPX, GeoJSON, CSV, KML, `places.json`, and `photos.csv` into one zip.
+    private func exportZip() {
+        guard !dayTimelines.isEmpty else {
+            exportMessage = "No timeline data available yet."
+            isShowingExportMessage = true
+            return
+        }
+
+        let knownPlaces = (try? modelContext.fetch(FetchDescriptor<KnownPlace>())) ?? []
+        let photos = (try? modelContext.fetch(FetchDescriptor<PhotoAttachment>())) ?? []
+
+        guard let payload = TimelineExporter.makeZipPayload(
+            days: dayTimelines,
+            knownPlaces: knownPlaces,
+            photos: photos,
+            fileStem: "moves-all-days",
+            privacyZones: currentExportPrivacyZones(places: knownPlaces)
         ) else {
             exportMessage = "Could not build export file."
             isShowingExportMessage = true
@@ -671,6 +831,22 @@ private struct HealthWorkoutRouteImportSettingsView: View {
         } else if let message = healthRouteImportManager.lastHistoricalImportErrorMessage {
             importMessage = message
             isShowingImportMessage = true
+        }
+    }
+}
+
+// MARK: - MapAppearance+SpeedShade
+
+private struct MapAppearanceSpeedShadeToggle: View {
+    @AppStorage(MapRouteShadingSettings.shadeRoutesBySpeedKey) private var shadeRoutesBySpeed = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle("Shade routes by speed", isOn: $shadeRoutesBySpeed)
+
+            Text("Lighter where you were faster. The compact timeline map stays a solid colour.")
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+                .foregroundStyle(.secondary)
         }
     }
 }
@@ -1163,4 +1339,13 @@ private struct RouteTrackingSettingsSection: View {
             Text("Moves needs notification permission to send a stop alert. You can allow it in Settings.")
         }
     }
+}
+
+/// Screenshot-agent scroll targets in Settings.
+private enum SettingsScreenshotAnchor {
+    static let importCard = "settings.import"
+    static let webhookRow = "settings.webhook"
+    static let iCloudCard = "settings.icloud"
+    static let privacyCard = "settings.privacy"
+    static let dailyBackupCard = "settings.dailyBackup"
 }

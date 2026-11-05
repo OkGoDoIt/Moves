@@ -248,6 +248,15 @@
     "Delete Place" : {
 
     },
+    "Delete trip" : {
+
+    },
+    "Delete trip?" : {
+
+    },
+    "Days, visits, and photos stay on your timeline." : {
+
+    },
     "Delete Place?" : {
 
     },
@@ -326,6 +335,12 @@
     "Get Tracking Status" : {
 
     },
+    "Home, work, and the café downstairs will be grouped by country and city, with how often you visit and how long you stay." : {
+
+    },
+    "Insights" : {
+
+    },
     "GPX" : {
 
     },
@@ -371,6 +386,9 @@
     "Jump to Date" : {
 
     },
+    "Jump to Date & Time" : {
+
+    },
     "Keep Moves running in the background. Visits and movement segments appear as iOS records them." : {
 
     },
@@ -381,6 +399,9 @@
 
     },
     "Last successful upload %@." : {
+
+    },
+    "Lighter where you were faster. The compact timeline map stays a solid colour." : {
 
     },
     "Listen for location changes" : {
@@ -396,6 +417,9 @@
 
     },
     "Manual route" : {
+
+    },
+    "Map" : {
 
     },
     "Map Style" : {
@@ -458,6 +482,15 @@
     "No timeline yet" : {
 
     },
+    "No trips yet" : {
+
+    },
+    "No photos in this range" : {
+
+    },
+    "No recorded activity" : {
+
+    },
     "No Visits Yet" : {
 
     },
@@ -495,6 +528,9 @@
 
     },
     "Period" : {
+
+    },
+    "Places" : {
 
     },
     "Place" : {
@@ -552,6 +588,18 @@
     "Save" : {
 
     },
+    "Save as trip" : {
+
+    },
+    "Save as trip…" : {
+
+    },
+    "Save trip" : {
+
+    },
+    "Saved from the Map range." : {
+
+    },
     "Search by place, note, or date" : {
 
     },
@@ -568,6 +616,9 @@
 
     },
     "Settings" : {
+
+    },
+    "Shade routes by speed" : {
 
     },
     "Share %@" : {
@@ -589,6 +640,12 @@
 
     },
     "Share Selected Images" : {
+
+    },
+    "Path" : {
+
+    },
+    "Conservative only fits dense recordings onto roads. Off keeps the recorded line." : {
 
     },
     "Show big map markers" : {
@@ -645,6 +702,24 @@
     "Swap" : {
 
     },
+    "See a day, a week, or a year on one map." : {
+
+    },
+    "Filter by how you moved, scrub through time, and switch between routes, heat, and the streets you’ve covered." : {
+
+    },
+    "Places you actually go." : {
+
+    },
+    "Timeline" : {
+
+    },
+    "Your year at a glance." : {
+
+    },
+    "Distance, countries, streaks, and time-of-day patterns — compared with last year when there’s enough history." : {
+
+    },
     "Tap images to select several, or use the share button on a single design. Statistics are calculated entirely on this device." : {
 
     },
@@ -685,6 +760,21 @@
 
     },
     "Today" : {
+
+    },
+    "Trip" : {
+
+    },
+    "Trip actions" : {
+
+    },
+    "Trip map" : {
+
+    },
+    "Trip unavailable" : {
+
+    },
+    "Trips" : {
 
     },
     "Toggle Real Route Tracking" : {
@@ -770,6 +860,305 @@
     },
     "You will see when you traveled between them, plus minimum, average, and maximum journey times." : {
 
+    },
+    "Rename" : {
+
+    },
+    "Rename…" : {
+
+    },
+    "Nearby" : {
+
+    },
+    "Nearby places" : {
+
+    },
+    "Naming…" : {
+
+    },
+    "Confirm place" : {
+
+    },
+    "Address" : {
+
+    },
+    "Label" : {
+
+    },
+    "Custom label" : {
+
+    },
+    "Moves will use this name the next time you stop here." : {
+
+    },
+    "Map pin. Drag the map to set the address." : {
+
+    },
+    "%@ away" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%@ away"
+          }
+        }
+      }
+    },
+    "Not a stop" : {
+
+    },
+    "Pick nearby place…" : {
+
+    },
+    "Edit times" : {
+
+    },
+    "Review" : {
+
+    },
+    "Undo" : {
+
+    },
+    "Ambiguous places" : {
+
+    },
+    "Possible false stops" : {
+
+    },
+    "Uncertain modes" : {
+
+    },
+    "Approximate imports" : {
+
+    },
+    "All clear" : {
+
+    },
+    "Nothing needs a review right now." : {
+
+    },
+    "Couldn’t update the timeline" : {
+
+    },
+    "This stay was longer than an hour. You can undo afterwards." : {
+
+    },
+    "Change mode" : {
+
+    },
+    "Split here…" : {
+
+    },
+    "Merge with previous" : {
+
+    },
+    "Merge with next" : {
+
+    },
+    "This week" : {
+
+    },
+    "Last week" : {
+
+    },
+    "This month" : {
+
+    },
+    "Last month" : {
+
+    },
+    "This year" : {
+
+    },
+    "Presets" : {
+
+    },
+    "Custom" : {
+
+    },
+    "Apply" : {
+
+    },
+    "Map range" : {
+
+    },
+    "Previous range" : {
+
+    },
+    "Next range" : {
+
+    },
+    "Choose a day, week, month, or year" : {
+
+    },
+    "Share" : {
+
+    },
+    "Routes" : {
+
+    },
+    "Heat" : {
+
+    },
+    "Fog" : {
+
+    },
+    "Map layers" : {
+
+    },
+    "How you moved" : {
+
+    },
+    "Time range" : {
+
+    },
+    "Open in Timeline" : {
+
+    },
+    "Open in Map" : {
+
+    },
+    "On the Map, choose a range and save it as a trip." : {
+
+    },
+    "Name" : {
+
+    },
+    "Notes" : {
+
+    },
+    "Photos" : {
+
+    },
+    "Choose a day, week, month, or year. Menu saves the range as a trip." : {
+
+    },
+    "Cities appear after places are named" : {
+
+    },
+    "Daily Backup" : {
+
+    },
+    "Hide Home and Work" : {
+
+    },
+    "iCloud" : {
+
+    },
+    "Leave out exact GPS points near Home and Work when you export" : {
+
+    },
+    "On this iPhone" : {
+
+    },
+    "Privacy" : {
+
+    },
+    "Private iCloud" : {
+
+    },
+    "Set Home or Work" : {
+
+    },
+    "Today's route" : {
+
+    },
+    "This install keeps your timeline on this iPhone. It isn’t mirroring to iCloud. Daily Backup can still copy yesterday to iCloud Drive." : {
+
+    },
+    "This simulator keeps your timeline on this device. Daily Backup can still copy yesterday to iCloud Drive." : {
+
+    },
+    "Your timeline stays in your private iCloud when you’re signed in. A nightly copy can also go to iCloud Drive." : {
+
+    },
+    "Keeps the streets around Home and Work off share cards and optional exports. Off until you set Home or Work." : {
+
+    },
+    "A 200 m circle around %@ is blurred on share cards." : {
+
+    },
+    "Confirm a place in the Places tab first, then come back." : {
+
+    },
+    "Day activity" : {
+
+    },
+    "Day map" : {
+
+    },
+    "Filters the map to this way of moving" : {
+
+    },
+    "Privacy uses a 200 m circle around Home and Work. Choose a place, or cancel to leave this off." : {
+
+    },
+    "Scrolls to nightly iCloud Drive backup" : {
+
+    },
+    "Shows today’s places and how you moved" : {
+
+    },
+    "Turned on, but no Home or Work yet. Share cards stay as they are until you set one in Places." : {
+
+    },
+    "Untitled place" : {
+
+    },
+    "Your places" : {
+
+    },
+    "Your timeline stays in your private iCloud. Last updated %@." : {
+
+    },
+    "Walk" : {
+
+    },
+    "Run" : {
+
+    },
+    "Swim" : {
+
+    },
+    "Bike" : {
+
+    },
+    "Drive" : {
+
+    },
+    "Fly" : {
+
+    },
+    "Still" : {
+
+    },
+    "Move" : {
+
+    },
+    "<1m" : {
+
+    },
+    "Shows the short stop" : {
+
+    },
+    "Hides the short stop" : {
+
+    },
+    "Show short stop" : {
+
+    },
+    "Hide short stop" : {
+
+    },
+    "Short stop, %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Short stop, %@"
+          }
+        }
+      }
     }
   },
   "version" : "1.2"

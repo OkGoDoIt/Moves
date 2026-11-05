@@ -309,9 +309,10 @@ final class SampleStayReconciliationTests: XCTestCase {
 private struct FixedMotionClassifier: MotionClassifier {
     var mode: TransportMode
     var steps: Int
+    var confidence: Double = 0.9
 
-    func classifyTransport(start: Date, end: Date, locations: [CLLocation]) async -> TransportMode {
-        mode
+    func classifyTransport(start: Date, end: Date, locations: [CLLocation]) async -> (mode: TransportMode, confidence: Double) {
+        (mode, confidence)
     }
 
     func stepCount(start: Date, end: Date) async -> Int? {

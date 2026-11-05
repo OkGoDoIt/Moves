@@ -32,4 +32,5 @@ fastlane/test_output
 
 # Personal timeline exports used by local import tests. Do not commit location history.
 MovesTests/Fixtures/moves-all-days.*
+MovesTests/Fixtures/GoogleTimeline/.run-live
 import-staging/

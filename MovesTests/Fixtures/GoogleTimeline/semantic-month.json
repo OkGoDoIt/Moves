@@ -1,0 +1,304 @@
+{
+  "timelineObjects": [
+    {
+      "placeVisit": {
+        "location": {
+          "latitudeE7": 525200000,
+          "longitudeE7": 134000000,
+          "semanticType": "TYPE_HOME",
+          "locationConfidence": 99.0
+        },
+        "duration": {
+          "startTimestamp": "2020-01-02T00:00:00Z",
+          "endTimestamp": "2020-01-02T08:00:00Z"
+        },
+        "placeConfidence": "HIGH_CONFIDENCE",
+        "centerLatE7": 525200000,
+        "centerLngE7": 134000000,
+        "visitConfidence": 90,
+        "editConfirmationStatus": "NOT_CONFIRMED",
+        "placeVisitType": "SINGLE_PLACE",
+        "placeVisitImportance": "MAIN"
+      }
+    },
+    {
+      "activitySegment": {
+        "startLocation": {
+          "latitudeE7": 525200000,
+          "longitudeE7": 134000000
+        },
+        "endLocation": {
+          "latitudeE7": 525210000,
+          "longitudeE7": 134050000
+        },
+        "duration": {
+          "startTimestamp": "2020-01-02T08:00:00Z",
+          "endTimestamp": "2020-01-02T08:15:00Z"
+        },
+        "distance": 900,
+        "activityType": "WALKING",
+        "confidence": "HIGH",
+        "activities": [
+          { "activityType": "WALKING", "probability": 90.0 }
+        ],
+        "waypointPath": {
+          "waypoints": [
+            { "latE7": 525200000, "lngE7": 134000000 },
+            { "latE7": 525205000, "lngE7": 134025000 },
+            { "latE7": 525210000, "lngE7": 134050000 }
+          ],
+          "source": "BACKFILLED",
+          "distanceMeters": 950.0,
+          "travelMode": "WALK"
+        },
+        "editConfirmationStatus": "NOT_CONFIRMED"
+      }
+    },
+    {
+      "placeVisit": {
+        "location": {
+          "latitudeE7": 525210000,
+          "longitudeE7": 134050000,
+          "name": "Cafe"
+        },
+        "duration": {
+          "startTimestamp": "2020-01-02T08:15:00Z",
+          "endTimestamp": "2020-01-02T09:00:00Z"
+        },
+        "placeConfidence": "USER_CONFIRMED",
+        "visitConfidence": 100,
+        "editConfirmationStatus": "CONFIRMED",
+        "placeVisitType": "SINGLE_PLACE"
+      }
+    },
+    {
+      "activitySegment": {
+        "startLocation": {
+          "latitudeE7": 525210000,
+          "longitudeE7": 134050000
+        },
+        "endLocation": {
+          "latitudeE7": 525400000,
+          "longitudeE7": 134200000
+        },
+        "duration": {
+          "startTimestamp": "2020-01-02T09:00:00Z",
+          "endTimestamp": "2020-01-02T09:40:00Z"
+        },
+        "distance": 9800,
+        "activityType": "IN_PASSENGER_VEHICLE",
+        "confidence": "LOW",
+        "activities": [
+          { "activityType": "IN_PASSENGER_VEHICLE", "probability": 70.0 }
+        ],
+        "waypointPath": {
+          "waypoints": [
+            { "latE7": 525210000, "lngE7": 134050000 },
+            { "latE7": 525400000, "lngE7": 134200000 }
+          ],
+          "source": "INFERRED",
+          "travelMode": "DRIVE"
+        },
+        "editConfirmationStatus": "NOT_CONFIRMED",
+        "parkingEvent": {
+          "location": {
+            "latitudeE7": 525400000,
+            "longitudeE7": 134200000
+          },
+          "method": "END_OF_ACTIVITY_SEGMENT",
+          "locationSource": "UNKNOWN",
+          "timestamp": "2020-01-02T09:40:00Z"
+        }
+      }
+    },
+    {
+      "placeVisit": {
+        "location": {
+          "latitudeE7": 525400000,
+          "longitudeE7": 134200000,
+          "name": "Mall"
+        },
+        "duration": {
+          "startTimestamp": "2020-01-02T09:40:00Z",
+          "endTimestamp": "2020-01-02T11:00:00Z"
+        },
+        "placeConfidence": "MEDIUM_CONFIDENCE",
+        "childVisits": [
+          {
+            "location": {
+              "latitudeE7": 525401000,
+              "longitudeE7": 134201000,
+              "name": "Bookstore"
+            },
+            "duration": {
+              "startTimestamp": "2020-01-02T10:00:00Z",
+              "endTimestamp": "2020-01-02T10:25:00Z"
+            },
+            "placeConfidence": "LOW_CONFIDENCE",
+            "editConfirmationStatus": "NOT_CONFIRMED",
+            "placeVisitType": "SINGLE_PLACE"
+          }
+        ],
+        "editConfirmationStatus": "NOT_CONFIRMED",
+        "placeVisitType": "SINGLE_PLACE"
+      }
+    },
+    {
+      "activitySegment": {
+        "startLocation": {
+          "latitudeE7": 525400000,
+          "longitudeE7": 134200000
+        },
+        "endLocation": {
+          "latitudeE7": 525500000,
+          "longitudeE7": 134300000
+        },
+        "duration": {
+          "startTimestamp": "2020-01-02T11:00:00Z",
+          "endTimestamp": "2020-01-02T11:20:00Z"
+        },
+        "distance": 1400,
+        "activityType": "IN_BUS",
+        "confidence": "MEDIUM",
+        "activities": [
+          { "activityType": "IN_BUS", "probability": 80.0 }
+        ],
+        "transitPath": {
+          "transitStops": [
+            {
+              "latitudeE7": 525400000,
+              "longitudeE7": 134200000,
+              "name": "Stop A"
+            },
+            {
+              "latitudeE7": 525500000,
+              "longitudeE7": 134300000,
+              "name": "Stop B"
+            }
+          ],
+          "name": "Line 1",
+          "hexRgbColor": "000000",
+          "source": "BACKFILLED"
+        },
+        "simplifiedRawPath": {
+          "points": [
+            {
+              "latE7": 525450000,
+              "lngE7": 134250000,
+              "accuracyMeters": 20,
+              "timestamp": "2020-01-02T11:10:00Z"
+            }
+          ],
+          "source": "BACKFILLED",
+          "distanceMeters": 1450.0
+        },
+        "editConfirmationStatus": "NOT_CONFIRMED"
+      }
+    },
+    {
+      "placeVisit": {
+        "location": {
+          "latitudeE7": 525500000,
+          "longitudeE7": 134300000,
+          "name": "Office"
+        },
+        "duration": {
+          "startTimestamp": "2020-01-02T11:20:00Z",
+          "endTimestamp": "2020-01-02T17:00:00Z"
+        },
+        "editConfirmationStatus": "NOT_CONFIRMED",
+        "simplifiedRawPath": {
+          "points": [
+            {
+              "latE7": 525500000,
+              "lngE7": 134300000,
+              "accuracyMeters": 18,
+              "timestamp": "2020-01-02T12:00:00Z"
+            },
+            {
+              "latE7": 525501000,
+              "lngE7": 134301000,
+              "accuracyMeters": 22,
+              "timestamp": "2020-01-02T15:00:00Z"
+            }
+          ],
+          "source": "BACKFILLED"
+        },
+        "placeVisitType": "SINGLE_PLACE"
+      }
+    },
+    {
+      "activitySegment": {
+        "startLocation": {
+          "latitudeE7": 525500000,
+          "longitudeE7": 134300000
+        },
+        "endLocation": {
+          "latitudeE7": 488500000,
+          "longitudeE7": 23500000
+        },
+        "duration": {
+          "startTimestamp": "2020-01-02T18:00:00Z",
+          "endTimestamp": "2020-01-02T20:00:00Z"
+        },
+        "distance": 850000,
+        "activityType": "FLYING",
+        "confidence": "MEDIUM",
+        "activities": [
+          { "activityType": "FLYING", "probability": 90.0 }
+        ],
+        "simplifiedRawPath": {
+          "points": [
+            {
+              "latE7": 510000000,
+              "lngE7": 80000000,
+              "accuracyMeters": 200,
+              "timestamp": "2020-01-02T19:00:00Z"
+            }
+          ]
+        },
+        "editConfirmationStatus": "NOT_CONFIRMED"
+      }
+    },
+    {
+      "activitySegment": {
+        "startLocation": {},
+        "endLocation": {},
+        "duration": {
+          "startTimestamp": "2020-01-03T08:00:00Z",
+          "endTimestamp": "2020-01-03T08:20:00Z"
+        },
+        "confidence": "LOW",
+        "activities": [
+          { "activityType": "IN_VEHICLE", "probability": 0.0 },
+          { "activityType": "WALKING", "probability": 0.0 }
+        ],
+        "waypointPath": {
+          "waypoints": [
+            { "latE7": 488500000, "lngE7": 23500000 },
+            { "latE7": 488600000, "lngE7": 23600000 }
+          ],
+          "source": "BACKFILLED",
+          "travelMode": "DRIVE"
+        },
+        "editConfirmationStatus": "NOT_CONFIRMED"
+      }
+    },
+    {
+      "activitySegment": {
+        "startLocation": {},
+        "endLocation": {},
+        "duration": {
+          "startTimestamp": "2020-01-03T09:00:00Z",
+          "endTimestamp": "2020-01-03T09:30:00Z"
+        },
+        "distance": 400,
+        "confidence": "UNKNOWN_CONFIDENCE",
+        "activities": [
+          { "activityType": "UNKNOWN_ACTIVITY_TYPE", "probability": 0.0 }
+        ],
+        "editConfirmationStatus": "NOT_CONFIRMED"
+      }
+    }
+  ]
+}

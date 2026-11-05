@@ -5,10 +5,11 @@ import WidgetKit
 struct MovesRouteTrackingLiveActivityWidget: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: MovesRouteTrackingAttributes.self) { context in
+            let tint = Color(context.state.colorAssetName)
             HStack(spacing: 14) {
-                Image(systemName: "location.fill")
+                Image(systemName: context.state.symbolName)
                     .font(.title2)
-                    .foregroundStyle(.teal)
+                    .foregroundStyle(tint)
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Real route tracking")
@@ -33,10 +34,11 @@ struct MovesRouteTrackingLiveActivityWidget: Widget {
             .activitySystemActionForegroundColor(.primary)
             .widgetURL(URL(string: "moves://tracking"))
         } dynamicIsland: { context in
-            DynamicIsland {
+            let tint = Color(context.state.colorAssetName)
+            return DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    Label("Moves", systemImage: "location.fill")
-                        .foregroundStyle(.teal)
+                    Label("Moves", systemImage: context.state.symbolName)
+                        .foregroundStyle(tint)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
                     Text(distanceText(context.state.distanceMeters))
@@ -52,17 +54,17 @@ struct MovesRouteTrackingLiveActivityWidget: Widget {
                     .font(.caption)
                 }
             } compactLeading: {
-                Image(systemName: "location.fill")
-                    .foregroundStyle(.teal)
+                Image(systemName: context.state.symbolName)
+                    .foregroundStyle(tint)
             } compactTrailing: {
                 Text(distanceText(context.state.distanceMeters))
                     .font(.caption2.monospacedDigit())
             } minimal: {
-                Image(systemName: "location.fill")
-                    .foregroundStyle(.teal)
+                Image(systemName: context.state.symbolName)
+                    .foregroundStyle(tint)
             }
             .widgetURL(URL(string: "moves://tracking"))
-            .keylineTint(.teal)
+            .keylineTint(tint)
         }
     }
 }

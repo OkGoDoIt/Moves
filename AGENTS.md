@@ -87,15 +87,26 @@ Optional: `DEVICE_UDID=... ./Scripts/install-iphone.sh`.
 |---|---|
 | Bundle IDs, App Group, iCloud container, team | `Config/Moves.xcconfig`, `Moves/MovesAppIdentity.swift` |
 | App entry, SwiftData / CloudKit container | `Moves/MovesApp.swift` |
-| Timeline UI, maps, day paging | `Moves/ContentView.swift`, `Moves/MovesTimelineViews.swift`, `Moves/MovesDetailViews.swift` |
-| Settings, export, integrations | `Moves/MovesSettingsView.swift`, `Moves/DawarichSync.swift` |
-| Imports | `Moves/TimelineArchiveImport.swift` (Moves GPX+GeoJSON+CSV), `Moves/LocationLogImport.swift` + `Moves/RouteFileImport.swift` (any timestamped GPX/TCX/KML log → stays, moves, speed-based modes, geocoded names; bulk writer is `importLocationLog` in `VisitedLocation.swift`). Real-file fixtures live in gitignored `import-staging/` and `MovesTests/Fixtures/`; tests skip when absent. |
+| Timeline UI, maps, day paging | `Moves/ContentView.swift`, `Moves/MovesRootView.swift`, `Moves/TimelineTabView.swift`, `Moves/MovesTimelineViews.swift`, `Moves/MovesJumpToDateView.swift`, `Moves/MovesDetailViews.swift` |
+| Map tab | `Moves/MapTab/` (`MapTabView`, range pill/sheet/scrubber, layer chips, `MapWindowLoader`, `VisitedCellStore`); `ShareMapAggregate.swift` per-day buckets |
+| Places tab | `Moves/PlacesTab/` (`PlacesTabView`, `PlaceDetailView`, `OccupancyChartView`, `PlacesIndex`); geocode backfill is `Moves/PlaceGeocodeBackfill.swift` |
+| Insights tab & search | `Moves/InsightsTab/` (`InsightsTabView`, `InsightsSnapshot`, Connections); `Moves/MovesSearchView.swift`, `Moves/SearchQueryParser.swift`. Visit/journey aggregates remain in `Moves/MovesStatisticsSearchView.swift`. |
+| Named trips | `Moves/Trips/` (`TripListView`, `TripDetailView`, `SaveTripSheet`, `TripRangeStats`); `NamedTrip` in `VisitedLocation.swift`. Insights has a Trips row; Map range pill menu → Save as trip; `moves://trip/{uuid}` / `moves://trips`. |
+| Corrections, Review inbox, undo pill | `Moves/TimelineItemActions.swift`, `Moves/TimelineEditController.swift`, `Moves/PlaceRenameSheet.swift`, `Moves/EditTimesSheet.swift`, `Moves/SplitSheet.swift`, `Moves/ReviewInboxView.swift`, `Moves/UndoToast.swift`, `Moves/NearbyPlaceSuggester.swift` |
+| Route matching / path policy | `Moves/RoadRouteMatcher.swift` (`RoadRouteMatcher`, `RouteMatchPlausibility`, `DirectionsProvider`); Path control in `MovesDetailViews.swift`; Settings → Map Appearance Path level |
+| Models + repository | `Moves/VisitedLocation.swift` (`DayTimeline`, `VisitPlace`, `MoveSegment`, `LocationSample`, `KnownPlace`, `PhotoAttachment`, `PlaceCorrectionEvent`, `VisitedCell`, `NamedTrip`) |
+| Place learning | `Moves/PlaceLearningEngine.swift` (resolve / learn / negatives / merge / clampRadius); hooked from `DefaultTimelineAssembler.ingestVisit` and `SwiftDataTimelineRepository`. Places tab occupancy, merge, and shrink consume these APIs. |
+| Photos | `Moves/Photos/` (`PhotoLibraryService`, `PhotoHistoryImporter`, `PhotoAttachmentQuery`, storyline + range thumbnail strips, Settings → Photos). Read-only PhotoKit; Limited Library explained in Settings. Never modifies the library. Named trips (WS9b) lens `PhotoAttachment` rows in a date range — they do not copy photos. |
+| Timeline lookup / schema upgrade | `Moves/TimelineLocator.swift`, `Moves/TimelineSchemaUpgrader.swift` |
+| Route rendering / speed shading | `Moves/RouteRendering.swift`, `Moves/SpeedProfileBuilder.swift` |
+| Settings, export, integrations | `Moves/MovesSettingsView.swift`, `Moves/DawarichSync.swift`, `Moves/WebhookSync.swift` (generic webhook), `Moves/MovesZipArchive.swift` (zip export/import) |
+| iCloud status, privacy zones | `Moves/CloudDataPresencePublisher.swift` (Settings → iCloud), `Moves/PrivacyZones.swift` (Home/Work circles on share cards and exports) |
+| Imports | `Moves/Import/` (Google Timeline: `GoogleTimelineImporter`, `GoogleTimelineDocument`, streaming `Records.json` scanner, zip reader); `Moves/OnboardingFlow.swift`; `Moves/TimelineArchiveImport.swift` (Moves GPX+GeoJSON+CSV+zip); `Moves/LocationLogImport.swift` + `Moves/RouteFileImport.swift` (any timestamped GPX/TCX/KML log → stays, moves, speed-based modes, geocoded names; bulk writer is `importLocationLog` in `VisitedLocation.swift`). Real-file fixtures live in gitignored `import-staging/` and `MovesTests/Fixtures/`; Google Timeline unit fixtures are `MovesTests/Fixtures/GoogleTimeline/`. |
 | Location capture, motion, route tracking | `Moves/LocationChange.swift` (`MovesLocationCaptureManager`) |
-| Models + repository | `Moves/VisitedLocation.swift` (`DayTimeline`, `VisitPlace`, `MoveSegment`, `LocationSample`) |
 | Timeline assembly / transport inference | `DefaultTimelineAssembler` in the location/timeline sources; tests in `MovesTests/TimelineAssemblerTests.swift` |
 | App Intents / Siri / Action button | `Moves/MovesAppIntents.swift` |
-| Widgets + Live Activity | `Moves Widgets/` |
-| Watch companion GPS | `Moves Watch App/` |
+| Widgets + Live Activity | `Moves Widgets/` (route Canvas from `TimelineWidgetSnapshot.routePoints`; Live Activity uses the mode palette) |
+| Watch companion GPS | `Moves Watch App/` (today’s route uses mode color assets) |
 | iPhone Duo layout notes (not implemented) | `duo.md` |
 
 Keep capture, Live Activity, uploads, and SwiftData writes **independent of view identity**. Fold/open/rotation must not tear down `MovesLocationCaptureManager`.

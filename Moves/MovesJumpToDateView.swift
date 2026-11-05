@@ -60,20 +60,27 @@ struct MovesJumpToDateView: View {
 
     private let dayTimelines: [DayTimeline]
     private let onSelectDate: (Date) -> Void
+    private let onSelectMoment: ((Date) -> Void)?
     private let onDismiss: () -> Void
+    private let allowsTimeSelection: Bool
 
     @State private var pickerDate: Date
     @State private var activityFilter: ActivityFilter = .overall
     @State private var isShowingActivityFilterPicker = false
+    @State private var isTimeEnabled = false
 
     init(
         dayTimelines: [DayTimeline],
         selectedDate: Date,
         onSelectDate: @escaping (Date) -> Void,
+        onSelectMoment: ((Date) -> Void)? = nil,
+        includesTime: Bool = true,
         onDismiss: @escaping () -> Void
     ) {
         self.dayTimelines = dayTimelines
         self.onSelectDate = onSelectDate
+        self.onSelectMoment = onSelectMoment
+        self.allowsTimeSelection = includesTime
         self.onDismiss = onDismiss
         _pickerDate = State(initialValue: selectedDate)
     }
@@ -134,6 +141,10 @@ struct MovesJumpToDateView: View {
                         onDismiss()
                     }
                     .buttonStyle(.bordered)
+                }
+
+                if allowsTimeSelection {
+                    timeSelectionSection
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
@@ -212,7 +223,7 @@ struct MovesJumpToDateView: View {
                 Spacer()
             }
             .padding()
-            .navigationTitle("Jump to Date")
+            .navigationTitle("Jump to Date & Time")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -226,6 +237,45 @@ struct MovesJumpToDateView: View {
                 activityFilter = .overall
             }
         }
+    }
+
+    private var timeSelectionSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Toggle(isOn: $isTimeEnabled) {
+                Text("Include time")
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+            }
+            .tint(MovesPalette.routeTracking)
+
+            if isTimeEnabled {
+                DatePicker(
+                    "Time",
+                    selection: $pickerDate,
+                    displayedComponents: .hourAndMinute
+                )
+                .datePickerStyle(.wheel)
+                .labelsHidden()
+                .frame(maxHeight: 140)
+                .accessibilityLabel(String(localized: "Time"))
+
+                Button {
+                    onSelectMoment?(pickerDate)
+                    onDismiss()
+                } label: {
+                    Text("Go to moment")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(onSelectMoment == nil)
+                .accessibilityHint(String(localized: "Opens that day and highlights where you were"))
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(MovesPalette.card.opacity(0.8))
+        )
     }
 
     private var activityFilterPickerContent: some View {

@@ -6,6 +6,8 @@
 	<array>
 		<string>$(PRODUCT_BUNDLE_IDENTIFIER).dailyTimelineBackup</string>
 		<string>$(PRODUCT_BUNDLE_IDENTIFIER).shareMapAggregates</string>
+		<string>$(PRODUCT_BUNDLE_IDENTIFIER).routeMatching</string>
+		<string>$(PRODUCT_BUNDLE_IDENTIFIER).placeGeocodeBackfill</string>
 	</array>
 	<key>CFBundleIcons</key>
 	<dict>
@@ -280,6 +282,8 @@
 			<string>Any</string>
 		</dict>
 	</dict>
+	<key>PHPhotoLibraryPreventAutomaticLimitedAccessAlert</key>
+	<true/>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>location</string>

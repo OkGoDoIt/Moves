@@ -764,20 +764,22 @@ struct MovesShareGalleryView: View {
     init(
         dayTimelines: [DayTimeline],
         initialDate: Date,
+        initialPeriod: MovesSharePeriod = .day,
         showsDismissButton: Bool = true
     ) {
         self.dayTimelines = dayTimelines
         self.showsDismissButton = showsDismissButton
         _selectedDate = State(initialValue: initialDate)
-        let initialPeriodStart = MovesSharePeriod.day.start(for: initialDate)
+        _selectedPeriod = State(initialValue: initialPeriod)
+        let initialPeriodStart = initialPeriod.start(for: initialDate)
         _snapshot = State(initialValue: MovesShareSnapshot.make(
             from: dayTimelines,
-            period: .day,
+            period: initialPeriod,
             periodStart: initialPeriodStart
         ))
         _snapshotDataSignature = State(initialValue: Self.makeDataSignature(
             timelines: dayTimelines,
-            period: .day,
+            period: initialPeriod,
             periodStart: initialPeriodStart
         ))
     }
@@ -1087,10 +1089,12 @@ struct MovesShareGalleryView: View {
                     && (!day.places.isEmpty || !day.moves.isEmpty)
             }
             guard !days.isEmpty else { return nil }
+            let places = (try? context.fetch(FetchDescriptor<KnownPlace>())) ?? []
             return TimelineExporter.makePayload(
                 days: days,
                 format: .gpx,
-                fileStem: period.gpxFileStem(for: periodStart)
+                fileStem: period.gpxFileStem(for: periodStart),
+                privacyZones: PrivacyZoneResolver.exportZones(from: places)
             )
         }
         let payload = await withTaskCancellationHandler(
@@ -1135,6 +1139,10 @@ struct MovesShareGalleryView: View {
             return
         }
 
+        let privacyZones = PrivacyZoneResolver.shareZones(
+            from: PrivacyZoneResolver.loadPlaces(from: modelContext)
+        )
+
         var images: [MovesShareDesign: UIImage] = [:]
         for design in designs {
             if Task.isCancelled { return }
@@ -1146,24 +1154,27 @@ struct MovesShareGalleryView: View {
                     snapshot: currentSnapshot,
                     design: .places,
                     size: aspect.mapRenderSize,
-                    mapStyle: mapStyle
+                    mapStyle: mapStyle,
+                    privacyZones: privacyZones
                 )
             case .tracks:
                 mapImage = await MovesShareMapRenderer.render(
                     snapshot: currentSnapshot,
                     design: .tracks,
                     size: aspect.mapRenderSize,
-                    mapStyle: mapStyle
+                    mapStyle: mapStyle,
+                    privacyZones: privacyZones
                 )
             case .heatMap:
                 mapImage = await MovesShareMapRenderer.render(
                     snapshot: currentSnapshot,
                     design: .heatMap,
                     size: aspect.mapRenderSize,
-                    mapStyle: mapStyle
+                    mapStyle: mapStyle,
+                    privacyZones: privacyZones
                 )
             case .calendar:
-                let calendarMapSignature = [dataSignature, aspect.rawValue, mapStyle.rawValue]
+                let calendarMapSignature = [dataSignature, aspect.rawValue, mapStyle.rawValue, "privacy:\(privacyZones.count)"]
                     .joined(separator: "|")
                 if cachedCalendarMapSignature == calendarMapSignature {
                     calendarMapImages = cachedCalendarMapImages
@@ -1171,7 +1182,8 @@ struct MovesShareGalleryView: View {
                     calendarMapImages = await MovesShareMapRenderer.renderCalendarDays(
                         currentSnapshot.calendarDays,
                         size: aspect.calendarMapRenderSize,
-                        mapStyle: mapStyle
+                        mapStyle: mapStyle,
+                        privacyZones: privacyZones
                     )
                     if Task.isCancelled { return }
                     cachedCalendarMapImages = calendarMapImages
@@ -1457,7 +1469,8 @@ private enum MovesShareMapRenderer {
         snapshot: MovesShareSnapshot,
         design: MovesShareMapDesign,
         size: CGSize,
-        mapStyle: MovesShareMapStyle
+        mapStyle: MovesShareMapStyle,
+        privacyZones: [PrivacyZone] = []
     ) async -> UIImage? {
         let coordinates: [CLLocationCoordinate2D]
         switch design {
@@ -1475,6 +1488,7 @@ private enum MovesShareMapRenderer {
         var region = MapRegionFactory.region(for: coordinates)
         region.span.latitudeDelta = min(region.span.latitudeDelta * 1.25, 180)
         region.span.longitudeDelta = min(region.span.longitudeDelta * 1.25, 360)
+        region = MapRegionFactory.snapshotSafe(region)
 
         let options = MKMapSnapshotter.Options()
         options.region = region
@@ -1491,7 +1505,7 @@ private enum MovesShareMapRenderer {
             format.scale = 1
             format.opaque = true
             let renderer = UIGraphicsImageRenderer(size: size, format: format)
-            return renderer.image { renderContext in
+            let image = renderer.image { renderContext in
                 mapSnapshot.image.draw(in: CGRect(origin: .zero, size: size))
 
                 if design == .tracks {
@@ -1515,6 +1529,7 @@ private enum MovesShareMapRenderer {
                     )
                 }
             }
+            return PrivacyZoneShareBlur.apply(to: image, zones: privacyZones, snapshot: mapSnapshot)
         } catch {
             return nil
         }
@@ -1523,13 +1538,19 @@ private enum MovesShareMapRenderer {
     static func renderCalendarDays(
         _ days: [MovesShareCalendarDay],
         size: CGSize,
-        mapStyle: MovesShareMapStyle
+        mapStyle: MovesShareMapStyle,
+        privacyZones: [PrivacyZone] = []
     ) async -> [String: UIImage] {
         var images: [String: UIImage] = [:]
 
         for day in days {
             if Task.isCancelled { return images }
-            if let image = await renderCalendarDay(day, size: size, mapStyle: mapStyle) {
+            if let image = await renderCalendarDay(
+                day,
+                size: size,
+                mapStyle: mapStyle,
+                privacyZones: privacyZones
+            ) {
                 images[day.id] = image
             }
             await Task.yield()
@@ -1541,7 +1562,8 @@ private enum MovesShareMapRenderer {
     private static func renderCalendarDay(
         _ day: MovesShareCalendarDay,
         size: CGSize,
-        mapStyle: MovesShareMapStyle
+        mapStyle: MovesShareMapStyle,
+        privacyZones: [PrivacyZone]
     ) async -> UIImage? {
         let coordinates = day.tracks.flatMap { boundsCoordinates(for: $0) }
             + day.placeCoordinates
@@ -1550,6 +1572,7 @@ private enum MovesShareMapRenderer {
         var region = MapRegionFactory.region(for: coordinates)
         region.span.latitudeDelta = min(region.span.latitudeDelta * 1.4, 180)
         region.span.longitudeDelta = min(region.span.longitudeDelta * 1.4, 360)
+        region = MapRegionFactory.snapshotSafe(region)
 
         let options = MKMapSnapshotter.Options()
         options.region = region
@@ -1565,7 +1588,7 @@ private enum MovesShareMapRenderer {
             let format = UIGraphicsImageRendererFormat()
             format.scale = 1
             format.opaque = true
-            return UIGraphicsImageRenderer(size: size, format: format).image { renderContext in
+            let image = UIGraphicsImageRenderer(size: size, format: format).image { renderContext in
                 mapSnapshot.image.draw(in: CGRect(origin: .zero, size: size))
                 drawCalendarTracks(day.tracks, on: mapSnapshot, context: renderContext.cgContext)
                 drawCalendarPlaces(
@@ -1575,6 +1598,7 @@ private enum MovesShareMapRenderer {
                     canvasSize: size
                 )
             }
+            return PrivacyZoneShareBlur.apply(to: image, zones: privacyZones, snapshot: mapSnapshot)
         } catch {
             return nil
         }
@@ -1880,17 +1904,7 @@ private enum MovesShareMapRenderer {
     }
 
     private static func trackColor(for mode: TransportMode) -> UIColor {
-        switch mode {
-        case .stationary, .unknown: return .systemGray
-        case .walking: return .systemGreen
-        case .running: return .systemOrange
-        case .swimming: return .systemCyan
-        case .cycling: return .systemTeal
-        case .automotive: return .systemBlue
-        case .train: return .systemPurple
-        case .plane: return .systemIndigo
-        case .boat: return .systemMint
-        }
+        UIColor(MovesPalette.transport(mode))
     }
 }
 

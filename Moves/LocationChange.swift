@@ -99,7 +99,7 @@ enum TemporaryRouteTrackingStopNotificationPermissionResult: Equatable {
 }
 
 protocol MotionClassifier {
-    func classifyTransport(start: Date, end: Date, locations: [CLLocation]) async -> TransportMode
+    func classifyTransport(start: Date, end: Date, locations: [CLLocation]) async -> (mode: TransportMode, confidence: Double)
     func stepCount(start: Date, end: Date) async -> Int?
     /// True when the minutes before `date` include a vehicle ride.
     func approachWasAutomotive(before date: Date) async -> Bool
@@ -130,9 +130,9 @@ final class CoreMotionTransportClassifier: MotionClassifier {
     private let pedometer = CMPedometer()
     private static let minimumDistanceForNonStationaryOverride: CLLocationDistance = 450
 
-    func classifyTransport(start: Date, end: Date, locations: [CLLocation]) async -> TransportMode {
-        guard end > start else { return .stationary }
-        let fallback = inferFromSpeed(locations)
+    func classifyTransport(start: Date, end: Date, locations: [CLLocation]) async -> (mode: TransportMode, confidence: Double) {
+        guard end > start else { return (.stationary, 0.25) }
+        let fallback = Self.inferredMode(from: locations)
 
         if CMMotionActivityManager.isActivityAvailable(),
            let activities = await queryActivities(from: start, to: end),
@@ -148,24 +148,40 @@ final class CoreMotionTransportClassifier: MotionClassifier {
                 if activity.stationary { scores[.stationary, default: 0] += weight }
             }
 
-            if let best = scores.max(by: { $0.value < $1.value })?.key {
-                let corrected = correctedModeIfNeeded(best, fallback: fallback, locations: locations)
+            if let best = scores.max(by: { $0.value < $1.value }) {
+                let corrected = correctedModeIfNeeded(best.key, fallback: fallback, locations: locations)
                 let refined = refinedLongDistanceMode(for: corrected, fallback: fallback, locations: locations)
-                return Self.rejectingImplausibleContinuousTrip(
+                let mode = Self.rejectingImplausibleContinuousTrip(
                     refined,
                     duration: end.timeIntervalSince(start),
                     straightLineDistance: Self.straightLineDistance(for: locations)
                 )
+                let total = max(scores.values.reduce(0, +), 1)
+                let dominance = Double(best.value) / Double(total)
+                let motionConfidence = 0.35 + 0.6 * dominance
+                let speedConfidence = Self.speedBasedConfidence(mode: mode, locations: locations)
+                let confidence = mode == best.key
+                    ? max(motionConfidence, speedConfidence * 0.5)
+                    : min(motionConfidence, speedConfidence)
+                return (mode, min(max(confidence, 0), 1))
             }
         }
 
         let corrected = correctedModeIfNeeded(fallback, fallback: fallback, locations: locations)
         let refined = refinedLongDistanceMode(for: corrected, fallback: fallback, locations: locations)
-        return Self.rejectingImplausibleContinuousTrip(
+        let mode = Self.rejectingImplausibleContinuousTrip(
             refined,
             duration: end.timeIntervalSince(start),
             straightLineDistance: Self.straightLineDistance(for: locations)
         )
+        var confidence = Self.speedBasedConfidence(mode: mode, locations: locations)
+        if mode != fallback {
+            confidence = min(confidence, 0.72)
+        }
+        if locations.count < 3 {
+            confidence *= 0.9
+        }
+        return (mode, min(max(confidence, 0), 1))
     }
 
     func approachWasAutomotive(before date: Date) async -> Bool {
@@ -204,6 +220,36 @@ final class CoreMotionTransportClassifier: MotionClassifier {
         let speed = straightLineDistance / duration
         guard speed < 0.25 else { return mode }
         return .unknown
+    }
+
+    /// 0…1 certainty that `mode` matches the observed speeds. Highest at the
+    /// centre of the mode's speed bucket, lowest at the boundaries.
+    static func speedBasedConfidence(mode: TransportMode, locations: [CLLocation]) -> Double {
+        let speed = averageSpeed(for: locations)
+        guard let range = speedRange(for: mode) else { return 0.5 }
+        let width = max(range.upper - range.lower, 0.1)
+        if speed < range.lower || speed >= range.upper {
+            let overshoot = speed < range.lower ? range.lower - speed : speed - range.upper
+            return min(max(0.6 - overshoot / max(width, 1), 0.25), 0.6)
+        }
+        let mid = (range.lower + range.upper) / 2
+        let half = width / 2
+        let distanceFromEdge = half - abs(speed - mid)
+        let t = min(max(distanceFromEdge / half, 0), 1)
+        return 0.45 + 0.5 * t
+    }
+
+    static func speedRange(for mode: TransportMode) -> (lower: CLLocationSpeed, upper: CLLocationSpeed)? {
+        switch mode {
+        case .stationary: return (0, 0.7)
+        case .walking: return (0.7, 2.0)
+        case .running: return (2.0, 4.5)
+        case .cycling: return (4.5, 9.0)
+        case .automotive: return (9.0, 32)
+        case .train: return (32, 75)
+        case .plane: return (75, 1_000)
+        case .swimming, .boat, .unknown: return nil
+        }
     }
 
     func stepCount(start: Date, end: Date) async -> Int? {
@@ -245,7 +291,8 @@ final class CoreMotionTransportClassifier: MotionClassifier {
         }
     }
 
-    private func inferFromSpeed(_ locations: [CLLocation]) -> TransportMode {
+    /// Speed buckets shared with Live Activity tinting.
+    static func inferredMode(from locations: [CLLocation]) -> TransportMode {
         let validSpeeds = locations.map(\.speed).filter { $0 >= 0 }
 
         let averageSpeed: CLLocationSpeed
@@ -367,7 +414,7 @@ final class CoreMotionTransportClassifier: MotionClassifier {
         }
     }
 
-    private static func averageSpeed(for locations: [CLLocation]) -> CLLocationSpeed {
+    static func averageSpeed(for locations: [CLLocation]) -> CLLocationSpeed {
         let validSpeeds = locations.map(\.speed).filter { $0 >= 0 }
         if !validSpeeds.isEmpty {
             return validSpeeds.reduce(0, +) / Double(validSpeeds.count)
@@ -486,6 +533,7 @@ final class DefaultTimelineAssembler: TimelineAssembler {
 
         do {
             let visitPlace = try repository.addOrUpdateVisit(from: visit)
+            try repository.applyPlaceLearning(to: visitPlace)
             await fillAutomaticPlaceLabelIfNeeded(for: visitPlace)
             try repository.saveIfNeeded()
         } catch {
@@ -532,7 +580,7 @@ final class DefaultTimelineAssembler: TimelineAssembler {
             let result = try repository.reconcileSampleStays(now: .now)
 
             for leg in result.moveLegs {
-                let proposed = await motionClassifier.classifyTransport(
+                let classification = await motionClassifier.classifyTransport(
                     start: leg.startDate,
                     end: leg.endDate,
                     locations: leg.locations
@@ -546,7 +594,7 @@ final class DefaultTimelineAssembler: TimelineAssembler {
                     longitude: leg.endPlace.longitude
                 ))
                 let transportMode = LastBlockWalk.mode(
-                    proposed: proposed,
+                    proposed: classification.mode,
                     distance: straightLine,
                     duration: leg.endDate.timeIntervalSince(leg.startDate),
                     stepCount: steps
@@ -582,11 +630,19 @@ final class DefaultTimelineAssembler: TimelineAssembler {
         let hasUserLabel = !(place.userLabel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         let hasAutoLabel = !(place.autoLabel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
 
+        guard place.assignmentSource == .none, place.knownPlace == nil else { return }
         guard !hasUserLabel, !hasAutoLabel else { return }
         guard place.horizontalAccuracy <= 180 else { return }
 
         if let resolvedName = await placeNameResolver.resolveName(for: place.coordinate) {
             do {
+                let nearby = try repository.knownPlaces(
+                    near: place.coordinate,
+                    within: PlaceLearningEngine.rejectedLabelSearchRadius
+                )
+                if PlaceLearningEngine.shouldSuppress(resolvedName, nearbyPlaces: nearby) {
+                    return
+                }
                 try repository.setAutomaticLabel(resolvedName, for: place.id)
                 try repository.saveIfNeeded()
             } catch {

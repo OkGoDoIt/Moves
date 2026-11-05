@@ -7,95 +7,8 @@ import CoreLocation
 import WatchConnectivity
 #endif
 
-enum MovesWidgetSharedStore {
-    static let appGroupIdentifier = MovesAppIdentity.appGroupIdentifier
-    static let snapshotKey = "Moves.widgetSnapshot.v1"
-
-    static var userDefaults: UserDefaults {
-        UserDefaults(suiteName: appGroupIdentifier) ?? .standard
-    }
-}
-
-struct TimelineWidgetTransportMetric: Codable, Hashable, Identifiable {
-    let id: String
-    let title: String
-    let symbolName: String
-    let colorAssetName: String
-    let distanceMeters: Double
-}
-
-struct TimelineWidgetRoutePoint: Codable, Hashable {
-    let latitude: Double
-    let longitude: Double
-
-    init(latitude: Double, longitude: Double) {
-        self.latitude = latitude
-        self.longitude = longitude
-    }
-
-#if canImport(CoreLocation)
-    init(_ coordinate: CLLocationCoordinate2D) {
-        latitude = coordinate.latitude
-        longitude = coordinate.longitude
-    }
-#endif
-}
-
-struct TimelineWidgetSnapshot: Codable, Hashable {
-    let generatedAt: Date
-    let dayKey: String
-    let dayTitle: String
-    let totalDistanceMeters: Double
-    let visitedLocationCount: Int
-    let moveCount: Int
-    let transportMetrics: [TimelineWidgetTransportMetric]
-    let routePoints: [TimelineWidgetRoutePoint]
-
-    static let placeholder = TimelineWidgetSnapshot(
-        generatedAt: .now,
-        dayKey: "today",
-        dayTitle: "Today",
-        totalDistanceMeters: 5_240,
-        visitedLocationCount: 4,
-        moveCount: 6,
-        transportMetrics: [
-            TimelineWidgetTransportMetric(
-                id: "walking",
-                title: "On Foot",
-                symbolName: "figure.walk",
-                colorAssetName: "MovesTransportWalking",
-                distanceMeters: 1_120
-            ),
-            TimelineWidgetTransportMetric(
-                id: "cycling",
-                title: "Cycling",
-                symbolName: "figure.outdoor.cycle",
-                colorAssetName: "MovesTransportCycling",
-                distanceMeters: 4_120
-            )
-        ],
-        routePoints: []
-    )
-
-    var primaryTransportMetric: TimelineWidgetTransportMetric? {
-        transportMetrics.max { $0.distanceMeters < $1.distanceMeters }
-    }
-}
-
-enum TimelineWidgetSnapshotStore {
+extension TimelineWidgetSnapshotStore {
     private static let encoder = JSONEncoder()
-    private static let decoder = JSONDecoder()
-
-    static func load() -> TimelineWidgetSnapshot {
-        guard let data = MovesWidgetSharedStore.userDefaults.data(
-            forKey: MovesWidgetSharedStore.snapshotKey
-        ),
-              let snapshot = try? decoder.decode(TimelineWidgetSnapshot.self, from: data) else {
-            return .placeholder
-        }
-
-        return snapshot
-    }
 
     static func save(_ snapshot: TimelineWidgetSnapshot) {
         guard let data = try? encoder.encode(snapshot) else { return }
@@ -173,23 +86,36 @@ extension TimelineWidgetSnapshot {
         }
     }
 
+    /// Downsamples each move so the widget canvas stays light, keeping mode color per vertex.
     private static func compressedRoutePoints(
         for dayTimeline: DayTimeline,
         limit: Int
     ) -> [TimelineWidgetRoutePoint] {
-        let rawCoordinates: [CLLocationCoordinate2D] = dayTimeline.moves
-            .sorted { $0.startDate < $1.startDate }
-            .flatMap { move in
-                let fallback = MoveRouteGeometry.rawCoordinates(for: move)
-                let signature = MoveRouteGeometry.cacheSignature(for: move, fallback: fallback)
-                return move.manualRouteCoordinates ?? move.cachedRouteCoordinates(for: signature) ?? fallback
-            }
+        let moves = dayTimeline.moves.sorted { $0.startDate < $1.startDate }
+        var colored: [(color: String, coordinate: CLLocationCoordinate2D)] = []
+        colored.reserveCapacity(limit)
 
-        guard !rawCoordinates.isEmpty else { return [] }
-        let stride = max(rawCoordinates.count / max(limit, 1), 1)
-        let sampled = rawCoordinates.enumerated().compactMap { index, coordinate in
-            index.isMultiple(of: stride) ? coordinate : nil
+        for move in moves {
+            let color = MovesPalette.transportColorAssetName(for: move.transportMode)
+            let fallback = MoveRouteGeometry.rawCoordinates(for: move)
+            let signature = MoveRouteGeometry.cacheSignature(for: move, fallback: fallback)
+            let coordinates = move.manualRouteCoordinates
+                ?? move.cachedRouteCoordinates(for: signature)
+                ?? fallback
+            for coordinate in coordinates {
+                colored.append((color, coordinate))
+            }
         }
-        return sampled.map(TimelineWidgetRoutePoint.init)
+
+        guard !colored.isEmpty else { return [] }
+        let stride = max(colored.count / max(limit, 1), 1)
+        return colored.enumerated().compactMap { index, item in
+            guard index.isMultiple(of: stride) || index == colored.count - 1 else { return nil }
+            return TimelineWidgetRoutePoint(
+                latitude: item.coordinate.latitude,
+                longitude: item.coordinate.longitude,
+                colorAssetName: item.color
+            )
+        }
     }
 }

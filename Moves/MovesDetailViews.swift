@@ -60,11 +60,9 @@ struct PlaceMapDetailView: View {
                 .safeAreaPadding(.bottom, 8)
             } else {
                 placeMap
-                    .overlay(alignment: .bottom) {
+                    .safeAreaBar(edge: .bottom, spacing: 0) {
                         placeControls
-                            .padding(.horizontal, 12)
-                            .padding(.top, 12)
-                            .safeAreaPadding(.bottom, 12)
+                            .detailMapOverlayChrome(bottomInset: proxy.safeAreaInsets.bottom)
                     }
             }
         }
@@ -165,7 +163,7 @@ struct PlaceMapDetailView: View {
                 HStack(alignment: .bottom, spacing: 8) {
                     TextField("Remarks", text: $draftComment, axis: .vertical)
                         .textInputAutocapitalization(.sentences)
-                        .lineLimit(2...5)
+                        .lineLimit(1...4)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 8)
                         .background(
@@ -181,7 +179,6 @@ struct PlaceMapDetailView: View {
                 }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
         .panelSurface()
     }
 
@@ -264,6 +261,8 @@ struct MoveMapDetailView: View {
     @Environment(\.openURL) private var openURL
     @Bindable var segment: MoveSegment
     @AppStorage(MapMarkerDisplaySettings.showsBigMarkersKey) private var showsBigMarkers = false
+    @AppStorage(MapRouteShadingSettings.shadeRoutesBySpeedKey) private var shadeRoutesBySpeed = true
+    @AppStorage(RouteSnappingLevel.storageKey) private var snappingLevel = RouteSnappingLevel.normal.rawValue
 
     @State private var camera: MapCameraPosition
     @State private var routeCoordinates: [CLLocationCoordinate2D]
@@ -286,13 +285,7 @@ struct MoveMapDetailView: View {
     @State private var isShowingHealthOpenError = false
 
     private var activeRenderedRoute: RenderedRoute {
-        RenderedRoute(
-            id: segment.id.uuidString,
-            coordinates: routeCoordinates,
-            usesHighAccuracyRouteTracking: segment.usesHighAccuracyRouteTracking,
-            usesHealthWorkoutRoute: segment.usesHealthWorkoutRoute,
-            transportMode: segment.transportMode
-        )
+        RenderedRoute.make(from: segment, coordinates: routeCoordinates)
     }
 
     private var routeRefreshKey: String {
@@ -311,7 +304,7 @@ struct MoveMapDetailView: View {
             }
             .joined(separator: ",")
 
-        return "\(segment.id.uuidString)|\(segment.transportMode.rawValue)|\(start)|\(end)|\(sampleKey)"
+        return "\(segment.id.uuidString)|\(segment.transportMode.rawValue)|\(segment.routeMatchPolicyRaw)|\(snappingLevel)|\(start)|\(end)|\(sampleKey)"
     }
 
     init(segment: MoveSegment) {
@@ -350,11 +343,9 @@ struct MoveMapDetailView: View {
                 .safeAreaPadding(.bottom, 8)
             } else {
                 moveMap
-                    .overlay(alignment: .bottom) {
+                    .safeAreaBar(edge: .bottom, spacing: 0) {
                         moveControls
-                            .padding(.horizontal, 12)
-                            .padding(.top, 12)
-                            .safeAreaPadding(.bottom, 12)
+                            .detailMapOverlayChrome(bottomInset: proxy.safeAreaInsets.bottom)
                     }
             }
         }
@@ -455,9 +446,31 @@ struct MoveMapDetailView: View {
                         .stroke(activeRenderedRoute.shadowTint, lineWidth: activeRenderedRoute.shadowLineWidth)
                 }
 
+                ForEach(rawFixDotItems) { item in
+                    Annotation("", coordinate: item.coordinate, anchor: .center) {
+                        Circle()
+                            .fill(Color.primary.opacity(0.28))
+                            .frame(width: 5, height: 5)
+                            .allowsHitTesting(false)
+                    }
+                }
+
                 if activeRenderedRoute.coordinates.count > 1 {
                     MapPolyline(coordinates: activeRenderedRoute.coordinates)
-                        .stroke(activeRenderedRoute.tint, lineWidth: activeRenderedRoute.lineWidth)
+                        .stroke(
+                            activeRenderedRoute.strokeGradient(shadeBySpeed: shadeRoutesBySpeed),
+                            style: RouteStrokeStyle.make(for: activeRenderedRoute)
+                        )
+                    if let overlayTint = activeRenderedRoute.recordedOverlayTint {
+                        MapPolyline(coordinates: activeRenderedRoute.coordinates)
+                            .stroke(
+                                overlayTint,
+                                style: RouteStrokeStyle.make(
+                                    for: activeRenderedRoute,
+                                    lineWidth: activeRenderedRoute.overlayLineWidth
+                                )
+                            )
+                    }
                 }
 
                 if let end = segment.endPlace?.coordinate {
@@ -519,10 +532,12 @@ struct MoveMapDetailView: View {
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
                     .foregroundStyle(Color.primary.opacity(0.75))
 
+                pathPolicyControls
+
                 HStack(alignment: .bottom, spacing: 8) {
                     TextField("Remarks", text: $draftComment, axis: .vertical)
                         .textInputAutocapitalization(.sentences)
-                        .lineLimit(2...5)
+                        .lineLimit(1...4)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 8)
                         .background(
@@ -538,7 +553,6 @@ struct MoveMapDetailView: View {
                 }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
         .panelSurface()
     }
 
@@ -568,15 +582,102 @@ struct MoveMapDetailView: View {
         }
     }
 
+    private var displayedPathPolicy: RouteMatchPolicy {
+        if segment.hasManualRouteCoordinates {
+            return .manual
+        }
+        return segment.routeMatchPolicy == .manual ? .auto : segment.routeMatchPolicy
+    }
+
+    private var pathPolicyBinding: Binding<RouteMatchPolicy> {
+        Binding(
+            get: { displayedPathPolicy },
+            set: { applyPathPolicy($0) }
+        )
+    }
+
+    @ViewBuilder
+    private var pathPolicyControls: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Path")
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+
+            Picker("Path", selection: pathPolicyBinding) {
+                Text("Auto").tag(RouteMatchPolicy.auto)
+                Text("Recorded").tag(RouteMatchPolicy.recorded)
+                Text("Roads").tag(RouteMatchPolicy.roads)
+                if displayedPathPolicy == .manual {
+                    Text("Manual").tag(RouteMatchPolicy.manual)
+                }
+            }
+            .pickerStyle(.segmented)
+            .controlSize(.small)
+            .disabled(isSavingManualRoute)
+
+            if let summary = segment.routeMatchSummary, !summary.isEmpty {
+                Label(summary, systemImage: pathConfidenceSymbolName)
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .labelStyle(.titleAndIcon)
+            }
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    private var pathConfidenceSymbolName: String {
+        switch segment.routeMatchConfidence {
+        case .recorded:
+            return "recordingtape"
+        case .high:
+            return "checkmark.circle"
+        case .medium:
+            return "circle.lefthalf.filled"
+        case .estimated:
+            return "line.diagonal"
+        case .unknown:
+            return "questionmark.circle"
+        }
+    }
+
+    private var rawFixDotItems: [RawFixDotItem] {
+        let coordinates = MoveRouteGeometry.rawCoordinates(for: segment)
+        let sampled = coordinates.count > 250
+            ? RouteCoordinateOps.sampleAnchors(from: coordinates, maximumCount: 250)
+            : coordinates
+        return sampled.enumerated().map { index, coordinate in
+            RawFixDotItem(id: "\(segment.id.uuidString)-raw-\(index)", coordinate: coordinate)
+        }
+    }
+
+    private func applyPathPolicy(_ policy: RouteMatchPolicy) {
+        guard policy != displayedPathPolicy else { return }
+        if policy == .manual {
+            return
+        }
+
+        do {
+            try SwiftDataTimelineRepository(modelContext: modelContext)
+                .setRouteMatchPolicy(policy, for: segment)
+            Task { @MainActor in
+                await refreshRouteCoordinates()
+            }
+        } catch {
+            print("Failed to change path: \(error.localizedDescription)")
+        }
+    }
+
     private static func makeGPXShareFile(
         for segment: MoveSegment,
-        coordinates: [CLLocationCoordinate2D]
+        coordinates: [CLLocationCoordinate2D],
+        privacyZones: [PrivacyZone] = []
     ) -> GPXShareFile? {
         let timestamp = Self.exportFilenameDateFormatter.string(from: segment.timelineStartDate)
         guard let payload = TimelineExporter.makeMoveGPXPayload(
             move: segment,
             coordinates: coordinates,
-            fileStem: "moves-\(timestamp)-\(segment.transportMode.rawValue)"
+            fileStem: "moves-\(timestamp)-\(segment.transportMode.rawValue)",
+            privacyZones: privacyZones
         ) else {
             return nil
         }
@@ -585,7 +686,13 @@ struct MoveMapDetailView: View {
     }
 
     private func refreshMoveGPXShareFile() {
-        moveGPXShareFile = Self.makeGPXShareFile(for: segment, coordinates: routeCoordinates)
+        moveGPXShareFile = Self.makeGPXShareFile(
+            for: segment,
+            coordinates: routeCoordinates,
+            privacyZones: PrivacyZoneResolver.exportZones(
+                from: PrivacyZoneResolver.loadPlaces(from: modelContext)
+            )
+        )
     }
 
     private func openAppleHealth() {
@@ -722,6 +829,7 @@ struct MoveMapDetailView: View {
     @MainActor
     private func refreshRouteCoordinates() async {
         routeCoordinates = await RoadRouteMatcher.matchedCoordinates(for: segment)
+        _ = await SpeedProfileBuilder.buildAndCache(for: segment, coordinates: routeCoordinates)
         refreshMoveGPXShareFile()
         if isEditingManualRoute, manualRouteDrag == nil {
             manualRouteWaypointCoordinates = ManualRouteGeometry.waypoints(
@@ -817,6 +925,9 @@ struct MoveMapDetailView: View {
             }
 
             segment.storeManualRouteCoordinates(committed)
+            segment.routeMatchPolicy = .manual
+            segment.routeMatchSummary = RouteMatchSummaries.manual
+            segment.routeMatchConfidence = .unknown
             routeCoordinates = committed
             segment.distanceMeters = routeDistance(for: committed)
             refreshMoveGPXShareFile()
@@ -904,10 +1015,10 @@ struct MoveMapDetailView: View {
     private func revertManualRoute() {
         guard segment.hasManualRouteCoordinates else { return }
         isSavingManualRoute = true
-        segment.clearManualRouteCoordinates()
 
         do {
-            try modelContext.save()
+            try SwiftDataTimelineRepository(modelContext: modelContext)
+                .setRouteMatchPolicy(.auto, for: segment)
             Task { @MainActor in
                 await refreshRouteCoordinates()
                 if isEditingManualRoute {
@@ -952,6 +1063,11 @@ struct MoveMapDetailView: View {
 
 private struct ManualRouteDragState {
     let closestRouteIndex: Int
+}
+
+private struct RawFixDotItem: Identifiable {
+    let id: String
+    let coordinate: CLLocationCoordinate2D
 }
 
 private struct ManualRouteWaypointMarker: View {
@@ -1109,5 +1225,16 @@ private struct DeletedMoveUndoPayload {
             print("Failed to inspect move undo state: \(error.localizedDescription)")
             return false
         }
+    }
+}
+
+private extension View {
+    /// Insets a map overlay card and lifts it when TabView's bottom safe area
+    /// is missing (full-bleed Map) so Path / remarks stay above the tab pill.
+    func detailMapOverlayChrome(bottomInset: CGFloat) -> some View {
+        let tabBarLift = max(0, MovesChromeMetrics.detailOverlayTabBarClearance - bottomInset)
+        return padding(.horizontal, 12)
+            .padding(.top, 8)
+            .padding(.bottom, 8 + tabBarLift)
     }
 }

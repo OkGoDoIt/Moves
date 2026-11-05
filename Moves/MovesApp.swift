@@ -20,6 +20,8 @@ final class MovesAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
         UNUserNotificationCenter.current().delegate = self
         DailyTimelineBackup.registerBackgroundTask()
         ShareMapAggregateBackgroundTask.register()
+        RouteMatchBackgroundTask.register()
+        PlaceGeocodeBackfill.register()
         return true
     }
 
@@ -50,6 +52,8 @@ struct MovesApp: App {
     @StateObject private var healthWorkoutRouteAutoImporter: HealthWorkoutRouteAutoImportManager
     @StateObject private var cloudDataPresencePublisher: MovesCloudDataPresencePublisher
     @StateObject private var locationServiceSyncManager: LocationServiceSyncManager
+    @StateObject private var photoLibraryController: PhotoLibraryController
+    @StateObject private var webhookSyncManager: WebhookSyncManager
 
     init() {
         do {
@@ -71,31 +75,29 @@ struct MovesApp: App {
             _locationServiceSyncManager = StateObject(
                 wrappedValue: LocationServiceSyncManager(modelContainer: container)
             )
+            _photoLibraryController = StateObject(
+                wrappedValue: PhotoLibraryController(modelContainer: container)
+            )
+            _webhookSyncManager = StateObject(
+                wrappedValue: WebhookSyncManager(modelContainer: container)
+            )
             MovesIntentRuntime.shared.configure(
                 modelContainer: container,
                 captureManager: captureManager
             )
             MovesAppShortcuts.updateAppShortcutParameters()
+            if !ProcessInfo.processInfo.isRunningUnitTests {
+                TimelineSchemaUpgrader.runIfNeeded(container: container)
+            }
         } catch {
             fatalError("Could not create ModelContainer: \(error)")
         }
     }
 
     static func makeModelContainer() throws -> ModelContainer {
-        let timelineSchema = Schema([
-            DayTimeline.self,
-            VisitPlace.self,
-            MoveSegment.self,
-            LocationSample.self,
-        ])
+        let timelineSchema = Schema(MovesTimelineSchema.models)
         let cacheSchema = Schema([ShareMapAggregate.self])
-        let schema = Schema([
-            DayTimeline.self,
-            VisitPlace.self,
-            MoveSegment.self,
-            LocationSample.self,
-            ShareMapAggregate.self,
-        ])
+        let schema = Schema(MovesTimelineSchema.models + [ShareMapAggregate.self])
 
         let cacheConfiguration: ModelConfiguration
         #if targetEnvironment(simulator)
@@ -158,7 +160,7 @@ struct MovesApp: App {
     /// development profile, for instance, carries no iCloud identifiers. App Store
     /// builds embed no profile at all and are signed by Apple straight from the
     /// project's entitlements, so a missing profile means "trust the entitlements".
-    private static func allowsCloudKitContainer() -> Bool {
+    static func allowsCloudKitContainer() -> Bool {
         guard let entitlements = embeddedProvisioningEntitlements() else { return true }
         let containers = entitlements["com.apple.developer.icloud-container-identifiers"] as? [String]
         return containers?.contains(cloudKitContainerIdentifier) ?? false
@@ -193,18 +195,21 @@ struct MovesApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            MovesRootView()
                 .environmentObject(captureManager)
                 .environmentObject(undoController)
                 .environmentObject(healthWorkoutRouteAutoImporter)
                 .environmentObject(cloudDataPresencePublisher)
                 .environmentObject(locationServiceSyncManager)
+                .environmentObject(photoLibraryController)
+                .environmentObject(webhookSyncManager)
         }
         .modelContainer(sharedModelContainer)
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .active {
                 DailyTimelineBackup.scheduleNextRun()
                 ShareMapAggregateBackgroundTask.scheduleNextRun()
+                PlaceGeocodeBackfill.scheduleNextRun()
                 Task {
                     await captureManager.start()
                     await captureManager.refreshHistoricalBackfill()
@@ -212,9 +217,14 @@ struct MovesApp: App {
                     await healthWorkoutRouteAutoImporter.startIfNeeded()
                     await cloudDataPresencePublisher.publishNow()
                     await locationServiceSyncManager.syncNewSamplesIfEnabled()
+                    await photoLibraryController.handleSceneBecameActive()
+                    await webhookSyncManager.syncNewItemsIfEnabled()
                 }
                 Task(priority: .utility) {
                     await ShareMapAggregateBuilder.refreshAll(in: sharedModelContainer)
+                }
+                Task(priority: .utility) {
+                    await PlaceGeocodeBackfill.runForegroundTrickle(in: sharedModelContainer)
                 }
             }
         }

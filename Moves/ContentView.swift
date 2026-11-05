@@ -331,6 +331,7 @@ struct ContentView: View {
     @EnvironmentObject private var captureManager: MovesLocationCaptureManager
     @EnvironmentObject private var undoController: AppUndoController
     @EnvironmentObject private var cloudDataPresencePublisher: MovesCloudDataPresencePublisher
+    @EnvironmentObject private var rootController: MovesRootController
     @Environment(\.modelContext) private var modelContext
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
@@ -340,10 +341,6 @@ struct ContentView: View {
 
     @State private var selectedDayKey = ""
     @State private var selectedPageIndex = 0
-    @State private var isShowingSettings = false
-    @State private var isShowingStatisticsSearch = false
-    @State private var isShowingRouteTrackingSettings = false
-    @State private var isShowingDatePicker = false
 
     private var selectedDay: DayTimeline? {
         guard dayTimelines.indices.contains(selectedPageIndex) else { return nil }
@@ -383,7 +380,16 @@ struct ContentView: View {
             ZStack {
                 background
 
-                VStack(spacing: 12) {
+                VStack(spacing: 10) {
+                    if dayTimelines.isEmpty {
+                        emptyState
+                            .safeAreaPadding(.horizontal, 14)
+                    } else {
+                        dayHeader
+                            .safeAreaPadding(.horizontal, 14)
+                            .padding(.top, 4)
+                    }
+
                     if let trackingPermissionPrompt {
                         trackingPermissionBanner(trackingPermissionPrompt)
                             .safeAreaPadding(.horizontal, 14)
@@ -402,14 +408,7 @@ struct ContentView: View {
                         .safeAreaPadding(.horizontal, 14)
                     }
 
-                    if dayTimelines.isEmpty {
-                        emptyState
-                            .safeAreaPadding(.horizontal, 14)
-                    } else {
-                        dayHeader
-                            .safeAreaPadding(.horizontal, 14)
-                            .padding(.top, 10)
-
+                    if !dayTimelines.isEmpty {
                         TabView(selection: $selectedPageIndex) {
                             ForEach(Array(dayTimelines.enumerated()), id: \.element.dayKey) { index, day in
                                 DayTimelinePage(
@@ -421,18 +420,17 @@ struct ContentView: View {
                             }
                         }
                         .tabViewStyle(.page(indexDisplayMode: .never))
-                        .ignoresSafeArea(.container, edges: .bottom)
                     }
                 }
                 
             }
             
-            .navigationTitle("Moves")
+            .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
-                        isShowingSettings = true
+                        rootController.isShowingSettings = true
                     } label: {
                         Image(systemName: "gearshape")
                     }
@@ -441,12 +439,12 @@ struct ContentView: View {
 
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
-                        isShowingStatisticsSearch = true
+                        rootController.isShowingStatisticsSearch = true
                     } label: {
                         Image(systemName: "magnifyingglass")
                     }
-                    .help("Statistics & Search")
-                    .accessibilityLabel("Statistics & Search")
+                    .help("Search")
+                    .accessibilityLabel("Search")
                 }
 
                 ToolbarItem(placement: .topBarTrailing) {
@@ -456,7 +454,7 @@ struct ContentView: View {
                                 endsAt: captureManager.temporaryRouteTrackingEndsAt,
                                 authorizationStatus: captureManager.authorizationStatus,
                                 tapAction: {
-                                    isShowingRouteTrackingSettings = true
+                                    rootController.isShowingRouteTrackingSettings = true
                                 },
                                 longPressAction: {
                                     captureManager.enableTemporaryRouteTracking(
@@ -473,27 +471,6 @@ struct ContentView: View {
                
             }
         }
-        .sheet(isPresented: $isShowingSettings) {
-            MovesSettingsView(
-                dayTimelines: dayTimelines,
-                selectedDayKey: selectedDayKey,
-                captureManager: captureManager
-            )
-        }
-        .sheet(isPresented: $isShowingStatisticsSearch) {
-            NavigationStack {
-                MovesStatisticsSearchView(
-                    dayTimelines: dayTimelines,
-                    initialDate: selectedDay?.dayStart ?? .now
-                )
-            }
-        }
-        .sheet(isPresented: $isShowingRouteTrackingSettings) {
-            RouteTrackingSettingsSheet(captureManager: captureManager)
-        }
-        .sheet(isPresented: $isShowingDatePicker) {
-            datePickerSheet
-        }
         .task {
             guard !ProcessInfo.processInfo.isRunningForPreviews else { return }
             await captureManager.start()
@@ -504,6 +481,7 @@ struct ContentView: View {
             publishWidgetSnapshot()
             refreshSpotlightIndex()
             cloudDataPresencePublisher.publishSoon()
+            rootController.selectedDayKey = selectedDayKey
         }
         .onChange(of: dayTimelines.map(\.dayKey)) { _, _ in
             syncSelectedDayIfNeeded()
@@ -528,18 +506,30 @@ struct ContentView: View {
             refreshSpotlightIndex()
             cloudDataPresencePublisher.publishSoon()
         }
-        .onOpenURL(perform: handleDeepLink)
         .onChange(of: selectedPageIndex) { _, newIndex in
             guard dayTimelines.indices.contains(newIndex) else { return }
             selectedDayKey = dayTimelines[newIndex].dayKey
         }
-        .overlay {
-            ShakeToUndoDetector(undoManager: undoController.manager) {
-                handleShakeToUndo()
+        .onChange(of: selectedDayKey) { _, newKey in
+            if rootController.selectedDayKey != newKey {
+                rootController.selectedDayKey = newKey
             }
-            .frame(width: 1, height: 1)
-            .opacity(0.01)
-            .accessibilityHidden(true)
+        }
+        .onChange(of: rootController.shouldOpenToday) { _, shouldOpen in
+            guard shouldOpen else { return }
+            openCurrentDay()
+            rootController.shouldOpenToday = false
+        }
+        .onChange(of: rootController.requestedPlaceID) { _, placeID in
+            guard let placeID else { return }
+            selectPlace(placeID)
+            rootController.requestedPlaceID = nil
+        }
+        .onChange(of: rootController.requestedJumpDate) { _, date in
+            consumeRequestedJumpDateIfPossible()
+        }
+        .onChange(of: dayTimelines.count) { _, _ in
+            consumeRequestedJumpDateIfPossible()
         }
     }
 
@@ -581,46 +571,17 @@ struct ContentView: View {
     }
 
     private var dayHeader: some View {
-        HStack(spacing: 10) {
-            Button {
-                selectOlderDay()
-            } label: {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 14, weight: .semibold))
-                    .frame(width: 30, height: 30)
+        Group {
+            if let selectedDay {
+                DayHeaderView(
+                    day: selectedDay,
+                    canGoOlder: canGoOlder,
+                    canGoNewer: canGoNewer,
+                    onOlder: selectOlderDay,
+                    onNewer: selectNewerDay,
+                    onJumpToDate: { rootController.isShowingDatePicker = true }
+                )
             }
-            .buttonStyle(.plain)
-            .frostedCircle(enabled: canGoOlder)
-            .disabled(!canGoOlder)
-
-            VStack(spacing: 2) {
-                if let selectedDay {
-                    Button {
-                        isShowingDatePicker = true
-                    } label: {
-                        Text(selectedDay.dayStart, format: .dateTime.weekday(.wide).day().month(.wide))
-                            .font(.system(size: 18, weight: .bold, design: .rounded))
-                            .foregroundStyle(Color.primary.opacity(0.92))
-                    }
-                    .buttonStyle(.plain)
-
-                    Text("\(selectedDay.uniqueLocationCount) places   \(selectedDay.moves.count) moves")
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .frame(maxWidth: .infinity)
-
-            Button {
-                selectNewerDay()
-            } label: {
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 14, weight: .semibold))
-                    .frame(width: 30, height: 30)
-            }
-            .buttonStyle(.plain)
-            .frostedCircle(enabled: canGoNewer)
-            .disabled(!canGoNewer)
         }
         .padding(.horizontal, 4)
     }
@@ -634,7 +595,7 @@ struct ContentView: View {
             Text("No timeline yet")
                 .font(.system(size: 18, weight: .bold, design: .rounded))
 
-            Text("Keep Moves running in the background. Visits and movement segments appear as iOS records them.")
+            Text("Keep Moves running in the background. Today’s story appears as visits and moves are recorded.")
                 .font(.system(size: 14, weight: .medium, design: .rounded))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -702,6 +663,21 @@ struct ContentView: View {
         let calendar = Calendar.current
         let todayStart = calendar.startOfDay(for: .now)
         let todayKey = DayTimeline.makeDayKey(for: todayStart)
+
+        // Demo seeding is async. Inserting an empty "today" here races it and can
+        // make the seeder think data already exists, leaving the Timeline blank.
+        if captureManager.isDemoMode {
+            selectedDayKey = todayKey
+            if let todayIndex = dayTimelines.firstIndex(where: { $0.dayKey == todayKey }),
+               !dayTimelines[todayIndex].places.isEmpty || !dayTimelines[todayIndex].moves.isEmpty {
+                selectedPageIndex = todayIndex
+            } else if let recordedIndex = dayTimelines.lastIndex(where: { !$0.places.isEmpty || !$0.moves.isEmpty }) {
+                selectedPageIndex = recordedIndex
+                selectedDayKey = dayTimelines[recordedIndex].dayKey
+            }
+            return
+        }
+
         var existingKeys = Set(dayTimelines.map(\.dayKey))
         var didInsertDay = false
 
@@ -757,25 +733,12 @@ struct ContentView: View {
         }
     }
 
-    private func handleDeepLink(_ url: URL) {
-        guard url.scheme?.lowercased() == "moves" else { return }
-
-        switch url.host?.lowercased() {
-        case "today":
-            openCurrentDay()
-        case "tracking":
-            isShowingRouteTrackingSettings = true
-        case "place":
-            guard let identifier = url.pathComponents.dropFirst().first,
-                  let placeID = UUID(uuidString: identifier),
-                  let dayIndex = dayTimelines.firstIndex(where: { day in
-                      day.places.contains(where: { $0.id == placeID })
-                  }) else { return }
-            selectedPageIndex = dayIndex
-            selectedDayKey = dayTimelines[dayIndex].dayKey
-        default:
-            break
-        }
+    private func selectPlace(_ placeID: UUID) {
+        guard let dayIndex = dayTimelines.firstIndex(where: { day in
+            day.places.contains(where: { $0.id == placeID })
+        }) else { return }
+        selectedPageIndex = dayIndex
+        selectedDayKey = dayTimelines[dayIndex].dayKey
     }
 
     private func syncSelectedDayIfNeeded() {
@@ -817,6 +780,14 @@ struct ContentView: View {
         selectedPageIndex = nextIndex
     }
 
+    /// Holds a launch or deep-link jump until demo days (or imported days) exist.
+    private func consumeRequestedJumpDateIfPossible() {
+        guard let date = rootController.requestedJumpDate else { return }
+        guard !dayTimelines.isEmpty else { return }
+        jumpToDate(date)
+        rootController.requestedJumpDate = nil
+    }
+
     private func jumpToDate(_ date: Date) {
         guard !dayTimelines.isEmpty else { return }
 
@@ -833,32 +804,6 @@ struct ContentView: View {
         selectedPageIndex = closest.offset
         selectedDayKey = closest.element.dayKey
     }
-
-    private var datePickerSheet: some View {
-        MovesJumpToDateView(
-            dayTimelines: dayTimelines,
-            selectedDate: selectedDay?.dayStart ?? .now,
-            onSelectDate: jumpToDate,
-            onDismiss: { isShowingDatePicker = false }
-        )
-    }
-
-    @MainActor
-    private func handleShakeToUndo() {
-        let undoManager = undoController.manager
-        guard undoManager.canUndo else { return }
-        modelContext.undoManager = undoManager
-
-        undoManager.undo()
-
-        if modelContext.hasChanges {
-            do {
-                try modelContext.save()
-            } catch {
-                print("Failed to save undo changes: \(error.localizedDescription)")
-            }
-        }
-    }
 }
 
 enum TimelineExportScope {
@@ -870,10 +815,11 @@ enum TimelineExportFormat {
     case gpx
     case geoJSON
     case csv
+    case kml
 
     var contentType: UTType {
         switch self {
-        case .gpx:
+        case .gpx, .kml:
             return .xml
         case .geoJSON:
             return .json
@@ -890,6 +836,8 @@ enum TimelineExportFormat {
             return "geojson"
         case .csv:
             return "csv"
+        case .kml:
+            return "kml"
         }
     }
 }
@@ -908,7 +856,7 @@ struct TimelineTrackPoint {
 }
 
 struct TimelineExportDocument: FileDocument {
-    static var readableContentTypes: [UTType] = [.xml, .json, .commaSeparatedText]
+    static var readableContentTypes: [UTType] = [.xml, .json, .commaSeparatedText, .zip]
 
     let data: Data
 
@@ -955,18 +903,21 @@ enum TimelineExporter {
     static func makePayload(
         days: [DayTimeline],
         format: TimelineExportFormat,
-        fileStem: String
+        fileStem: String,
+        privacyZones: [PrivacyZone] = []
     ) -> TimelineExportPayload? {
         let orderedDays = days.sorted(by: { $0.dayStart < $1.dayStart })
 
         let exportData: Data?
         switch format {
         case .gpx:
-            exportData = gpxData(for: orderedDays)
+            exportData = gpxData(for: orderedDays, privacyZones: privacyZones)
         case .geoJSON:
-            exportData = geoJSONData(for: orderedDays)
+            exportData = geoJSONData(for: orderedDays, privacyZones: privacyZones)
         case .csv:
             exportData = csvData(for: orderedDays)
+        case .kml:
+            exportData = kmlData(for: orderedDays, privacyZones: privacyZones)
         }
 
         guard let exportData else { return nil }
@@ -977,13 +928,60 @@ enum TimelineExporter {
         )
     }
 
+    /// One zip containing GPX, GeoJSON, CSV, KML, learned places, and photo identifiers.
+    static func makeZipPayload(
+        days: [DayTimeline],
+        knownPlaces: [KnownPlace],
+        photos: [PhotoAttachment],
+        fileStem: String,
+        privacyZones: [PrivacyZone] = []
+    ) -> TimelineExportPayload? {
+        let orderedDays = days.sorted(by: { $0.dayStart < $1.dayStart })
+        guard !orderedDays.isEmpty else { return nil }
+
+        var files: [MovesZipFile] = []
+        if let gpx = gpxData(for: orderedDays, privacyZones: privacyZones) {
+            files.append(MovesZipFile(path: "\(fileStem).gpx", data: gpx))
+        }
+        if let geoJSON = geoJSONData(for: orderedDays, privacyZones: privacyZones) {
+            files.append(MovesZipFile(path: "\(fileStem).geojson", data: geoJSON))
+        }
+        if let csv = csvData(for: orderedDays) {
+            files.append(MovesZipFile(path: "\(fileStem).csv", data: csv))
+        }
+        if let kml = kmlData(for: orderedDays, privacyZones: privacyZones) {
+            files.append(MovesZipFile(path: "\(fileStem).kml", data: kml))
+        }
+        if let places = placesJSONData(knownPlaces) {
+            files.append(MovesZipFile(path: "places.json", data: places))
+        }
+        if let photosCSV = photosCSVData(photos) {
+            files.append(MovesZipFile(path: "photos.csv", data: photosCSV))
+        }
+        guard !files.isEmpty else { return nil }
+
+        return TimelineExportPayload(
+            data: MovesZipArchive.pack(files),
+            filename: "\(fileStem).zip",
+            contentType: .zip
+        )
+    }
+
     static func makeMoveGPXPayload(
         move: MoveSegment,
         coordinates: [CLLocationCoordinate2D],
-        fileStem: String
+        fileStem: String,
+        privacyZones: [PrivacyZone] = []
     ) -> TimelineExportPayload? {
+        let filtered = coordinates.filter { coordinate in
+            !PrivacyZoneResolver.containsRawFix(
+                latitude: coordinate.latitude,
+                longitude: coordinate.longitude,
+                zones: privacyZones
+            )
+        }
         let points = routePoints(
-            for: coordinates,
+            for: filtered,
             startDate: move.timelineStartDate,
             endDate: move.endDate
         )
@@ -1066,7 +1064,7 @@ enum TimelineExporter {
         )
     }
 
-    private static func gpxData(for days: [DayTimeline]) -> Data? {
+    private static func gpxData(for days: [DayTimeline], privacyZones: [PrivacyZone]) -> Data? {
         var xml = """
         <?xml version="1.0" encoding="UTF-8"?>
         <gpx version="1.1" creator="Moves iOS Rebuild" xmlns="http://www.topografix.com/GPX/1/1">
@@ -1094,7 +1092,7 @@ enum TimelineExporter {
             """
 
             for move in sortedMoves {
-                let points = routePoints(for: move)
+                let points = routePoints(for: move, privacyZones: privacyZones)
                 guard points.count > 1 else { continue }
 
                 xml += """
@@ -1142,7 +1140,100 @@ enum TimelineExporter {
         return xml.data(using: .utf8)
     }
 
-    private static func geoJSONData(for days: [DayTimeline]) -> Data? {
+    private static func kmlData(for days: [DayTimeline], privacyZones: [PrivacyZone]) -> Data? {
+        var xml = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <kml xmlns="http://www.opengis.net/kml/2.2">
+          <Document>
+            <name>Moves</name>
+        """
+
+        for day in days {
+            for place in day.places.sorted(by: { $0.arrivalDate < $1.arrivalDate }) {
+                xml += """
+
+            <Placemark>
+              <name>\(xmlEscaped(place.displayTitle))</name>
+              <TimeStamp><when>\(iso8601.string(from: place.arrivalDate))</when></TimeStamp>
+              <Point>
+                <coordinates>\(coordinateString(place.longitude)),\(coordinateString(place.latitude)),0</coordinates>
+              </Point>
+            </Placemark>
+            """
+            }
+
+            for move in day.moves.sorted(by: { $0.timelineStartDate < $1.timelineStartDate }) {
+                let points = routePoints(for: move, privacyZones: privacyZones)
+                guard points.count > 1 else { continue }
+                let title = "\(move.startPlace?.displayTitle ?? "Unknown start") to \(move.endPlace?.displayTitle ?? "Unknown destination")"
+                let coordinates = points
+                    .map { "\(coordinateString($0.longitude)),\(coordinateString($0.latitude)),0" }
+                    .joined(separator: " ")
+                xml += """
+
+            <Placemark>
+              <name>\(xmlEscaped(title))</name>
+              <description>\(xmlEscaped(move.transportMode.title))</description>
+              <LineString>
+                <tessellate>1</tessellate>
+                <coordinates>\(coordinates)</coordinates>
+              </LineString>
+            </Placemark>
+            """
+            }
+        }
+
+        xml += """
+
+          </Document>
+        </kml>
+        """
+        return xml.data(using: .utf8)
+    }
+
+    private static func placesJSONData(_ places: [KnownPlace]) -> Data? {
+        let payload: [[String: Any]] = places
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            .map { place in
+                var object: [String: Any] = [
+                    "id": place.id.uuidString,
+                    "name": place.name,
+                    "latitude": place.centerLatitude,
+                    "longitude": place.centerLongitude,
+                    "footprint_radius": place.footprintRadius,
+                    "confirmed_visit_count": place.confirmedVisitCount,
+                ]
+                if let category = place.category { object["category"] = category }
+                if let countryCode = place.countryCode { object["country_code"] = countryCode }
+                if let locality = place.locality { object["locality"] = locality }
+                return object
+            }
+        return try? JSONSerialization.data(
+            withJSONObject: payload,
+            options: [.prettyPrinted, .sortedKeys]
+        )
+    }
+
+    private static func photosCSVData(_ photos: [PhotoAttachment]) -> Data? {
+        var rows = ["asset_local_identifier,captured_at,visit_id,day_key"]
+        for photo in photos.sorted(by: { $0.capturedAt < $1.capturedAt }) {
+            let visitID = photo.visitPlace?.id.uuidString ?? ""
+            let dayKey = photo.dayTimeline?.dayKey
+                ?? photo.visitPlace?.dayTimeline?.dayKey
+                ?? ""
+            rows.append(
+                [
+                    csvEscaped(photo.assetLocalIdentifier),
+                    iso8601.string(from: photo.capturedAt),
+                    csvEscaped(visitID),
+                    csvEscaped(dayKey),
+                ].joined(separator: ",")
+            )
+        }
+        return rows.joined(separator: "\n").data(using: .utf8)
+    }
+
+    private static func geoJSONData(for days: [DayTimeline], privacyZones: [PrivacyZone]) -> Data? {
         var features: [[String: Any]] = []
 
         for day in days {
@@ -1180,7 +1271,7 @@ enum TimelineExporter {
             }
 
             for move in day.moves.sorted(by: { $0.timelineStartDate < $1.timelineStartDate }) {
-                let points = routePoints(for: move)
+                let points = routePoints(for: move, privacyZones: privacyZones)
                 let coordinates = points.map { [$0.longitude, $0.latitude] }
                 guard coordinates.count > 1 else { continue }
 
@@ -1272,7 +1363,10 @@ enum TimelineExporter {
         return rows.joined(separator: "\n").data(using: .utf8)
     }
 
-    private static func routePoints(for move: MoveSegment) -> [TimelineTrackPoint] {
+    private static func routePoints(
+        for move: MoveSegment,
+        privacyZones: [PrivacyZone]
+    ) -> [TimelineTrackPoint] {
         var points: [TimelineTrackPoint] = []
         points.reserveCapacity(move.samples.count + 2)
 
@@ -1291,6 +1385,13 @@ enum TimelineExporter {
             .preferredRouteDisplaySamples
             .sorted(by: { $0.timestamp < $1.timestamp })
         for sample in sortedSamples {
+            if PrivacyZoneResolver.containsRawFix(
+                latitude: sample.latitude,
+                longitude: sample.longitude,
+                zones: privacyZones
+            ) {
+                continue
+            }
             points.append(
                 TimelineTrackPoint(
                     latitude: sample.latitude,
@@ -1515,7 +1616,7 @@ extension View {
     }
 }
 
-private struct ShakeToUndoDetector: UIViewRepresentable {
+struct ShakeToUndoDetector: UIViewRepresentable {
     let undoManager: UndoManager
     let onShake: () -> Void
 
@@ -1532,7 +1633,7 @@ private struct ShakeToUndoDetector: UIViewRepresentable {
     }
 }
 
-private final class ShakeToUndoView: UIView {
+final class ShakeToUndoView: UIView {
     var managedUndoManager: UndoManager?
     var onShake: (() -> Void)?
     private var activeObserver: NSObjectProtocol?
@@ -1606,10 +1707,7 @@ struct ContentView_Previews: PreviewProvider {
             cloudKitDatabase: .none
         )
         let container = try! ModelContainer(
-            for: DayTimeline.self,
-            VisitPlace.self,
-            MoveSegment.self,
-            LocationSample.self,
+            for: Schema(MovesTimelineSchema.models),
             configurations: configuration
         )
 
@@ -1618,5 +1716,6 @@ struct ContentView_Previews: PreviewProvider {
             .environmentObject(MovesLocationCaptureManager(modelContainer: container))
             .environmentObject(AppUndoController())
             .environmentObject(MovesCloudDataPresencePublisher(modelContainer: container))
+            .environmentObject(MovesRootController())
     }
 }
