@@ -196,6 +196,152 @@ final class TimelineArchiveImportTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(secondReport.placeCount, 110)
     }
 
+    // MARK: Zip
+
+    /// `ditto -c -k` writes zero sizes in each local header and the real ones after the data.
+    func testZipReadsMembersThatKeepTheirSizesInADataDescriptor() throws {
+        let payload = Data(String(repeating: "record_type,start_time\n", count: 400).utf8)
+        let zip = try deflatedZip(name: "moves.csv", payload: payload, usesDataDescriptor: true)
+
+        let members = try MovesZipArchive.unpack(zip)
+
+        XCTAssertEqual(members.map(\.path), ["moves.csv"])
+        XCTAssertEqual(members.first?.data, payload)
+    }
+
+    func testZipKeepsEveryByteOfMembersAroundTheInflateBuffer() throws {
+        for size in [65_535, 65_536, 65_537, 131_072, 131_073] {
+            let payload = Data(repeating: 97, count: size)
+            let zip = try deflatedZip(name: "moves.gpx", payload: payload, usesDataDescriptor: false)
+            let members = try MovesZipArchive.unpack(zip)
+            XCTAssertEqual(members.first?.data.count, size)
+            XCTAssertEqual(members.first?.data, payload, "\(size) bytes")
+        }
+    }
+
+    func testZipRejectsAMemberThatDoesNotMatchItsChecksum() throws {
+        let payload = Data(String(repeating: "moves\n", count: 400).utf8)
+        let zip = try deflatedZip(
+            name: "moves.csv",
+            payload: payload,
+            usesDataDescriptor: false,
+            recordedCRC: MovesZipArchive.crc32Checksum(of: payload) &+ 1
+        )
+        XCTAssertThrowsError(try MovesZipArchive.unpack(zip))
+    }
+
+    func testZipSkipsFolderEntries() throws {
+        let payload = Data("moves".utf8)
+        let zip = MovesZipArchive.pack([
+            MovesZipFile(path: "backup/", data: Data()),
+            MovesZipFile(path: "backup/moves.csv", data: payload),
+        ])
+        XCTAssertEqual(try MovesZipArchive.unpack(zip).map(\.path), ["backup/moves.csv"])
+    }
+
+    func testDamagedZipIsReportedAsDamaged() {
+        let parsed = TimelineArchiveFileParser.parseAll(
+            files: [(name: "backup.zip", data: Data("PK\u{3}\u{4} not really a zip".utf8))]
+        )
+        XCTAssertTrue(parsed.archive.isEmpty)
+        XCTAssertEqual(parsed.skipped, ["backup.zip"])
+        XCTAssertEqual(parsed.warnings, ["backup.zip could not be opened. It may be damaged or incomplete."])
+    }
+
+    // MARK: CSV
+
+    func testCSVSurvivesDuplicateColumnsMultilineCommentsAndAbsurdDistances() throws {
+        let csv = """
+        record_type,start_time,end_time,title,day_key,transport_mode,distance_meters,step_count,latitude,longitude,comment,comment
+        place,2026-01-02T08:00:00.000Z,2026-01-02T09:00:00.000Z,"Cafe",2026-01-02,,,,52.52,13.40,"first line
+        second ""line"" here","ignored"
+        move,2026-01-02T09:00:00.000Z,2026-01-02T09:30:00.000Z,"Cafe to Park",2026-01-02,walking,1e30,,,,"",""
+        """
+
+        let archive = try parseSuccess(fileName: "moves.csv", data: Data(csv.utf8))
+
+        XCTAssertEqual(archive.places.count, 1)
+        XCTAssertEqual(archive.places.first?.comment, "first line\nsecond \"line\" here")
+        XCTAssertEqual(archive.moves.count, 1)
+        XCTAssertNil(archive.moves.first?.distanceMeters)
+    }
+
+    func testFileNamesImplyAModeOnlyAsWholeWords() throws {
+        let gpx = """
+        <gpx version="1.1"><trk><trkseg>
+        <trkpt lat="52.52" lon="13.40"><time>2026-01-02T08:00:00Z</time></trkpt>
+        <trkpt lat="52.53" lon="13.41"><time>2026-01-02T08:10:00Z</time></trkpt>
+        </trkseg></trk></gpx>
+        """
+        let carolina = try parseSuccess(fileName: "Carolina.gpx", data: Data(gpx.utf8))
+        XCTAssertEqual(carolina.moves.first?.transportMode, .unknown)
+        let carTrip = try parseSuccess(fileName: "car-trip.gpx", data: Data(gpx.utf8))
+        XCTAssertEqual(carTrip.moves.first?.transportMode, .automotive)
+    }
+
+    /// A zip with one DEFLATE member, built by hand because `pack` only stores.
+    private func deflatedZip(
+        name: String,
+        payload: Data,
+        usesDataDescriptor: Bool,
+        recordedCRC: UInt32? = nil
+    ) throws -> Data {
+        let compressed = try (payload as NSData).compressed(using: .zlib) as Data
+        let crc = recordedCRC ?? MovesZipArchive.crc32Checksum(of: payload)
+        let nameData = Data(name.utf8)
+        let flags: UInt16 = usesDataDescriptor ? 0x8 : 0
+
+        var zip = Data()
+        zip.appendZipUInt32(0x04034b50)
+        zip.appendZipUInt16(20)
+        zip.appendZipUInt16(flags)
+        zip.appendZipUInt16(8)
+        zip.appendZipUInt32(0) // time and date
+        zip.appendZipUInt32(usesDataDescriptor ? 0 : crc)
+        zip.appendZipUInt32(usesDataDescriptor ? 0 : UInt32(compressed.count))
+        zip.appendZipUInt32(usesDataDescriptor ? 0 : UInt32(payload.count))
+        zip.appendZipUInt16(UInt16(nameData.count))
+        zip.appendZipUInt16(0)
+        zip.append(nameData)
+        zip.append(compressed)
+        if usesDataDescriptor {
+            zip.appendZipUInt32(0x08074b50)
+            zip.appendZipUInt32(crc)
+            zip.appendZipUInt32(UInt32(compressed.count))
+            zip.appendZipUInt32(UInt32(payload.count))
+        }
+
+        let centralOffset = zip.count
+        zip.appendZipUInt32(0x02014b50)
+        zip.appendZipUInt16(20)
+        zip.appendZipUInt16(20)
+        zip.appendZipUInt16(flags)
+        zip.appendZipUInt16(8)
+        zip.appendZipUInt32(0) // time and date
+        zip.appendZipUInt32(crc)
+        zip.appendZipUInt32(UInt32(compressed.count))
+        zip.appendZipUInt32(UInt32(payload.count))
+        zip.appendZipUInt16(UInt16(nameData.count))
+        zip.appendZipUInt16(0)
+        zip.appendZipUInt16(0)
+        zip.appendZipUInt16(0)
+        zip.appendZipUInt16(0)
+        zip.appendZipUInt32(0)
+        zip.appendZipUInt32(0)
+        zip.append(nameData)
+        let centralSize = zip.count - centralOffset
+
+        zip.appendZipUInt32(0x06054b50)
+        zip.appendZipUInt16(0)
+        zip.appendZipUInt16(0)
+        zip.appendZipUInt16(1)
+        zip.appendZipUInt16(1)
+        zip.appendZipUInt32(UInt32(centralSize))
+        zip.appendZipUInt32(UInt32(centralOffset))
+        zip.appendZipUInt16(0)
+        return zip
+    }
+
     private func mergedRealExport() throws -> TimelineArchive {
         let files = ["moves-all-days.geojson", "moves-all-days.gpx", "moves-all-days.csv"]
         let payloads = try files.map { name in
@@ -247,5 +393,17 @@ final class TimelineArchiveImportTests: XCTestCase {
             cloudKitDatabase: .none
         )
         return try ModelContainer(for: schema, configurations: [configuration])
+    }
+}
+
+private extension Data {
+    mutating func appendZipUInt16(_ value: UInt16) {
+        append(UInt8(value & 0xFF))
+        append(UInt8(value >> 8))
+    }
+
+    mutating func appendZipUInt32(_ value: UInt32) {
+        appendZipUInt16(UInt16(value & 0xFFFF))
+        appendZipUInt16(UInt16(value >> 16))
     }
 }

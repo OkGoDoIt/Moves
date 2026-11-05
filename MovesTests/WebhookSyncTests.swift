@@ -1,4 +1,6 @@
 import CoreLocation
+import CoreSpotlight
+import SwiftData
 import UniformTypeIdentifiers
 import XCTest
 @testable import Moves
@@ -228,6 +230,384 @@ final class WebhookSyncTests: XCTestCase {
         XCTAssertTrue(shown.contains("13.40500"))
     }
 
+    // MARK: History stays on the device until a confirmed upload
+
+    func testAutomaticFilterKeepsLiveSamplesAndLeavesOutImports() throws {
+        let context = ModelContext(try makeInMemoryContainer())
+        let now = Date.now
+        let longAgo = now.addingTimeInterval(-400 * 24 * 60 * 60)
+        for source in LocationSampleSource.allCases {
+            context.insert(makeSample(source: source, latitude: 52.52, timestamp: longAgo))
+        }
+        context.insert(makeSample(source: .healthWorkoutRoute, latitude: 52.53, timestamp: now))
+        try context.save()
+        let cursor = now.addingTimeInterval(-60)
+
+        let automatic = try context.fetch(
+            FetchDescriptor<LocationSample>(
+                predicate: LocationUploadFilter.samples(after: cursor, includingHistory: false)
+            )
+        )
+        XCTAssertEqual(
+            Set(automatic.map(\.source)),
+            [
+                .visit, .significantChange, .routeTracking, .watchRouteTracking, .watchSignificantChange,
+                .launchBackfill, .authorizationGrant, .lastMile, .healthWorkoutRoute,
+            ]
+        )
+        XCTAssertEqual(
+            automatic.filter { $0.source == .healthWorkoutRoute }.map(\.latitude),
+            [52.53],
+            "A fresh workout uploads; a historical Health import does not"
+        )
+
+        let confirmed = try context.fetch(
+            FetchDescriptor<LocationSample>(
+                predicate: LocationUploadFilter.samples(after: .distantPast, includingHistory: true)
+            )
+        )
+        XCTAssertEqual(confirmed.count, LocationSampleSource.allCases.count + 1)
+    }
+
+    func testAutomaticFilterLeavesOutImportedVisitsAndMoves() throws {
+        let context = ModelContext(try makeInMemoryContainer())
+        let now = Date.now
+        let longAgo = now.addingTimeInterval(-400 * 24 * 60 * 60)
+
+        let live = makeVisit(name: "Live", arrival: now.addingTimeInterval(-3_600))
+        let googleVisit = makeVisit(name: "Google", arrival: now.addingTimeInterval(-3_600))
+        googleVisit.origin = .imported
+        let photoVisit = makeVisit(name: "Photo", arrival: now.addingTimeInterval(-3_600))
+        photoVisit.origin = .photoInferred
+        let restoredVisit = makeVisit(name: "Restored", arrival: longAgo)
+        for visit in [live, googleVisit, photoVisit, restoredVisit] {
+            context.insert(visit)
+        }
+
+        let liveMove = makeMove(key: "live", end: now)
+        let googleMove = makeMove(key: "google", end: now)
+        googleMove.origin = .imported
+        let restoredMove = makeMove(key: "restored", end: longAgo)
+        for move in [liveMove, googleMove, restoredMove] {
+            context.insert(move)
+        }
+        try context.save()
+        let cursor = now.addingTimeInterval(-60)
+
+        let visits = try context.fetch(
+            FetchDescriptor<VisitPlace>(predicate: LocationUploadFilter.visits(after: cursor, includingHistory: false))
+        )
+        XCTAssertEqual(visits.map(\.userLabel), ["Live"])
+        let allVisits = try context.fetch(
+            FetchDescriptor<VisitPlace>(predicate: LocationUploadFilter.visits(after: .distantPast, includingHistory: true))
+        )
+        XCTAssertEqual(allVisits.count, 4)
+
+        let moves = try context.fetch(
+            FetchDescriptor<MoveSegment>(predicate: LocationUploadFilter.moves(after: cursor, includingHistory: false))
+        )
+        XCTAssertEqual(moves.map(\.dedupeKey), ["live"])
+        let allMoves = try context.fetch(
+            FetchDescriptor<MoveSegment>(predicate: LocationUploadFilter.moves(after: .distantPast, includingHistory: true))
+        )
+        XCTAssertEqual(allMoves.count, 3)
+    }
+
+    @MainActor
+    func testWebhookSendsLivePointsAndSavesImportsForAConfirmedUpload() async throws {
+        let container = try makeInMemoryContainer()
+        let defaults = makeDefaults()
+        defaults.set("https://hooks.example.com/moves", forKey: "Moves.webhook.serverURL")
+        defaults.set(false, forKey: "Moves.webhook.sendTransitions")
+        defaults.set(false, forKey: "Moves.webhook.sendNative")
+        defaults.set(Date.now.addingTimeInterval(-60), forKey: "Moves.webhook.sampleCursor")
+
+        var latitudes: [Double] = []
+        let client = makeClient { request in
+            if let object = try? JSONSerialization.jsonObject(with: Self.body(of: request)) as? [String: Any],
+               let latitude = object["lat"] as? Double {
+                latitudes.append(latitude)
+            }
+            return (Data(), 204, [:])
+        }
+        let manager = WebhookSyncManager(modelContainer: container, defaults: defaults, client: client)
+
+        let context = ModelContext(container)
+        context.insert(makeSample(source: .watchRouteTracking, latitude: 1, timestamp: .now))
+        context.insert(makeSample(source: .googleTimelineImport, latitude: 2, timestamp: .now))
+        context.insert(makeSample(source: .fileRouteImport, latitude: 3, timestamp: .now))
+        try context.save()
+
+        await manager.syncNewItemsNow()
+        XCTAssertFalse(manager.state.lastOperationFailed, manager.state.lastMessage)
+        XCTAssertEqual(latitudes, [1])
+
+        latitudes = []
+        await manager.syncAllHistory()
+        XCTAssertFalse(manager.state.lastOperationFailed, manager.state.lastMessage)
+        XCTAssertEqual(Set(latitudes), [1, 2, 3])
+    }
+
+    @MainActor
+    func testLocationServiceSendsLivePointsAndSavesImportsForAConfirmedUpload() async throws {
+        let container = try makeInMemoryContainer()
+        let defaults = makeDefaults()
+        defaults.set("https://traccar.example.com:5144", forKey: "Moves.locationServices.traccar.serverURL")
+        defaults.set("phone", forKey: "Moves.locationServices.traccar.deviceID")
+        defaults.set(Date.now.addingTimeInterval(-60), forKey: "Moves.locationServices.traccar.uploadCursor")
+
+        var latitudes: [Double] = []
+        WebhookURLProtocolStub.handler = { request in
+            if let object = try? JSONSerialization.jsonObject(with: Self.body(of: request)) as? [String: Any],
+               let latitude = object["lat"] as? Double {
+                latitudes.append(latitude)
+            }
+            return (Data(), 200, [:])
+        }
+        let manager = LocationServiceSyncManager(
+            modelContainer: container,
+            defaults: defaults,
+            client: LocationServiceAPIClient(session: makeStubbedSession())
+        )
+
+        let context = ModelContext(container)
+        context.insert(makeSample(source: .routeTracking, latitude: 1, timestamp: .now))
+        context.insert(makeSample(source: .photoLibrary, latitude: 2, timestamp: .now))
+        try context.save()
+
+        await manager.syncNewSamplesNow(.traccar)
+        XCTAssertFalse(manager.state(for: .traccar).lastOperationFailed, manager.state(for: .traccar).lastMessage)
+        XCTAssertEqual(latitudes, [1])
+
+        latitudes = []
+        await manager.syncAllHistory(.traccar)
+        XCTAssertFalse(manager.state(for: .traccar).lastOperationFailed, manager.state(for: .traccar).lastMessage)
+        XCTAssertEqual(Set(latitudes), [1, 2])
+    }
+
+    @MainActor
+    func testTurningAutomaticUploadsOnStartsFromNow() throws {
+        let container = try makeInMemoryContainer()
+        let defaults = makeDefaults()
+        let stale = Date(timeIntervalSince1970: 1_600_000_000)
+        for key in ["sampleCursor", "visitCursor", "moveCursor", "leaveCursor"] {
+            defaults.set(stale, forKey: "Moves.webhook.\(key)")
+        }
+        defaults.set(stale, forKey: "Moves.locationServices.traccar.uploadCursor")
+
+        let webhook = WebhookSyncManager(modelContainer: container, defaults: defaults)
+        webhook.setAutomaticSyncEnabled(true)
+        for key in ["sampleCursor", "visitCursor", "moveCursor", "leaveCursor"] {
+            let cursor = try XCTUnwrap(defaults.object(forKey: "Moves.webhook.\(key)") as? Date)
+            XCTAssertGreaterThan(cursor, stale, key)
+        }
+        webhook.setAutomaticSyncEnabled(false)
+
+        let services = LocationServiceSyncManager(modelContainer: container, defaults: defaults)
+        services.setAutomaticSyncEnabled(true, for: .traccar)
+        let cursor = try XCTUnwrap(defaults.object(forKey: "Moves.locationServices.traccar.uploadCursor") as? Date)
+        XCTAssertGreaterThan(cursor, stale)
+        services.setAutomaticSyncEnabled(false, for: .traccar)
+    }
+
+    @MainActor
+    func testTurningAPayloadBackOnDoesNotSendTheGap() throws {
+        let defaults = makeDefaults()
+        let manager = WebhookSyncManager(modelContainer: try makeInMemoryContainer(), defaults: defaults)
+        var options = manager.payloadOptions()
+        options.sendOwnTracksLocations = false
+        manager.setPayloadOptions(options)
+
+        let stale = Date(timeIntervalSince1970: 1_600_000_000)
+        defaults.set(stale, forKey: "Moves.webhook.sampleCursor")
+        defaults.set(stale, forKey: "Moves.webhook.moveCursor")
+
+        options.sendOwnTracksLocations = true
+        manager.setPayloadOptions(options)
+
+        let sampleCursor = try XCTUnwrap(defaults.object(forKey: "Moves.webhook.sampleCursor") as? Date)
+        XCTAssertGreaterThan(sampleCursor, stale)
+        XCTAssertEqual(defaults.object(forKey: "Moves.webhook.moveCursor") as? Date, stale, "Moves were never off")
+    }
+
+    @MainActor
+    func testLateCreatedVisitPostsBothEnterAndLeave() async throws {
+        let container = try makeInMemoryContainer()
+        let defaults = makeDefaults()
+        let now = Date.now
+        defaults.set("https://hooks.example.com/moves", forKey: "Moves.webhook.serverURL")
+        defaults.set(false, forKey: "Moves.webhook.sendOwnTracks")
+        defaults.set(false, forKey: "Moves.webhook.sendNative")
+        defaults.set(now.addingTimeInterval(-60), forKey: "Moves.webhook.visitCursor")
+        defaults.set(now.addingTimeInterval(-60), forKey: "Moves.webhook.leaveCursor")
+
+        var events: [String] = []
+        let client = makeClient { request in
+            if let object = try? JSONSerialization.jsonObject(with: Self.body(of: request)) as? [String: Any],
+               let event = object["event"] as? String {
+                events.append(event)
+            }
+            return (Data(), 204, [:])
+        }
+        let manager = WebhookSyncManager(modelContainer: container, defaults: defaults, client: client)
+
+        let context = ModelContext(container)
+        // Departed two hours ago, well before the leave cursor, but only created just now.
+        context.insert(makeVisit(name: "Reconciled", arrival: now.addingTimeInterval(-3 * 3_600)))
+        try context.save()
+
+        await manager.syncNewItemsNow()
+        XCTAssertFalse(manager.state.lastOperationFailed, manager.state.lastMessage)
+        XCTAssertEqual(events, ["enter", "leave"])
+    }
+
+    // MARK: Saved secrets
+
+    @MainActor
+    func testWebhookKeepsItsTokenOnTheSameServerAndDropsItForANewOne() async throws {
+        var auth: [String: String?] = [:]
+        let client = makeClient { request in
+            auth[request.url?.absoluteString ?? ""] = request.value(forHTTPHeaderField: "Authorization")
+            return (Data(), 204, [:])
+        }
+        let manager = WebhookSyncManager(
+            modelContainer: try makeInMemoryContainer(),
+            defaults: makeDefaults(),
+            client: client
+        )
+        defer { try? manager.disconnect() }
+
+        try await manager.connect(urlString: "https://a.example.com/hook", bearerToken: "secret")
+        XCTAssertEqual(auth["https://a.example.com/hook"], "Bearer secret")
+
+        try await manager.connect(urlString: "https://a.example.com/other", bearerToken: "")
+        XCTAssertEqual(auth["https://a.example.com/other"], "Bearer secret", "Same server keeps the token")
+
+        XCTAssertFalse(manager.canKeepStoredToken(for: "https://b.example.com/hook"))
+        try await manager.connect(urlString: "https://b.example.com/hook", bearerToken: "")
+        XCTAssertEqual(auth["https://b.example.com/hook"], .some(nil), "A new server never gets the old token")
+        XCTAssertFalse(manager.hasStoredToken)
+    }
+
+    @MainActor
+    func testLocationServiceAsksForItsSecretAgainOnANewServer() async throws {
+        var bearerTokens: [String?] = []
+        WebhookURLProtocolStub.handler = { request in
+            bearerTokens.append(request.value(forHTTPHeaderField: "Authorization"))
+            return (Data("[]".utf8), 200, [:])
+        }
+        let manager = LocationServiceSyncManager(
+            modelContainer: try makeInMemoryContainer(),
+            defaults: makeDefaults(),
+            client: LocationServiceAPIClient(session: makeStubbedSession())
+        )
+        defer { try? manager.disconnect(.reitti) }
+
+        var input = LocationServiceConnectionInput(serverURL: "https://a.example.com", token: "secret")
+        _ = try await manager.connect(service: .reitti, input: input)
+        XCTAssertEqual(bearerTokens, ["Bearer secret"])
+
+        input.token = ""
+        _ = try await manager.connect(service: .reitti, input: input)
+        XCTAssertEqual(bearerTokens, ["Bearer secret", "Bearer secret"], "Same server keeps the token")
+
+        input.serverURL = "https://b.example.com"
+        XCTAssertFalse(manager.canKeepStoredSecret(for: .reitti, input: input))
+        do {
+            _ = try await manager.connect(service: .reitti, input: input)
+            XCTFail("A new server must not receive the saved token")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, "Enter the API token for Reitti.")
+        }
+        XCTAssertEqual(bearerTokens.count, 2, "Nothing is sent to the new server")
+    }
+
+    // MARK: Shortcuts and Spotlight
+
+    func testSpotlightNeverDonatesCoordinatesAsAName() {
+        let unlabeled = VisitPlace(
+            arrivalDate: Date(timeIntervalSince1970: 1_735_000_000),
+            departureDate: nil,
+            latitude: 52.52,
+            longitude: 13.405,
+            horizontalAccuracy: 8
+        )
+        let entity = VisitedPlaceEntity(place: unlabeled)
+        XCTAssertEqual(entity.name, "Visited place")
+        XCTAssertFalse(entity.attributeSet.displayName?.contains("52.52") ?? true)
+
+        unlabeled.autoLabel = "52.52000, 13.40500"
+        XCTAssertEqual(VisitedPlaceEntity(place: unlabeled).name, "Visited place")
+
+        unlabeled.autoLabel = "Coffee Shop"
+        XCTAssertEqual(VisitedPlaceEntity(place: unlabeled).name, "Coffee Shop")
+    }
+
+    func testYesterdayDoesNotClaimTodaysMidnight() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
+        let now = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 9, day: 10, hour: 14)))
+        let today = calendar.startOfDay(for: now)
+        let yesterday = try XCTUnwrap(calendar.date(byAdding: .day, value: -1, to: today))
+
+        let interval = try XCTUnwrap(MovesTimelinePeriod.yesterday.dateInterval(containing: now, calendar: calendar))
+        XCTAssertTrue(interval.holds(yesterday))
+        XCTAssertTrue(interval.holds(today.addingTimeInterval(-1)))
+        XCTAssertFalse(interval.holds(today))
+    }
+
+    private static func body(of request: URLRequest) -> Data {
+        if let body = request.httpBody { return body }
+        if let stream = request.httpBodyStream { return Data(reading: stream) }
+        return Data()
+    }
+
+    private func makeInMemoryContainer() throws -> ModelContainer {
+        let schema = Schema(MovesTimelineSchema.models)
+        let configuration = ModelConfiguration(
+            schema: schema,
+            isStoredInMemoryOnly: true,
+            cloudKitDatabase: .none
+        )
+        return try ModelContainer(for: schema, configurations: [configuration])
+    }
+
+    private func makeDefaults() -> UserDefaults {
+        let suiteName = "moves-upload-tests-\(UUID().uuidString)"
+        addTeardownBlock { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        return UserDefaults(suiteName: suiteName) ?? .standard
+    }
+
+    private func makeSample(
+        source: LocationSampleSource,
+        latitude: Double,
+        timestamp: Date
+    ) -> LocationSample {
+        let location = CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: 13.405),
+            altitude: 0,
+            horizontalAccuracy: 8,
+            verticalAccuracy: 4,
+            timestamp: timestamp
+        )
+        return LocationSample(
+            location: location,
+            source: source,
+            dedupeKey: "\(source.rawValue)-\(latitude)-\(timestamp.timeIntervalSince1970)"
+        )
+    }
+
+    private func makeMove(key: String, end: Date) -> MoveSegment {
+        MoveSegment(
+            dedupeKey: key,
+            startDate: end.addingTimeInterval(-600),
+            endDate: end,
+            transportMode: .walking,
+            distanceMeters: 500,
+            stepCount: nil
+        )
+    }
+
     private func makeVisit(
         name: String,
         latitude: Double = 52.52,
@@ -266,9 +646,13 @@ final class WebhookSyncTests: XCTestCase {
         handler: @escaping (URLRequest) throws -> (Data, Int, [String: String])
     ) -> WebhookAPIClient {
         WebhookURLProtocolStub.handler = handler
+        return WebhookAPIClient(session: makeStubbedSession())
+    }
+
+    private func makeStubbedSession() -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [WebhookURLProtocolStub.self]
-        return WebhookAPIClient(session: URLSession(configuration: configuration))
+        return URLSession(configuration: configuration)
     }
 }
 

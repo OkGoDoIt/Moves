@@ -496,6 +496,14 @@ final class WebhookSyncManager: ObservableObject {
         return !token.isEmpty
     }
 
+    /// True when leaving the token blank would keep the saved one for the URL now entered.
+    func canKeepStoredToken(for urlString: String) -> Bool {
+        guard hasStoredToken, let endpoint = try? WebhookEndpoint.make(from: urlString) else {
+            return false
+        }
+        return SavedCredentialPolicy.mayReuse(savedFor: currentEndpoint()?.url, on: endpoint.url)
+    }
+
     func reloadSettings() {
         var next = state
         next.isConfigured = (try? currentEndpoint()) != nil
@@ -515,6 +523,7 @@ final class WebhookSyncManager: ObservableObject {
     }
 
     func setPayloadOptions(_ options: WebhookPayloadOptions) {
+        stampCursorsForNewlyEnabledPayloads(from: payloadOptions(), to: options)
         defaults.set(options.sendOwnTracksLocations, forKey: Keys.sendOwnTracks)
         defaults.set(options.sendOwnTracksTransitions, forKey: Keys.sendTransitions)
         defaults.set(options.sendNativeTimeline, forKey: Keys.sendNative)
@@ -523,7 +532,9 @@ final class WebhookSyncManager: ObservableObject {
 
     func connect(urlString: String, bearerToken: String) async throws {
         let endpoint = try WebhookEndpoint.make(from: urlString)
-        let savedToken = (try? WebhookKeychain.loadToken()) ?? ""
+        let savedToken = SavedCredentialPolicy.mayReuse(savedFor: currentEndpoint()?.url, on: endpoint.url)
+            ? (try? WebhookKeychain.loadToken()) ?? ""
+            : ""
         let trimmedInput = bearerToken.trimmingCharacters(in: .whitespacesAndNewlines)
         let token = trimmedInput.isEmpty ? savedToken : trimmedInput
 
@@ -561,7 +572,8 @@ final class WebhookSyncManager: ObservableObject {
     }
 
     func setAutomaticSyncEnabled(_ enabled: Bool) {
-        if enabled, defaults.object(forKey: Keys.sampleCursor) == nil {
+        // Turning automatic uploads on starts from now, so time spent off is never backfilled.
+        if enabled, !defaults.bool(forKey: Keys.automaticSync) {
             stampCursors(to: Date.now)
         }
         defaults.set(enabled, forKey: Keys.automaticSync)
@@ -645,6 +657,7 @@ final class WebhookSyncManager: ObservableObject {
                 ) = try loadBatch(
                     in: modelContext,
                     options: options,
+                    includingHistory: allHistory,
                     sampleCursor: sampleCursor,
                     visitCursor: visitCursor,
                     moveCursor: moveCursor,
@@ -701,6 +714,7 @@ final class WebhookSyncManager: ObservableObject {
     private func loadBatch(
         in modelContext: ModelContext,
         options: WebhookPayloadOptions,
+        includingHistory: Bool,
         sampleCursor: Date,
         visitCursor: Date,
         moveCursor: Date,
@@ -725,7 +739,7 @@ final class WebhookSyncManager: ObservableObject {
 
         if options.sendOwnTracksLocations {
             var descriptor = FetchDescriptor<LocationSample>(
-                predicate: #Predicate { sample in sample.createdAt > sampleCursor },
+                predicate: LocationUploadFilter.samples(after: sampleCursor, includingHistory: includingHistory),
                 sortBy: [SortDescriptor(\LocationSample.createdAt, order: .forward)]
             )
             descriptor.fetchLimit = Self.batchSize
@@ -742,18 +756,21 @@ final class WebhookSyncManager: ObservableObject {
         if options.sendOwnTracksTransitions || options.sendNativeTimeline {
             let visits = try fetchPendingVisits(
                 in: modelContext,
+                includingHistory: includingHistory,
                 visitCursor: visitCursor,
                 leaveCursor: leaveCursor
             )
 
             for visit in visits {
                 if options.sendOwnTracksTransitions {
-                    if visit.createdAt > visitCursor {
+                    let isNewVisit = visit.createdAt > visitCursor
+                    if isNewVisit {
                         transitions.append(
                             OwnTracksTransitionPayload(visit: visit, event: "enter", deviceID: deviceID)
                         )
                     }
-                    if let departure = visit.departureDate, departure > leaveCursor {
+                    // A visit created after it ended still needs its leave, whatever the cursor says.
+                    if let departure = visit.departureDate, isNewVisit || departure > leaveCursor {
                         transitions.append(
                             OwnTracksTransitionPayload(visit: visit, event: "leave", deviceID: deviceID)
                         )
@@ -772,7 +789,7 @@ final class WebhookSyncManager: ObservableObject {
 
         if options.sendNativeTimeline {
             var moveDescriptor = FetchDescriptor<MoveSegment>(
-                predicate: #Predicate { move in move.createdAt > moveCursor },
+                predicate: LocationUploadFilter.moves(after: moveCursor, includingHistory: includingHistory),
                 sortBy: [SortDescriptor(\MoveSegment.createdAt, order: .forward)]
             )
             moveDescriptor.fetchLimit = Self.batchSize
@@ -799,11 +816,12 @@ final class WebhookSyncManager: ObservableObject {
     /// New visits by `createdAt`, plus recently departed visits whose leave has not been posted yet.
     private func fetchPendingVisits(
         in modelContext: ModelContext,
+        includingHistory: Bool,
         visitCursor: Date,
         leaveCursor: Date
     ) throws -> [VisitPlace] {
         var createdDescriptor = FetchDescriptor<VisitPlace>(
-            predicate: #Predicate { visit in visit.createdAt > visitCursor },
+            predicate: LocationUploadFilter.visits(after: visitCursor, includingHistory: includingHistory),
             sortBy: [SortDescriptor(\VisitPlace.createdAt, order: .forward)]
         )
         createdDescriptor.fetchLimit = Self.batchSize
@@ -819,6 +837,9 @@ final class WebhookSyncManager: ObservableObject {
             guard !known.contains(visit.id), let departure = visit.departureDate else {
                 return false
             }
+            if !includingHistory, LocationUploadFilter.importedOrigins.contains(visit.originRaw) {
+                return false
+            }
             return departure > leaveCursor && visit.createdAt <= visitCursor
         }
         visits.append(contentsOf: lateLeaves)
@@ -831,6 +852,26 @@ final class WebhookSyncManager: ObservableObject {
 
     private func stampCursors(to date: Date) {
         writeCursors(sample: date, visit: date, move: date, leave: date)
+    }
+
+    /// A payload that was off has a stale cursor. Starting it from now keeps the gap local.
+    private func stampCursorsForNewlyEnabledPayloads(
+        from previous: WebhookPayloadOptions,
+        to next: WebhookPayloadOptions
+    ) {
+        let now = Date.now
+        if next.sendOwnTracksLocations, !previous.sendOwnTracksLocations {
+            defaults.set(now, forKey: Keys.sampleCursor)
+        }
+        let sentVisits = previous.sendOwnTracksTransitions || previous.sendNativeTimeline
+        let sendsVisits = next.sendOwnTracksTransitions || next.sendNativeTimeline
+        if sendsVisits, !sentVisits {
+            defaults.set(now, forKey: Keys.visitCursor)
+            defaults.set(now, forKey: Keys.leaveCursor)
+        }
+        if next.sendNativeTimeline, !previous.sendNativeTimeline {
+            defaults.set(now, forKey: Keys.moveCursor)
+        }
     }
 
     private func writeCursors(sample: Date, visit: Date, move: Date, leave: Date) {
@@ -903,7 +944,7 @@ struct WebhookSettingsView: View {
                         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10))
 
                     SecureField(
-                        syncManager.hasStoredToken
+                        syncManager.canKeepStoredToken(for: urlString)
                             ? "Leave blank to keep saved token"
                             : "Bearer token (optional)",
                         text: $bearerToken

@@ -11,17 +11,19 @@ enum GoogleTimelineRecordsScanner {
     ///   - url: Path to `Records.json` or any JSON object whose `locations`
     ///     value is an array of record objects.
     ///   - progress: `(pointsEmitted, bytesRead)` on the caller's thread.
+    ///   - onIncomplete: Called when the file ends before the `locations` array does.
     ///   - body: Returning `false` stops the scan.
     /// - Returns: Number of objects that produced a `LocationLogPoint`.
     @discardableResult
     static func forEachRecord(
         at url: URL,
         progress: ((Int, Int64) -> Void)? = nil,
+        onIncomplete: (() -> Void)? = nil,
         body: (LocationLogPoint) throws -> Bool
     ) throws -> Int {
         let stream = try InputStream(url: url).unwrapped(url.lastPathComponent)
         var emitted = 0
-        _ = try forEachObject(in: stream, arrayKey: "locations", progress: progress) { objectData in
+        _ = try forEachObject(in: stream, arrayKey: "locations", progress: progress, onIncomplete: onIncomplete) { objectData in
             guard let point = GoogleTimelineParser.parseRecordObject(data: objectData) else {
                 return true
             }
@@ -35,11 +37,12 @@ enum GoogleTimelineRecordsScanner {
     @discardableResult
     static func forEachRecord(
         in data: Data,
+        onIncomplete: (() -> Void)? = nil,
         body: (LocationLogPoint) throws -> Bool
     ) throws -> Int {
         let stream = InputStream(data: data)
         var emitted = 0
-        _ = try forEachObject(in: stream, arrayKey: "locations", progress: nil) { objectData in
+        _ = try forEachObject(in: stream, arrayKey: "locations", progress: nil, onIncomplete: onIncomplete) { objectData in
             guard let point = GoogleTimelineParser.parseRecordObject(data: objectData) else {
                 return true
             }
@@ -56,6 +59,7 @@ enum GoogleTimelineRecordsScanner {
         in stream: InputStream,
         arrayKey: String?,
         progress: ((Int, Int64) -> Void)? = nil,
+        onIncomplete: (() -> Void)? = nil,
         body: (Data) throws -> Bool
     ) throws -> Int {
         stream.open()
@@ -91,6 +95,54 @@ enum GoogleTimelineRecordsScanner {
                 if try fill() == false { return false }
             }
             return buffer.count - consumed >= needed
+        }
+
+        // Nested so it shares `buffer` with `fill`. Passing `&buffer` alongside a closure
+        // that also mutates it is an exclusive-access crash once a read refills the buffer.
+        func extractObject() throws -> Data? {
+            var depth = 0
+            var inString = false
+            var escaped = false
+            let start = consumed
+
+            while true {
+                if consumed >= buffer.count {
+                    if try fill() == false {
+                        return nil
+                    }
+                }
+                let current = buffer[buffer.startIndex + consumed]
+                consumed += 1
+
+                if inString {
+                    if escaped {
+                        escaped = false
+                        continue
+                    }
+                    if current == 0x5C { // \
+                        escaped = true
+                        continue
+                    }
+                    if current == 0x22 { // "
+                        inString = false
+                    }
+                    continue
+                }
+
+                switch current {
+                case 0x22:
+                    inString = true
+                case 0x7B:
+                    depth += 1
+                case 0x7D:
+                    depth -= 1
+                    if depth == 0 {
+                        return Data(buffer[(buffer.startIndex + start)..<(buffer.startIndex + consumed)])
+                    }
+                default:
+                    break
+                }
+            }
         }
 
         if let keyBytes {
@@ -142,7 +194,10 @@ enum GoogleTimelineRecordsScanner {
 
         while true {
             while true {
-                guard try ensure(1) else { return emitted }
+                guard try ensure(1) else {
+                    onIncomplete?()
+                    return emitted
+                }
                 let current = byte(consumed)
                 if current == 0x20 || current == 0x0A || current == 0x0D || current == 0x09 || current == 0x2C {
                     consumed += 1
@@ -150,7 +205,6 @@ enum GoogleTimelineRecordsScanner {
                 }
                 break
             }
-            guard try ensure(1) else { return emitted }
             let next = byte(consumed)
             if next == 0x5D { // ]
                 return emitted
@@ -160,7 +214,8 @@ enum GoogleTimelineRecordsScanner {
                 continue
             }
 
-            guard let objectData = try extractObject(buffer: &buffer, consumed: &consumed, fill: fill) else {
+            guard let objectData = try extractObject() else {
+                onIncomplete?()
                 return emitted
             }
             objects += 1
@@ -179,55 +234,6 @@ enum GoogleTimelineRecordsScanner {
         }
     }
 
-    private static func extractObject(
-        buffer: inout Data,
-        consumed: inout Int,
-        fill: () throws -> Bool
-    ) throws -> Data? {
-        var depth = 0
-        var inString = false
-        var escaped = false
-        let start = consumed
-
-        while true {
-            if consumed >= buffer.count {
-                if try fill() == false {
-                    return nil
-                }
-            }
-            let current = buffer[buffer.startIndex + consumed]
-            consumed += 1
-
-            if inString {
-                if escaped {
-                    escaped = false
-                    continue
-                }
-                if current == 0x5C { // \
-                    escaped = true
-                    continue
-                }
-                if current == 0x22 { // "
-                    inString = false
-                }
-                continue
-            }
-
-            switch current {
-            case 0x22:
-                inString = true
-            case 0x7B:
-                depth += 1
-            case 0x7D:
-                depth -= 1
-                if depth == 0 {
-                    return Data(buffer[(buffer.startIndex + start)..<(buffer.startIndex + consumed)])
-                }
-            default:
-                break
-            }
-        }
-    }
 }
 
 private extension Optional where Wrapped == InputStream {

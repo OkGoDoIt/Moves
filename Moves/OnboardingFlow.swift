@@ -19,7 +19,7 @@ struct OnboardingFlow: View {
                 OnboardingPage(
                     symbolName: "calendar",
                     title: String(localized: "Your private timeline"),
-                    message: String(localized: "Moves records where you went, how you got there, and how long you stayed. Everything stays on this iPhone.")
+                    message: String(localized: "Moves records where you went, how you got there, and how long you stayed. Your timeline is saved on this iPhone and, when iCloud is on, in your private iCloud.")
                 )
                 .tag(0)
 

@@ -347,6 +347,11 @@ struct ContentView: View {
         return dayTimelines[selectedPageIndex]
     }
 
+    private var todayTimeline: DayTimeline? {
+        let todayKey = DayTimeline.makeDayKey(for: .now)
+        return dayTimelines.last { $0.dayKey == todayKey }
+    }
+
     private var canGoOlder: Bool {
         dayTimelines.indices.contains(selectedPageIndex) && selectedPageIndex > 0
     }
@@ -487,10 +492,10 @@ struct ContentView: View {
             syncSelectedDayIfNeeded()
             publishWidgetSnapshot()
         }
-        .onChange(of: selectedDay?.moves.count ?? 0) { _, _ in
+        .onChange(of: todayTimeline?.moves.count ?? 0) { _, _ in
             publishWidgetSnapshot()
         }
-        .onChange(of: selectedDay?.places.count ?? 0) { _, _ in
+        .onChange(of: todayTimeline?.places.count ?? 0) { _, _ in
             publishWidgetSnapshot()
         }
         .onChange(of: cloudDataPresenceCountSignature) { _, _ in
@@ -719,9 +724,10 @@ struct ContentView: View {
         }
     }
 
+    /// The widgets and the watch always describe today, whatever day is on screen.
     private func publishWidgetSnapshot() {
-        guard let dayTimeline = selectedDay ?? dayTimelines.last else { return }
-        TimelineWidgetSnapshotStore.save(.make(from: dayTimeline))
+        guard let todayTimeline else { return }
+        TimelineWidgetSnapshotStore.save(.make(from: todayTimeline))
     }
 
     private func refreshSpotlightIndex() {
@@ -915,7 +921,7 @@ enum TimelineExporter {
         case .geoJSON:
             exportData = geoJSONData(for: orderedDays, privacyZones: privacyZones)
         case .csv:
-            exportData = csvData(for: orderedDays)
+            exportData = csvData(for: orderedDays, privacyZones: privacyZones)
         case .kml:
             exportData = kmlData(for: orderedDays, privacyZones: privacyZones)
         }
@@ -946,13 +952,13 @@ enum TimelineExporter {
         if let geoJSON = geoJSONData(for: orderedDays, privacyZones: privacyZones) {
             files.append(MovesZipFile(path: "\(fileStem).geojson", data: geoJSON))
         }
-        if let csv = csvData(for: orderedDays) {
+        if let csv = csvData(for: orderedDays, privacyZones: privacyZones) {
             files.append(MovesZipFile(path: "\(fileStem).csv", data: csv))
         }
         if let kml = kmlData(for: orderedDays, privacyZones: privacyZones) {
             files.append(MovesZipFile(path: "\(fileStem).kml", data: kml))
         }
-        if let places = placesJSONData(knownPlaces) {
+        if let places = placesJSONData(knownPlaces, privacyZones: privacyZones) {
             files.append(MovesZipFile(path: "places.json", data: places))
         }
         if let photosCSV = photosCSVData(photos) {
@@ -987,8 +993,8 @@ enum TimelineExporter {
         )
         guard points.count > 1 else { return nil }
 
-        let startTitle = move.startPlace?.displayTitle ?? "Unknown start"
-        let endTitle = move.endPlace?.displayTitle ?? "Unknown destination"
+        let startTitle = exportTitle(for: move.startPlace, fallback: "Unknown start", privacyZones: privacyZones)
+        let endTitle = exportTitle(for: move.endPlace, fallback: "Unknown destination", privacyZones: privacyZones)
         let trackName = "\(startTitle) to \(endTitle)"
 
         var xml = """
@@ -1000,7 +1006,7 @@ enum TimelineExporter {
           </metadata>
         """
 
-        if let startPlace = move.startPlace {
+        if let startPlace = move.startPlace, !isHidden(startPlace, privacyZones: privacyZones) {
             xml += """
 
               <wpt lat="\(coordinateString(startPlace.latitude))" lon="\(coordinateString(startPlace.longitude))">
@@ -1010,7 +1016,7 @@ enum TimelineExporter {
             """
         }
 
-        if let endPlace = move.endPlace {
+        if let endPlace = move.endPlace, !isHidden(endPlace, privacyZones: privacyZones) {
             xml += """
 
               <wpt lat="\(coordinateString(endPlace.latitude))" lon="\(coordinateString(endPlace.longitude))">
@@ -1072,9 +1078,9 @@ enum TimelineExporter {
 
         for day in days {
             let sortedPlaces = day.places.sorted(by: { $0.arrivalDate < $1.arrivalDate })
-            for place in sortedPlaces {
+            for place in sortedPlaces where !isHidden(place, privacyZones: privacyZones) {
                 xml += """
-                
+
                   <wpt lat="\(coordinateString(place.latitude))" lon="\(coordinateString(place.longitude))">
                     <name>\(xmlEscaped(place.displayTitle))</name>
                     <time>\(iso8601.string(from: place.arrivalDate))</time>
@@ -1149,7 +1155,7 @@ enum TimelineExporter {
         """
 
         for day in days {
-            for place in day.places.sorted(by: { $0.arrivalDate < $1.arrivalDate }) {
+            for place in day.places.sorted(by: { $0.arrivalDate < $1.arrivalDate }) where !isHidden(place, privacyZones: privacyZones) {
                 xml += """
 
             <Placemark>
@@ -1165,7 +1171,7 @@ enum TimelineExporter {
             for move in day.moves.sorted(by: { $0.timelineStartDate < $1.timelineStartDate }) {
                 let points = routePoints(for: move, privacyZones: privacyZones)
                 guard points.count > 1 else { continue }
-                let title = "\(move.startPlace?.displayTitle ?? "Unknown start") to \(move.endPlace?.displayTitle ?? "Unknown destination")"
+                let title = moveTitle(for: move, privacyZones: privacyZones)
                 let coordinates = points
                     .map { "\(coordinateString($0.longitude)),\(coordinateString($0.latitude)),0" }
                     .joined(separator: " ")
@@ -1191,8 +1197,15 @@ enum TimelineExporter {
         return xml.data(using: .utf8)
     }
 
-    private static func placesJSONData(_ places: [KnownPlace]) -> Data? {
+    private static func placesJSONData(_ places: [KnownPlace], privacyZones: [PrivacyZone]) -> Data? {
         let payload: [[String: Any]] = places
+            .filter { place in
+                !PrivacyZoneResolver.containsRawFix(
+                    latitude: place.centerLatitude,
+                    longitude: place.centerLongitude,
+                    zones: privacyZones
+                )
+            }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
             .map { place in
                 var object: [String: Any] = [
@@ -1237,7 +1250,7 @@ enum TimelineExporter {
         var features: [[String: Any]] = []
 
         for day in days {
-            for place in day.places.sorted(by: { $0.arrivalDate < $1.arrivalDate }) {
+            for place in day.places.sorted(by: { $0.arrivalDate < $1.arrivalDate }) where !isHidden(place, privacyZones: privacyZones) {
                 var properties: [String: Any] = [
                     "record_type": "place",
                     "title": place.displayTitle,
@@ -1282,8 +1295,8 @@ enum TimelineExporter {
                     "start_time": iso8601.string(from: move.timelineStartDate),
                     "end_time": iso8601.string(from: move.endDate),
                     "distance_meters": move.distanceMeters,
-                    "start_place": move.startPlace?.displayTitle ?? "Unknown start",
-                    "end_place": move.endPlace?.displayTitle ?? "Unknown destination",
+                    "start_place": exportTitle(for: move.startPlace, fallback: "Unknown start", privacyZones: privacyZones),
+                    "end_place": exportTitle(for: move.endPlace, fallback: "Unknown destination", privacyZones: privacyZones),
                 ]
 
                 if let stepCount = move.stepCount {
@@ -1317,12 +1330,12 @@ enum TimelineExporter {
         )
     }
 
-    private static func csvData(for days: [DayTimeline]) -> Data? {
+    private static func csvData(for days: [DayTimeline], privacyZones: [PrivacyZone]) -> Data? {
         var rows: [String] = []
         rows.append("record_type,start_time,end_time,title,day_key,transport_mode,distance_meters,step_count,latitude,longitude,comment")
 
         for day in days {
-            for place in day.places.sorted(by: { $0.arrivalDate < $1.arrivalDate }) {
+            for place in day.places.sorted(by: { $0.arrivalDate < $1.arrivalDate }) where !isHidden(place, privacyZones: privacyZones) {
                 rows.append(
                     [
                         "place",
@@ -1341,7 +1354,7 @@ enum TimelineExporter {
             }
 
             for move in day.moves.sorted(by: { $0.timelineStartDate < $1.timelineStartDate }) {
-                let title = "\(move.startPlace?.displayTitle ?? "Unknown start") to \(move.endPlace?.displayTitle ?? "Unknown destination")"
+                let title = moveTitle(for: move, privacyZones: privacyZones)
                 rows.append(
                     [
                         "move",
@@ -1370,7 +1383,7 @@ enum TimelineExporter {
         var points: [TimelineTrackPoint] = []
         points.reserveCapacity(move.samples.count + 2)
 
-        if let startPlace = move.startPlace {
+        if let startPlace = move.startPlace, !isHidden(startPlace, privacyZones: privacyZones) {
             points.append(
                 TimelineTrackPoint(
                     latitude: startPlace.latitude,
@@ -1402,7 +1415,7 @@ enum TimelineExporter {
             )
         }
 
-        if let endPlace = move.endPlace {
+        if let endPlace = move.endPlace, !isHidden(endPlace, privacyZones: privacyZones) {
             points.append(
                 TimelineTrackPoint(
                     latitude: endPlace.latitude,
@@ -1454,6 +1467,34 @@ enum TimelineExporter {
                 timestamp: startDate.addingTimeInterval(duration * fraction)
             )
         }
+    }
+
+    /// True when a place sits inside a privacy zone, so exports must not reveal where it is.
+    private static func isHidden(_ place: VisitPlace, privacyZones: [PrivacyZone]) -> Bool {
+        PrivacyZoneResolver.containsRawFix(
+            latitude: place.latitude,
+            longitude: place.longitude,
+            zones: privacyZones
+        )
+    }
+
+    /// A place's title can be its coordinates or street, so a hidden place goes by Home or Work.
+    private static func exportTitle(
+        for place: VisitPlace?,
+        fallback: String,
+        privacyZones: [PrivacyZone]
+    ) -> String {
+        guard let place else { return fallback }
+        if let zone = privacyZones.first(where: { $0.contains(place.coordinate) }) {
+            return zone.category.title
+        }
+        return place.displayTitle
+    }
+
+    private static func moveTitle(for move: MoveSegment, privacyZones: [PrivacyZone]) -> String {
+        let start = exportTitle(for: move.startPlace, fallback: "Unknown start", privacyZones: privacyZones)
+        let end = exportTitle(for: move.endPlace, fallback: "Unknown destination", privacyZones: privacyZones)
+        return "\(start) to \(end)"
     }
 
     private static func dedupeSequentialPoints(in points: [TimelineTrackPoint]) -> [TimelineTrackPoint] {

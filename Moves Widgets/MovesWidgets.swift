@@ -42,14 +42,14 @@ struct MovesAppIntentWidgetProvider: AppIntentTimelineProvider {
         for configuration: MovesTodayConfigurationIntent,
         in context: Context
     ) async -> Timeline<MovesWidgetEntry> {
-        let entry = MovesWidgetEntry(
-            date: .now,
-            snapshot: TimelineWidgetSnapshotStore.load(),
-            showsTransportBreakdown: configuration.showsTransportBreakdown
-        )
         let nextRefresh = Calendar.current.date(byAdding: .minute, value: 20, to: .now)
             ?? .now.addingTimeInterval(20 * 60)
-        return Timeline(entries: [entry], policy: .after(nextRefresh))
+        return Timeline(
+            entries: MovesWidgetEntry.timelineEntries(
+                showsTransportBreakdown: configuration.showsTransportBreakdown
+            ),
+            policy: .after(nextRefresh)
+        )
     }
 }
 

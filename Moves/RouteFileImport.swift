@@ -1,4 +1,5 @@
 import CoreLocation
+import CryptoKit
 import Foundation
 import SwiftData
 import SwiftUI
@@ -12,12 +13,20 @@ struct RouteFileImportReport {
     /// Tracks without usable timestamps that were stored as one route each.
     var untimedRouteCount: Int
     var untimedSampleCount: Int
+    /// GPX files that broke off partway, so only the part before the break was read.
+    var incompleteFileNames: [String] = []
 
     var summary: String {
         var text = log.summary
         if untimedRouteCount > 0 {
             text += " \(untimedRouteCount) track\(untimedRouteCount == 1 ? "" : "s") without timestamps"
             text += " \(untimedRouteCount == 1 ? "was" : "were") stored as plain route\(untimedRouteCount == 1 ? "" : "s") (\(untimedSampleCount) points)."
+        }
+        if !incompleteFileNames.isEmpty {
+            let names = ListFormatter.localizedString(byJoining: incompleteFileNames)
+            text += incompleteFileNames.count == 1
+                ? " \(names) was incomplete, so only the readable part was imported."
+                : " \(names) were incomplete, so only the readable parts were imported."
         }
         return text
     }
@@ -145,6 +154,7 @@ final class RouteFileImporter: ObservableObject {
             }.value
 
             report.fileCount = securityScopedURLs.count
+            report.incompleteFileNames = parsed.incompleteFileNames
             NotificationCenter.default.post(name: .movesLocationSamplesDidChange, object: nil)
             lastReport = report
             lastErrorMessage = nil
@@ -166,16 +176,21 @@ final class RouteFileImporter: ObservableObject {
     fileprivate struct ParsedFiles {
         var timedGroups: [TimedGroup]
         var untimedTracks: [ImportedRouteTrack]
+        var incompleteFileNames: [String]
     }
 
     nonisolated private static func parse(_ payloads: [(name: String, data: Data)]) throws -> ParsedFiles {
         var groups: [TransportMode: [LocationLogPoint]] = [:]
         var untimed: [ImportedRouteTrack] = []
+        var incomplete: [String] = []
 
         for payload in payloads {
             let fileMode = inferTransportMode(from: payload.name)
             if payload.name.lowercased().hasSuffix(".gpx") {
                 let result = try LocationLogGPXParser.parse(data: payload.data)
+                if result.isIncomplete {
+                    incomplete.append(payload.name)
+                }
                 if !result.points.isEmpty {
                     groups[fileMode, default: []].append(contentsOf: result.points)
                     continue
@@ -194,7 +209,7 @@ final class RouteFileImporter: ObservableObject {
         let timedGroups = groups
             .map { TimedGroup(transportMode: $0.key, points: $0.value) }
             .sorted { $0.transportMode.rawValue < $1.transportMode.rawValue }
-        return ParsedFiles(timedGroups: timedGroups, untimedTracks: untimed)
+        return ParsedFiles(timedGroups: timedGroups, untimedTracks: untimed, incompleteFileNames: incomplete)
     }
 
     nonisolated private static func readSecurityScopedData(from url: URL) throws -> Data {
@@ -209,20 +224,21 @@ final class RouteFileImporter: ObservableObject {
 
     nonisolated private static func loadTracks(named fileName: String, data: Data) throws -> [ImportedRouteTrack] {
         let lowercasedName = fileName.lowercased()
+        let untimedStart = UntimedTrackDates.start(for: data)
         if lowercasedName.hasSuffix(".gpx") || lowercasedName.hasSuffix(".tcx") || lowercasedName.hasSuffix(".kml") {
-            return try XMLRouteTrackParser.parse(data: data, fileName: fileName)
+            return try XMLRouteTrackParser.parse(data: data, fileName: fileName, untimedStart: untimedStart)
         }
 
         if lowercasedName.hasSuffix(".geojson") || lowercasedName.hasSuffix(".json") {
-            return try GeoJSONRouteTrackParser.parse(data: data, fileName: fileName)
+            return try GeoJSONRouteTrackParser.parse(data: data, fileName: fileName, untimedStart: untimedStart)
         }
 
         // Last resort: try XML first, then GeoJSON.
-        if let xmlTracks = try? XMLRouteTrackParser.parse(data: data, fileName: fileName),
+        if let xmlTracks = try? XMLRouteTrackParser.parse(data: data, fileName: fileName, untimedStart: untimedStart),
            !xmlTracks.isEmpty {
             return xmlTracks
         }
-        if let geoJSONTracks = try? GeoJSONRouteTrackParser.parse(data: data, fileName: fileName),
+        if let geoJSONTracks = try? GeoJSONRouteTrackParser.parse(data: data, fileName: fileName, untimedStart: untimedStart),
            !geoJSONTracks.isEmpty {
             return geoJSONTracks
         }
@@ -425,8 +441,26 @@ struct ImportedRouteTrack {
     let hasRecordedTimestamps: Bool
 }
 
+/// Tracks without timestamps need times that repeat, or importing the same file again would
+/// add every point a second time. The first import of a file fixes its start time.
+private enum UntimedTrackDates {
+    private static let storageKey = "Moves.routeFileImport.untimedTrackStarts"
+
+    static func start(for data: Data, defaults: UserDefaults = .standard) -> Date {
+        let fileKey = Data(SHA256.hash(data: data)).base64EncodedString()
+        var starts = defaults.dictionary(forKey: storageKey) ?? [:]
+        if let known = starts[fileKey] as? Date {
+            return known
+        }
+        let now = Date.now
+        starts[fileKey] = now
+        defaults.set(starts, forKey: storageKey)
+        return now
+    }
+}
+
 private enum GeoJSONRouteTrackParser {
-    static func parse(data: Data, fileName: String) throws -> [ImportedRouteTrack] {
+    static func parse(data: Data, fileName: String, untimedStart: Date) throws -> [ImportedRouteTrack] {
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return []
         }
@@ -439,29 +473,29 @@ private enum GeoJSONRouteTrackParser {
             for feature in features {
                 guard let geometry = feature["geometry"] as? [String: Any],
                       let geometryType = geometry["type"] as? String else { continue }
-                tracks.append(contentsOf: parseGeometry(geometry, type: geometryType, transportMode: mode))
+                tracks.append(contentsOf: parseGeometry(geometry, type: geometryType, transportMode: mode, start: untimedStart))
             }
             return tracks
         }
 
         if let type = object["type"] as? String {
-            tracks.append(contentsOf: parseGeometry(object, type: type, transportMode: mode))
+            tracks.append(contentsOf: parseGeometry(object, type: type, transportMode: mode, start: untimedStart))
         }
 
         return tracks
     }
 
-    private static func parseGeometry(_ geometry: [String: Any], type: String, transportMode: TransportMode) -> [ImportedRouteTrack] {
+    private static func parseGeometry(_ geometry: [String: Any], type: String, transportMode: TransportMode, start: Date) -> [ImportedRouteTrack] {
         switch type {
         case "LineString":
-            let locations = locationsFromCoordinates(geometry["coordinates"])
+            let locations = locationsFromCoordinates(geometry["coordinates"], start: start)
             return locations.count >= 2
                 ? [ImportedRouteTrack(locations: locations, transportMode: transportMode, hasRecordedTimestamps: false)]
                 : []
         case "MultiLineString":
             guard let lines = geometry["coordinates"] as? [[[Double]]] else { return [] }
             return lines.compactMap { line in
-                let locations = locationsFromLine(line)
+                let locations = locationsFromLine(line, start: start)
                 return locations.count >= 2
                     ? ImportedRouteTrack(locations: locations, transportMode: transportMode, hasRecordedTimestamps: false)
                     : nil
@@ -471,14 +505,13 @@ private enum GeoJSONRouteTrackParser {
         }
     }
 
-    private static func locationsFromCoordinates(_ coordinates: Any?) -> [CLLocation] {
+    private static func locationsFromCoordinates(_ coordinates: Any?, start: Date) -> [CLLocation] {
         guard let line = coordinates as? [[Double]] else { return [] }
-        return locationsFromLine(line)
+        return locationsFromLine(line, start: start)
     }
 
-    private static func locationsFromLine(_ line: [[Double]]) -> [CLLocation] {
-        let start = Date()
-        return line.enumerated().compactMap { index, point in
+    private static func locationsFromLine(_ line: [[Double]], start: Date) -> [CLLocation] {
+        line.enumerated().compactMap { index, point in
             guard point.count >= 2 else { return nil }
             let timestamp = start.addingTimeInterval(TimeInterval(index))
             let altitude = point.count > 2 ? point[2] : 0
@@ -505,16 +538,17 @@ private final class XMLRouteTrackParser: NSObject, XMLParserDelegate {
     private var currentTimestamp: Date?
     private var currentElement = ""
     private var currentText = ""
-    private var fallbackTimestamp = Date()
+    private var fallbackTimestamp: Date
     private let transportMode: TransportMode
 
-    init(fileName: String) {
+    init(fileName: String, untimedStart: Date) {
         self.transportMode = inferTransportMode(from: fileName)
+        self.fallbackTimestamp = untimedStart
     }
 
-    static func parse(data: Data, fileName: String) throws -> [ImportedRouteTrack] {
+    static func parse(data: Data, fileName: String, untimedStart: Date) throws -> [ImportedRouteTrack] {
         let parser = XMLParser(data: data)
-        let delegate = XMLRouteTrackParser(fileName: fileName)
+        let delegate = XMLRouteTrackParser(fileName: fileName, untimedStart: untimedStart)
         parser.delegate = delegate
         guard parser.parse() else {
             if let error = parser.parserError {
@@ -560,7 +594,8 @@ private final class XMLRouteTrackParser: NSObject, XMLParserDelegate {
             currentTimestamp = nil
         }
 
-        if elementName == "Trackpoint" || elementName == "Position" {
+        // Not on `Position`: a TCX `Trackpoint` puts its `Time` before its `Position`.
+        if elementName == "Trackpoint" {
             currentCoordinate = nil
             currentAltitude = nil
             currentTimestamp = nil
@@ -710,29 +745,31 @@ private extension ISO8601DateFormatter {
 }
 
 private func inferTransportMode(from fileName: String) -> TransportMode {
-    let name = fileName.lowercased()
-    if name.contains("run") || name.contains("jog") {
+    // Whole words only, so "Carolina" is not a car trip and "Liverpool" is not a swim.
+    let words = Set(fileName.lowercased().components(separatedBy: CharacterSet.letters.inverted))
+    func named(_ candidates: String...) -> Bool { !words.isDisjoint(with: candidates) }
+    if named("run", "runs", "running", "jog", "jogging") {
         return .running
     }
-    if name.contains("ride") || name.contains("bike") || name.contains("cycle") {
+    if named("ride", "rides", "riding", "bike", "biking", "cycle", "cycling") {
         return .cycling
     }
-    if name.contains("swim") || name.contains("pool") || name.contains("openwater") {
+    if named("swim", "swims", "swimming", "pool", "openwater") {
         return .swimming
     }
-    if name.contains("walk") || name.contains("hike") {
+    if named("walk", "walks", "walking", "hike", "hikes", "hiking") {
         return .walking
     }
-    if name.contains("train") {
+    if named("train", "trains") {
         return .train
     }
-    if name.contains("boat") || name.contains("ferry") {
+    if named("boat", "ferry") {
         return .boat
     }
-    if name.contains("flight") || name.contains("plane") {
+    if named("flight", "flights", "plane") {
         return .plane
     }
-    if name.contains("drive") || name.contains("car") {
+    if named("drive", "drives", "driving", "car") {
         return .automotive
     }
     return .unknown

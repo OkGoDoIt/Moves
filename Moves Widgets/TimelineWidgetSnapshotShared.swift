@@ -158,6 +158,31 @@ struct TimelineWidgetSnapshot: Codable, Hashable {
     var primaryTransportMetric: TimelineWidgetTransportMetric? {
         transportMetrics.max { $0.distanceMeters < $1.distanceMeters }
     }
+
+    /// Same `yyyy-MM-dd` key as `DayTimeline.makeDayKey`, which these targets can't see.
+    static func dayKey(for date: Date, calendar: Calendar = .current) -> String {
+        var gregorian = Calendar(identifier: .gregorian)
+        gregorian.timeZone = calendar.timeZone
+        let parts = gregorian.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
+    }
+
+    /// This snapshot if it describes the day of `now`. Otherwise an empty day, so yesterday's
+    /// numbers never read as today's when the app hasn't published yet.
+    func forDisplay(now: Date, calendar: Calendar = .current) -> TimelineWidgetSnapshot {
+        let todayKey = Self.dayKey(for: now, calendar: calendar)
+        guard dayKey != todayKey else { return self }
+        return TimelineWidgetSnapshot(
+            generatedAt: now,
+            dayKey: todayKey,
+            dayTitle: now.formatted(.dateTime.weekday(.wide).day().month(.abbreviated)),
+            totalDistanceMeters: 0,
+            visitedLocationCount: 0,
+            moveCount: 0,
+            transportMetrics: [],
+            routePoints: []
+        )
+    }
 }
 
 /// Fits today's route into a widget rectangle without map tiles.
@@ -198,7 +223,7 @@ enum WidgetRouteLayout {
 enum TimelineWidgetSnapshotStore {
     private static let decoder = JSONDecoder()
 
-    static func load() -> TimelineWidgetSnapshot {
+    static func load(now: Date = .now, calendar: Calendar = .current) -> TimelineWidgetSnapshot {
         guard let data = MovesWidgetSharedStore.userDefaults.data(
             forKey: MovesWidgetSharedStore.snapshotKey
         ),
@@ -206,6 +231,6 @@ enum TimelineWidgetSnapshotStore {
             return .placeholder
         }
 
-        return snapshot
+        return snapshot.forDisplay(now: now, calendar: calendar)
     }
 }

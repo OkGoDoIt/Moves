@@ -93,53 +93,36 @@ enum MovesZipArchive {
     }
 
     /// Reads stored and DEFLATE members. Directory entries and Finder metadata are skipped.
+    ///
+    /// Sizes and checksums come from the central directory, because streaming zips such as
+    /// `ditto -c -k` leave them at zero in the local headers. A member that does not match
+    /// its recorded size and checksum is treated as damage, never returned as partial data.
     static func unpack(_ data: Data) throws -> [MovesZipFile] {
-        var offset = 0
+        let directory = try endOfCentralDirectory(in: data)
+        var offset = directory.centralDirectoryOffset
         var files: [MovesZipFile] = []
 
-        while offset + 4 <= data.count {
-            let signature = try readUInt32(data, at: &offset)
-            if signature == centralDirectorySignature || signature == endOfCentralDirectorySignature {
-                break
-            }
-            guard signature == localFileHeaderSignature else {
+        for _ in 0..<directory.entryCount {
+            guard try readUInt32(data, at: &offset) == centralDirectorySignature else {
                 throw MovesZipArchiveError.truncated
             }
-
-            offset += 2 // version
-            let flags = try readUInt16(data, at: &offset)
+            try skip(data, at: &offset, count: 6) // versions, flags
             let method = try readUInt16(data, at: &offset)
-            offset += 4 // mod time/date
-            _ = try readUInt32(data, at: &offset) // crc
+            try skip(data, at: &offset, count: 4) // mod time/date
+            let crc = try readUInt32(data, at: &offset)
             let compressedSize = Int(try readUInt32(data, at: &offset))
             let uncompressedSize = Int(try readUInt32(data, at: &offset))
             let nameLength = Int(try readUInt16(data, at: &offset))
             let extraLength = Int(try readUInt16(data, at: &offset))
-
+            let commentLength = Int(try readUInt16(data, at: &offset))
+            try skip(data, at: &offset, count: 8) // disk, attributes
+            let localHeaderOffset = Int(try readUInt32(data, at: &offset))
             let name = try readString(data, at: &offset, length: nameLength)
-            try skip(data, at: &offset, count: extraLength)
-
-            let usesDataDescriptor = flags & 0x8 != 0
-            let payloadLength: Int
-            if compressedSize > 0 || !usesDataDescriptor {
-                payloadLength = compressedSize
-            } else {
-                throw MovesZipArchiveError.truncated
-            }
-
-            let payload = try readData(data, at: &offset, length: payloadLength)
-            if usesDataDescriptor {
-                if offset + 4 <= data.count {
-                    let peek = peekUInt32(data, at: offset)
-                    if peek == 0x08074b50 {
-                        offset += 4
-                    }
-                }
-                try skip(data, at: &offset, count: 12)
-            }
+            try skip(data, at: &offset, count: extraLength + commentLength)
 
             if shouldSkip(path: name) { continue }
 
+            let payload = try memberPayload(data, atLocalHeader: localHeaderOffset, length: compressedSize)
             let fileData: Data
             switch method {
             case storeMethod:
@@ -148,6 +131,9 @@ enum MovesZipArchive {
                 fileData = try inflateRaw(payload, expectedSize: uncompressedSize)
             default:
                 throw MovesZipArchiveError.unsupportedCompression(method)
+            }
+            guard fileData.count == uncompressedSize, crc32Checksum(of: fileData) == crc else {
+                throw MovesZipArchiveError.truncated
             }
 
             files.append(MovesZipFile(path: name, data: fileData))
@@ -159,6 +145,37 @@ enum MovesZipArchive {
         return files
     }
 
+    private static func endOfCentralDirectory(in data: Data) throws -> (entryCount: Int, centralDirectoryOffset: Int) {
+        let minimumLength = 22
+        guard data.count >= minimumLength else { throw MovesZipArchiveError.truncated }
+        let earliest = max(data.count - minimumLength - Int(UInt16.max), 0)
+        var index = data.count - minimumLength
+        while index >= earliest {
+            if peekUInt32(data, at: index) == endOfCentralDirectorySignature {
+                var offset = index + 10
+                let entryCount = Int(try readUInt16(data, at: &offset))
+                offset += 4 // central directory size
+                let centralDirectoryOffset = Int(try readUInt32(data, at: &offset))
+                return (entryCount, centralDirectoryOffset)
+            }
+            index -= 1
+        }
+        throw MovesZipArchiveError.truncated
+    }
+
+    /// The local header's name and extra lengths can differ from the central directory's.
+    private static func memberPayload(_ data: Data, atLocalHeader headerOffset: Int, length: Int) throws -> Data {
+        var offset = headerOffset
+        guard try readUInt32(data, at: &offset) == localFileHeaderSignature else {
+            throw MovesZipArchiveError.truncated
+        }
+        try skip(data, at: &offset, count: 22) // version through sizes
+        let nameLength = Int(try readUInt16(data, at: &offset))
+        let extraLength = Int(try readUInt16(data, at: &offset))
+        try skip(data, at: &offset, count: nameLength + extraLength)
+        return try readData(data, at: &offset, length: length)
+    }
+
     /// True when `data` looks like a PKZIP archive.
     static func isZip(_ data: Data) -> Bool {
         guard data.count >= 4 else { return false }
@@ -166,9 +183,9 @@ enum MovesZipArchive {
     }
 
     private static func shouldSkip(path: String) -> Bool {
+        if path.hasSuffix("/") { return true }
         let trimmed = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         if trimmed.isEmpty { return true }
-        if trimmed.hasSuffix("/") { return true }
         let last = (trimmed as NSString).lastPathComponent
         if last == ".DS_Store" || last.hasPrefix("._") { return true }
         if trimmed.hasPrefix("__MACOSX") { return true }
@@ -239,7 +256,7 @@ enum MovesZipArchive {
         appendUInt16(&data, 0)
     }
 
-    private static func crc32Checksum(of data: Data) -> UInt32 {
+    static func crc32Checksum(of data: Data) -> UInt32 {
         data.withUnsafeBytes { raw in
             let bytes = raw.bindMemory(to: UInt8.self)
             return UInt32(zlib.crc32(0, bytes.baseAddress, uInt(bytes.count)))
@@ -263,7 +280,7 @@ enum MovesZipArchive {
         defer { inflateEnd(&stream) }
 
         var output = Data()
-        output.reserveCapacity(max(expectedSize, input.count * 2))
+        output.reserveCapacity(min(max(expectedSize, input.count * 2), 64 * 1024 * 1024))
         let chunk = 64 * 1024
         var status = Z_OK
 
@@ -288,11 +305,8 @@ enum MovesZipArchive {
                 if produced > 0 {
                     output.append(contentsOf: buffer.prefix(produced))
                 }
-                if expectedSize > 0, output.count > max(expectedSize, 1) * 4 {
+                if output.count > expectedSize {
                     throw MovesZipArchiveError.inflateFailed
-                }
-                if stream.avail_in == 0, status != Z_STREAM_END {
-                    break
                 }
             }
         }

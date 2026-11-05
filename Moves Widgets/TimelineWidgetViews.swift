@@ -15,6 +15,29 @@ struct MovesWidgetEntry: TimelineEntry {
         self.snapshot = snapshot
         self.showsTransportBreakdown = showsTransportBreakdown
     }
+
+    /// An entry for now and one for midnight, so a widget the system hasn't reloaded yet
+    /// doesn't carry yesterday's numbers into the new day.
+    static func timelineEntries(
+        now: Date = .now,
+        calendar: Calendar = .current,
+        showsTransportBreakdown: Bool = true
+    ) -> [MovesWidgetEntry] {
+        let current = MovesWidgetEntry(
+            date: now,
+            snapshot: TimelineWidgetSnapshotStore.load(now: now, calendar: calendar),
+            showsTransportBreakdown: showsTransportBreakdown
+        )
+        guard let midnight = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: now)) else {
+            return [current]
+        }
+        let nextDay = MovesWidgetEntry(
+            date: midnight,
+            snapshot: TimelineWidgetSnapshotStore.load(now: midnight, calendar: calendar),
+            showsTransportBreakdown: showsTransportBreakdown
+        )
+        return [current, nextDay]
+    }
 }
 
 struct MovesWidgetProvider: TimelineProvider {
@@ -27,9 +50,8 @@ struct MovesWidgetProvider: TimelineProvider {
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<MovesWidgetEntry>) -> Void) {
-        let entry = MovesWidgetEntry(date: .now, snapshot: TimelineWidgetSnapshotStore.load())
         let nextRefresh = Calendar.current.date(byAdding: .minute, value: 20, to: .now) ?? .now.addingTimeInterval(20 * 60)
-        completion(Timeline(entries: [entry], policy: .after(nextRefresh)))
+        completion(Timeline(entries: MovesWidgetEntry.timelineEntries(), policy: .after(nextRefresh)))
     }
 }
 

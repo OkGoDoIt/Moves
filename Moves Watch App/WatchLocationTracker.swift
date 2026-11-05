@@ -30,6 +30,7 @@ private struct WatchLocationSamplePayload: Codable {
 }
 
 private struct WatchTimelineWidgetSnapshot: Codable {
+    let dayKey: String
     let dayTitle: String
     let totalDistanceMeters: Double
     let visitedLocationCount: Int
@@ -53,12 +54,15 @@ struct WatchDaySummary {
     let visitedLocationCount: Int
     let moveCount: Int
 
-    static let placeholder = WatchDaySummary(
-        dayTitle: Date.now.formatted(.dateTime.weekday(.wide).day().month(.abbreviated)),
-        totalDistanceMeters: 0,
-        visitedLocationCount: 0,
-        moveCount: 0
-    )
+    /// An empty today, worked out fresh so it stays right past midnight.
+    static var placeholder: WatchDaySummary {
+        WatchDaySummary(
+            dayTitle: Date.now.formatted(.dateTime.weekday(.wide).day().month(.abbreviated)),
+            totalDistanceMeters: 0,
+            visitedLocationCount: 0,
+            moveCount: 0
+        )
+    }
 }
 
 /// One same-color polyline on the Watch map.
@@ -129,6 +133,7 @@ final class WatchLocationTracker: NSObject, ObservableObject {
     private var activeStartedAt: Date?
     private var syncedRouteCoordinates: [CLLocationCoordinate2D] = []
     private var syncedRoutePoints: [WatchTimelineRoutePoint] = []
+    private var summaryDayKey = ""
 
     override init() {
         super.init()
@@ -152,6 +157,11 @@ final class WatchLocationTracker: NSObject, ObservableObject {
         manager.startUpdatingLocation()
         statusText = "Lower-power changes"
         refreshDaySummary()
+        refreshTodayRouteCoordinates()
+    }
+
+    /// Catches up when the watch app returns to the foreground, possibly on a new day.
+    func refreshToday() {
         refreshTodayRouteCoordinates()
     }
 
@@ -274,9 +284,20 @@ final class WatchLocationTracker: NSObject, ObservableObject {
         )) ?? []
     }
 
+    /// Same `yyyy-MM-dd` key the phone stamps on its snapshot.
+    private static func dayKey(for date: Date) -> String {
+        var gregorian = Calendar(identifier: .gregorian)
+        gregorian.timeZone = .current
+        let parts = gregorian.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
+    }
+
     private func refreshDaySummary() {
+        let todayKey = Self.dayKey(for: .now)
+        summaryDayKey = todayKey
         guard let data = WatchWidgetSharedStore.userDefaults.data(forKey: WatchWidgetSharedStore.snapshotKey),
-              let snapshot = try? decoder.decode(WatchTimelineWidgetSnapshot.self, from: data) else {
+              let snapshot = try? decoder.decode(WatchTimelineWidgetSnapshot.self, from: data),
+              snapshot.dayKey == todayKey else {
             daySummary = .placeholder
             syncedRouteCoordinates = []
             syncedRoutePoints = []
@@ -294,6 +315,10 @@ final class WatchLocationTracker: NSObject, ObservableObject {
     }
 
     private func refreshTodayRouteCoordinates() {
+        if summaryDayKey != Self.dayKey(for: .now) {
+            refreshDaySummary()
+        }
+
         let calendar = Calendar.current
         let startOfDay = calendar.startOfDay(for: .now)
         guard let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay) else {

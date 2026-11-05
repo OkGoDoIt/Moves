@@ -514,7 +514,9 @@ enum GoogleTimelineParser {
     ) -> LocationLogStay? {
         let candidate = visit["topCandidate"] as? [String: Any] ?? visit
         let placeLocation = candidate["placeLocation"] as? [String: Any] ?? candidate
-        guard let coordinate = GoogleTimelineCoordinates.coordinate(from: placeLocation) else {
+        // The iOS export writes `placeLocation` as a bare "geo:" string.
+        guard let coordinate = GoogleTimelineCoordinates.coordinate(from: placeLocation)
+                ?? GoogleTimelineCoordinates.parseLatLng(candidate["placeLocation"] as? String) else {
             return nil
         }
         var points = path
@@ -619,8 +621,25 @@ enum GoogleTimelineParser {
 
     /// Prefer `rawSignals` as the sample stream when the on-device export included them.
     private static func applyRawSignals(_ rawPoints: [LocationLogPoint], to draft: inout GoogleTimelineDraft) {
+        // `rawPoints` is sorted by time, so find the first fix and read on from there.
         func points(in start: Date, _ end: Date) -> [LocationLogPoint] {
-            rawPoints.filter { $0.timestamp >= start && $0.timestamp <= end }
+            var low = 0
+            var high = rawPoints.count
+            while low < high {
+                let middle = (low + high) / 2
+                if rawPoints[middle].timestamp < start {
+                    low = middle + 1
+                } else {
+                    high = middle
+                }
+            }
+            var overlay: [LocationLogPoint] = []
+            var index = low
+            while index < rawPoints.count, rawPoints[index].timestamp <= end {
+                overlay.append(rawPoints[index])
+                index += 1
+            }
+            return overlay
         }
         draft.stays = draft.stays.map { stay in
             let overlay = points(in: stay.arrivalDate, stay.departureDate)
@@ -857,11 +876,13 @@ enum GoogleTimelineTime {
         return nil
     }
 
+    /// Bounded at about the year 2100, because later code turns these into whole day numbers
+    /// and a value like `1e300` would trap.
     private static func fromEpochNumber(_ value: Double) -> Date? {
-        if value > 1_000_000_000_000 {
+        if value > 1_000_000_000_000, value < 4_102_444_800_000 {
             return Date(timeIntervalSince1970: value / 1_000)
         }
-        if value > 1_000_000_000 {
+        if value > 1_000_000_000, value < 4_102_444_800 {
             return Date(timeIntervalSince1970: value)
         }
         return nil

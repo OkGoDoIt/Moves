@@ -116,11 +116,14 @@ struct TimelineArchiveImportReport {
 enum TimelineArchiveImportError: LocalizedError {
     case noFiles
     case noTimelineData
+    case unreadableFile(String)
 
     var errorDescription: String? {
         switch self {
         case .noFiles:
             return "No files selected."
+        case .unreadableFile(let reason):
+            return reason.hasSuffix(".") ? reason : reason + "."
         case .noTimelineData:
             return "No Moves timeline data was found in the selected files. Export All Days as GPX, GeoJSON, and CSV from the other Moves app, then select those files together."
         }
@@ -139,6 +142,11 @@ enum TimelineArchiveFileParser {
     static func parse(fileName: String, data: Data) -> Result<TimelineArchive, TimelineArchiveParseError> {
         let trimmedName = fileName.trimmingCharacters(in: .whitespacesAndNewlines)
         let lowercased = trimmedName.lowercased()
+
+        // `expandZipMembers` only leaves a zip here when it could not be opened.
+        if lowercased.hasSuffix(".zip") || MovesZipArchive.isZip(data) {
+            return .failure(TimelineArchiveParseError(message: "\(trimmedName) could not be opened. It may be damaged or incomplete."))
+        }
 
         if lowercased.hasSuffix(".gpx") {
             return parseGPX(data, fileName: trimmedName)
@@ -276,7 +284,7 @@ enum TimelineArchiveFileParser {
         }
 
         let mode = parseTransportMode(stringValue(properties["transport_mode"])) ?? .unknown
-        let distance = doubleValue(properties["distance_meters"])
+        let distance = distanceValue(properties["distance_meters"])
         let steps = intValue(properties["step_count"])
         let comment = nonempty(stringValue(properties["comment"]))
         let dayKey = nonempty(stringValue(properties["day_key"]))
@@ -307,13 +315,13 @@ enum TimelineArchiveFileParser {
             return .failure(TimelineArchiveParseError(message: "CSV file is not valid UTF-8"))
         }
 
-        let lines = text.split(whereSeparator: \.isNewline).map(String.init).filter { !$0.isEmpty }
+        let lines = csvRecords(in: text)
         guard let headerLine = lines.first else {
             return .failure(TimelineArchiveParseError(message: "CSV file is empty"))
         }
 
         let header = parseCSVLine(headerLine).map { $0.lowercased() }
-        let columns = Dictionary(uniqueKeysWithValues: header.enumerated().map { ($1, $0) })
+        let columns = Dictionary(header.enumerated().map { ($1, $0) }, uniquingKeysWith: { first, _ in first })
         let rows = lines.dropFirst()
 
         var places: [TimelineArchivePlace] = []
@@ -361,7 +369,7 @@ enum TimelineArchiveFileParser {
                         startDate: startDate,
                         endDate: max(endDate, startDate),
                         transportMode: parseTransportMode(field("transport_mode")) ?? .unknown,
-                        distanceMeters: doubleValue(field("distance_meters")),
+                        distanceMeters: distanceValue(field("distance_meters")),
                         stepCount: intValue(field("step_count")),
                         startPlaceTitle: titles?.start,
                         endPlaceTitle: titles?.end,
@@ -800,6 +808,9 @@ final class TimelineArchiveImporter: ObservableObject {
             }.value
 
             guard !parsed.archive.isEmpty else {
+                if let reason = parsed.warnings.first {
+                    throw TimelineArchiveImportError.unreadableFile(reason)
+                }
                 throw TimelineArchiveImportError.noTimelineData
             }
 
@@ -1150,15 +1161,17 @@ private func shouldInferTransportMode(from fileName: String) -> Bool {
 }
 
 private func inferredTransportMode(from fileName: String) -> TransportMode? {
-    let name = fileName.lowercased()
-    if name.contains("run") || name.contains("jog") { return .running }
-    if name.contains("ride") || name.contains("bike") || name.contains("cycle") { return .cycling }
-    if name.contains("swim") { return .swimming }
-    if name.contains("walk") || name.contains("hike") { return .walking }
-    if name.contains("train") { return .train }
-    if name.contains("boat") || name.contains("ferry") { return .boat }
-    if name.contains("flight") || name.contains("plane") { return .plane }
-    if name.contains("drive") || name.contains("car") { return .automotive }
+    // Whole words only, so "Carolina" is not a car trip and "Brunswick" is not a run.
+    let words = Set(fileName.lowercased().components(separatedBy: CharacterSet.letters.inverted))
+    func named(_ candidates: String...) -> Bool { !words.isDisjoint(with: candidates) }
+    if named("run", "runs", "running", "jog", "jogging") { return .running }
+    if named("ride", "rides", "riding", "bike", "biking", "cycle", "cycling") { return .cycling }
+    if named("swim", "swims", "swimming") { return .swimming }
+    if named("walk", "walks", "walking", "hike", "hikes", "hiking") { return .walking }
+    if named("train", "trains") { return .train }
+    if named("boat", "ferry") { return .boat }
+    if named("flight", "flights", "plane") { return .plane }
+    if named("drive", "drives", "driving", "car") { return .automotive }
     return nil
 }
 
@@ -1222,6 +1235,15 @@ private func doubleValue(_ value: Any?) -> Double? {
     }
 }
 
+/// A distance only when it could be real. Nothing on Earth is a billion meters, and a
+/// huge value in a damaged file would trap where the importer rounds it to an `Int`.
+private func distanceValue(_ value: Any?) -> Double? {
+    guard let distance = doubleValue(value), distance >= 0, distance <= 1_000_000_000 else {
+        return nil
+    }
+    return distance
+}
+
 private func intValue(_ value: Any?) -> Int? {
     switch value {
     case let number as NSNumber:
@@ -1249,6 +1271,30 @@ private func stripUTF8BOM(_ data: Data) -> Data {
         return data.dropFirst(3)
     }
     return data
+}
+
+/// Splits CSV text into rows, keeping line breaks that sit inside quoted fields.
+private func csvRecords(in text: String) -> [String] {
+    var records: [String] = []
+    var current = ""
+    var inQuotes = false
+    for character in text {
+        if character == "\"" {
+            inQuotes.toggle()
+        }
+        if character.isNewline, !inQuotes {
+            if !current.isEmpty {
+                records.append(current)
+            }
+            current = ""
+        } else {
+            current.append(character)
+        }
+    }
+    if !current.isEmpty {
+        records.append(current)
+    }
+    return records
 }
 
 private func parseCSVLine(_ line: String) -> [String] {

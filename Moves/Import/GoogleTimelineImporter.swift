@@ -12,6 +12,8 @@ struct GoogleTimelineImportReport: Sendable {
     var recordsSkippedAsDuplicate = 0
     var skippedSegmentCount = 0
     var formats: Set<GoogleTimelineFormat> = []
+    /// True when a Records.json ended before its `locations` array did.
+    var recordsWereIncomplete = false
 
     var summary: String {
         var text = log.summary
@@ -24,6 +26,9 @@ struct GoogleTimelineImportReport: Sendable {
         }
         if skippedSegmentCount > 0 {
             text += " Ignored \(skippedSegmentCount) empty activity segment\(skippedSegmentCount == 1 ? "" : "s")."
+        }
+        if recordsWereIncomplete {
+            text += " Records.json was incomplete, so only the readable part was imported."
         }
         return text
     }
@@ -198,9 +203,11 @@ enum GoogleTimelineSourceCollector {
             .appendingPathComponent("moves-google-timeline-\(UUID().uuidString)", isDirectory: true)
         try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
         collected.temporaryDirectory = tempRoot
+        // One folder per zip, because two zips can hold members with the same index and name.
+        let zipFolder = tempRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
 
         for (index, entry) in entries.enumerated() {
-            let dest = tempRoot.appendingPathComponent("\(index)-\(entry.fileName)")
+            let dest = zipFolder.appendingPathComponent("\(index)-\(entry.fileName)")
             try GoogleTimelineZipReader.extract(entry, from: zipURL, to: dest)
             try appendFile(dest, into: &collected)
         }
@@ -266,9 +273,12 @@ enum GoogleTimelineImportPipeline {
             var gapPoints: [LocationLogPoint] = []
             var read = 0
             var skipped = 0
+            var incomplete = false
             _ = try GoogleTimelineRecordsScanner.forEachRecord(at: url, progress: { count, bytes in
                 let fraction = min(Double(bytes) / 350_000_000, 1)
                 progress(0.66 + 0.16 * fraction, "Streaming Records.json… \(count) points")
+            }, onIncomplete: {
+                incomplete = true
             }) { point in
                 read += 1
                 if occupancy.covers(point) {
@@ -281,6 +291,9 @@ enum GoogleTimelineImportPipeline {
             report.recordsRead += read
             report.recordsSkippedAsDuplicate += skipped
             report.formats.insert(.records)
+            if incomplete {
+                report.recordsWereIncomplete = true
+            }
 
             if !gapPoints.isEmpty {
                 progress(0.83, "Finding stays in Records.json…")

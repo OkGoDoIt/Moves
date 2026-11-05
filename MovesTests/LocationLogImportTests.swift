@@ -357,6 +357,107 @@ final class LocationLogImportTests: XCTestCase {
         try LocationLogGPXParser.parse(data: Data(contentsOf: realFileURL(named: fileName))).points
     }
 
+    // MARK: Broken and untimed files
+
+    func testGPXParserKeepsWhatItReadFromATruncatedFileAndSaysSo() throws {
+        let whole = """
+        <gpx version="1.1"><trk><trkseg>
+        <trkpt lat="52.52" lon="13.40"><time>2020-01-02T08:00:00Z</time></trkpt>
+        <trkpt lat="52.53" lon="13.41"><time>2020-01-02T08:10:00Z</time></trkpt>
+        <trkpt lat="52.54" lon="13.42"><ti
+        """
+        let truncated = try LocationLogGPXParser.parse(data: Data(whole.utf8))
+        XCTAssertEqual(truncated.points.count, 2)
+        XCTAssertTrue(truncated.isIncomplete)
+
+        let complete = try LocationLogGPXParser.parse(data: Data("""
+        <gpx version="1.1"><wpt lat="52.52" lon="13.40"><time>2020-01-02T08:00:00Z</time></wpt></gpx>
+        """.utf8))
+        XCTAssertFalse(complete.isIncomplete)
+    }
+
+    @MainActor
+    func testRouteFileImporterToldThePersonAFileWasIncomplete() async throws {
+        let body = (0..<120).map { minute -> String in
+            let time = ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: 1_600_000_000 + Double(minute) * 60))
+            return #"<trkpt lat="52.52" lon="13.40"><time>\#(time)</time></trkpt>"#
+        }.joined(separator: "\n")
+        let url = try temporaryFile(
+            named: "Morning.gpx",
+            contents: "<gpx version=\"1.1\"><trk><trkseg>\n\(body)\n<trkpt lat=\"52.5"
+        )
+        let container = try makeInMemoryContainer()
+        let importer = RouteFileImporter(modelContext: container.mainContext)
+
+        await importer.importFiles(urls: [url])
+
+        XCTAssertNil(importer.lastErrorMessage)
+        let report = try XCTUnwrap(importer.lastReport)
+        XCTAssertEqual(report.incompleteFileNames, ["Morning.gpx"])
+        XCTAssertTrue(report.summary.contains("Morning.gpx was incomplete"))
+    }
+
+    @MainActor
+    func testTCXPointsKeepTheirRecordedTimes() async throws {
+        let points = (0..<40).map { minute -> String in
+            let time = ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: 1_600_000_000 + Double(minute) * 60))
+            let latitude = 52.52 + Double(minute) * 0.001
+            return """
+            <Trackpoint><Time>\(time)</Time><Position><LatitudeDegrees>\(latitude)</LatitudeDegrees>\
+            <LongitudeDegrees>13.40</LongitudeDegrees></Position><AltitudeMeters>30</AltitudeMeters></Trackpoint>
+            """
+        }.joined(separator: "\n")
+        let url = try temporaryFile(
+            named: "activity.tcx",
+            contents: "<TrainingCenterDatabase><Activities><Activity><Lap><Track>\n\(points)\n</Track></Lap></Activity></Activities></TrainingCenterDatabase>"
+        )
+        let container = try makeInMemoryContainer()
+        let importer = RouteFileImporter(modelContext: container.mainContext)
+
+        await importer.importFiles(urls: [url])
+
+        XCTAssertNil(importer.lastErrorMessage)
+        XCTAssertEqual(importer.lastReport?.untimedRouteCount, 0, "Times were read, so this is not an untimed route")
+        let samples = try container.mainContext.fetch(FetchDescriptor<LocationSample>())
+        XCTAssertFalse(samples.isEmpty)
+        let cutoff = Date(timeIntervalSince1970: 1_600_000_000 + 3_600)
+        XCTAssertTrue(samples.allSatisfy { $0.timestamp < cutoff }, "Points must not be dated to now")
+    }
+
+    @MainActor
+    func testImportingAnUntimedTrackTwiceAddsNothing() async throws {
+        let url = try temporaryFile(
+            named: "route.geojson",
+            contents: #"{"type":"LineString","coordinates":[[13.4001,52.5201],[13.4101,52.5301],[13.4201,52.5401]]}"#
+        )
+        let container = try makeInMemoryContainer()
+        let importer = RouteFileImporter(modelContext: container.mainContext)
+
+        await importer.importFiles(urls: [url])
+        XCTAssertEqual(importer.lastReport?.untimedRouteCount, 1)
+        let context = container.mainContext
+        let samples = try context.fetchCount(FetchDescriptor<LocationSample>())
+        let places = try context.fetchCount(FetchDescriptor<VisitPlace>())
+        let moves = try context.fetchCount(FetchDescriptor<MoveSegment>())
+        XCTAssertEqual(samples, 3)
+
+        await importer.importFiles(urls: [url])
+        XCTAssertNil(importer.lastErrorMessage)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<LocationSample>()), samples)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<VisitPlace>()), places)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<MoveSegment>()), moves)
+    }
+
+    private func temporaryFile(named name: String, contents: String) throws -> URL {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("moves-log-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: folder) }
+        let url = folder.appendingPathComponent(name)
+        try Data(contents.utf8).write(to: url)
+        return url
+    }
+
     private func makeInMemoryContainer() throws -> ModelContainer {
         let schema = Schema(MovesTimelineSchema.models)
         let configuration = ModelConfiguration(

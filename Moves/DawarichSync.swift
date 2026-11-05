@@ -191,26 +191,26 @@ enum LocationServiceError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidServerURL(let service):
-            return "Enter a complete (service.title) server URL, including https://."
+            return "Enter a complete \(service.title) server URL, including https://."
         case .insecureRemoteServer(let service):
-            return "Remote (service.title) servers must use HTTPS. HTTP is only allowed for local-network hosts."
+            return "Remote \(service.title) servers must use HTTPS. HTTP is only allowed for local-network hosts."
         case .missingCredential(let service, let field):
-            return "Enter the (field) for (service.title)."
+            return "Enter the \(field) for \(service.title)."
         case .notConfigured(let service):
-            return "Connect to (service.title) first."
+            return "Connect to \(service.title) first."
         case .keychain(let status):
             let detail = SecCopyErrorMessageString(status, nil) as String? ?? "status \(status)"
             return "Could not access the saved credentials (\(detail))."
         case .invalidResponse(let service):
-            return "The server returned an invalid response. Check that this is a (service.title) endpoint."
+            return "The server returned an invalid response. Check that this is a \(service.title) endpoint."
         case .server(let service, let statusCode, let message):
             if statusCode == 401 || statusCode == 403 {
-                return "(service.title) rejected the saved credentials."
+                return "\(service.title) rejected the saved credentials."
             }
             if let message, !message.isEmpty {
-                return "(service.title) returned HTTP \(statusCode): \(message)"
+                return "\(service.title) returned HTTP \(statusCode): \(message)"
             }
-            return "(service.title) returned HTTP \(statusCode)."
+            return "\(service.title) returned HTTP \(statusCode)."
         }
     }
 }
@@ -229,6 +229,94 @@ struct LocationServiceConnectionInput: Equatable {
     var password = ""
     var trackingUsername = ""
     var deviceID = ""
+}
+
+/// What automatic uploads may send. Imports bring in history rather than new points,
+/// so they leave the device only through a confirmed full-history upload.
+enum LocationUploadFilter {
+    /// Sample sources that are always history. Live watch and phone sources are not listed.
+    static let importedSources: [LocationSampleSource] = [
+        .fileRouteImport,
+        .googleTimelineImport,
+        .arcImport,
+        .photoLibrary,
+    ]
+
+    /// A Health route can be today's workout or years of backfill. This matches how far back
+    /// the automatic Health import looks, so a fresh workout still uploads and old ones do not.
+    static let recentHealthRouteWindow: TimeInterval = 3 * 24 * 60 * 60
+
+    /// Visit and move origins that are always history.
+    static let importedOrigins: [String] = [
+        TimelineItemOrigin.imported.rawValue,
+        TimelineItemOrigin.photoInferred.rawValue,
+    ]
+
+    /// File and archive restores leave visits and moves marked as sensor data, so age is the
+    /// remaining signal. The sample stay reconciler can create a visit up to seven days back.
+    static let recentTimelineItemWindow: TimeInterval = 8 * 24 * 60 * 60
+
+    static func samples(
+        after cursor: Date,
+        includingHistory: Bool,
+        now: Date = .now
+    ) -> Predicate<LocationSample> {
+        if includingHistory {
+            return #Predicate<LocationSample> { sample in sample.createdAt > cursor }
+        }
+        let imported = importedSources.map(\.rawValue)
+        let health = LocationSampleSource.healthWorkoutRoute.rawValue
+        let healthCutoff = now.addingTimeInterval(-recentHealthRouteWindow)
+        return #Predicate<LocationSample> { sample in
+            sample.createdAt > cursor
+                && !imported.contains(sample.sourceRawValue)
+                && (sample.sourceRawValue != health || sample.timestamp >= healthCutoff)
+        }
+    }
+
+    static func visits(
+        after cursor: Date,
+        includingHistory: Bool,
+        now: Date = .now
+    ) -> Predicate<VisitPlace> {
+        if includingHistory {
+            return #Predicate<VisitPlace> { visit in visit.createdAt > cursor }
+        }
+        let origins = importedOrigins
+        let cutoff = now.addingTimeInterval(-recentTimelineItemWindow)
+        return #Predicate<VisitPlace> { visit in
+            visit.createdAt > cursor
+                && !origins.contains(visit.originRaw)
+                && visit.arrivalDate >= cutoff
+        }
+    }
+
+    static func moves(
+        after cursor: Date,
+        includingHistory: Bool,
+        now: Date = .now
+    ) -> Predicate<MoveSegment> {
+        if includingHistory {
+            return #Predicate<MoveSegment> { move in move.createdAt > cursor }
+        }
+        let origins = importedOrigins
+        let cutoff = now.addingTimeInterval(-recentTimelineItemWindow)
+        return #Predicate<MoveSegment> { move in
+            move.createdAt > cursor
+                && !origins.contains(move.originRaw)
+                && move.endDate >= cutoff
+        }
+    }
+}
+
+enum SavedCredentialPolicy {
+    /// A saved secret only ever goes back to the server it was saved for.
+    static func mayReuse(savedFor saved: URL?, on target: URL) -> Bool {
+        guard let saved else { return false }
+        return saved.scheme?.lowercased() == target.scheme?.lowercased()
+            && saved.host?.lowercased() == target.host?.lowercased()
+            && saved.port == target.port
+    }
 }
 
 private enum LocationServiceKeychain {
@@ -662,6 +750,22 @@ final class LocationServiceSyncManager: ObservableObject {
         }
     }
 
+    /// True when leaving the secret blank would keep the saved one for the server now entered.
+    func canKeepStoredSecret(for service: LocationService, input: LocationServiceConnectionInput) -> Bool {
+        guard hasStoredSecret(for: service),
+              let target = try? LocationServiceConfiguration.make(
+                service: service,
+                dawarichServerKind: input.dawarichServerKind,
+                customURL: input.serverURL
+              ) else {
+            return false
+        }
+        return SavedCredentialPolicy.mayReuse(
+            savedFor: currentConfiguration(for: service)?.baseURL,
+            on: target.baseURL
+        )
+    }
+
     func reloadSettings() {
         var newStates = states
         for service in LocationService.allCases {
@@ -680,7 +784,7 @@ final class LocationServiceSyncManager: ObservableObject {
             dawarichServerKind: input.dawarichServerKind,
             customURL: input.serverURL
         )
-        let credentials = try resolvedCredentials(service: service, input: input)
+        let credentials = try resolvedCredentials(service: service, input: input, target: configuration)
         let trackingUsername = try required(input.trackingUsername, named: "tracking username", for: service, when: service == .ownTracksRecorder)
         let deviceID = try required(input.deviceID, named: "device identifier", for: service, when: [.geoPulse, .ownTracksRecorder, .traccar].contains(service))
 
@@ -727,7 +831,8 @@ final class LocationServiceSyncManager: ObservableObject {
     }
 
     func setAutomaticSyncEnabled(_ enabled: Bool, for service: LocationService) {
-        if enabled, defaults.object(forKey: key(service, "uploadCursor")) == nil {
+        // Turning automatic uploads on starts from now, so time spent off is never backfilled.
+        if enabled, !defaults.bool(forKey: key(service, "automaticSync")) {
             defaults.set(Date.now, forKey: key(service, "uploadCursor"))
         }
         defaults.set(enabled, forKey: key(service, "automaticSync"))
@@ -789,7 +894,7 @@ final class LocationServiceSyncManager: ObservableObject {
             while true {
                 let modelContext = ModelContext(modelContainer)
                 var descriptor = FetchDescriptor<LocationSample>(
-                    predicate: #Predicate { sample in sample.createdAt > cursor },
+                    predicate: LocationUploadFilter.samples(after: cursor, includingHistory: allHistory),
                     sortBy: [SortDescriptor(\LocationSample.createdAt, order: .forward)]
                 )
                 descriptor.fetchLimit = Self.batchSize
@@ -856,9 +961,14 @@ final class LocationServiceSyncManager: ObservableObject {
 
     private func resolvedCredentials(
         service: LocationService,
-        input: LocationServiceConnectionInput
+        input: LocationServiceConnectionInput,
+        target: LocationServiceConfiguration
     ) throws -> LocationServiceCredentials {
-        let saved = try LocationServiceKeychain.load(for: service) ?? LocationServiceCredentials()
+        let stored = try LocationServiceKeychain.load(for: service) ?? LocationServiceCredentials()
+        let saved = SavedCredentialPolicy.mayReuse(
+            savedFor: currentConfiguration(for: service)?.baseURL,
+            on: target.baseURL
+        ) ? stored : LocationServiceCredentials()
         switch service {
         case .dawarich, .reitti:
             let token = input.token.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1121,7 +1231,7 @@ struct LocationServiceSettingsView: View {
         switch service {
         case .dawarich, .reitti:
             secretField(
-                syncManager.hasStoredSecret(for: service)
+                syncManager.canKeepStoredSecret(for: service, input: input)
                     ? "Leave blank to keep saved \(service == .dawarich ? "API key" : "API token")"
                     : (service == .dawarich ? "API key" : "API token"),
                 text: $input.token
@@ -1130,7 +1240,7 @@ struct LocationServiceSettingsView: View {
         case .geoPulse:
             standardField("OwnTracks username", text: $input.username, contentType: .username)
             secretField(
-                syncManager.hasStoredSecret(for: service) ? "Leave blank to keep saved password" : "OwnTracks password",
+                syncManager.canKeepStoredSecret(for: service, input: input) ? "Leave blank to keep saved password" : "OwnTracks password",
                 text: $input.password
             )
             standardField("Device identifier", text: $input.deviceID)
@@ -1140,7 +1250,7 @@ struct LocationServiceSettingsView: View {
             standardField("Device identifier", text: $input.deviceID)
             standardField("Basic auth username (optional)", text: $input.username, contentType: .username)
             secretField(
-                syncManager.hasStoredSecret(for: service) ? "Leave blank to keep saved Basic auth password" : "Basic auth password (optional)",
+                syncManager.canKeepStoredSecret(for: service, input: input) ? "Leave blank to keep saved Basic auth password" : "Basic auth password (optional)",
                 text: $input.password
             )
 

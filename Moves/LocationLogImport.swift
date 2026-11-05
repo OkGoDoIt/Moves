@@ -592,6 +592,8 @@ final class LocationLogGPXParser: NSObject, XMLParserDelegate {
         var points: [LocationLogPoint]
         /// Number of `trkpt` elements dropped for missing or unparsable time.
         var untimedCount: Int
+        /// True when the XML broke off, so `points` holds only what came before the break.
+        var isIncomplete: Bool
     }
 
     private var points: [LocationLogPoint] = []
@@ -612,9 +614,9 @@ final class LocationLogGPXParser: NSObject, XMLParserDelegate {
             if let error = parser.parserError, delegate.points.isEmpty {
                 throw error
             }
-            return Result(points: delegate.points, untimedCount: delegate.untimedCount)
+            return Result(points: delegate.points, untimedCount: delegate.untimedCount, isIncomplete: true)
         }
-        return Result(points: delegate.points, untimedCount: delegate.untimedCount)
+        return Result(points: delegate.points, untimedCount: delegate.untimedCount, isIncomplete: false)
     }
 
     func parser(

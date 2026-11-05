@@ -95,6 +95,14 @@ enum MovesTimelinePeriod: String, AppEnum {
     }
 }
 
+extension DateInterval {
+    /// Start-inclusive and end-exclusive. `contains` includes the end, so a day's interval
+    /// would also claim the next day's midnight.
+    func holds(_ date: Date) -> Bool {
+        date >= start && date < end
+    }
+}
+
 enum MovesIntentExportFormat: String, AppEnum {
     case gpx
     case geoJSON
@@ -304,7 +312,7 @@ final class MovesIntentRuntime {
         )
         let days = try context.fetch(descriptor)
         guard let interval = period.dateInterval(containing: now) else { return days }
-        return days.filter { interval.contains($0.dayStart) }
+        return days.filter { interval.holds($0.dayStart) }
     }
 
     func visitEntities(
@@ -313,21 +321,20 @@ final class MovesIntentRuntime {
     ) throws -> [VisitEntity] {
         guard let modelContainer else { throw MovesIntentError.runtimeUnavailable }
         let context = ModelContext(modelContainer)
-        var descriptor = FetchDescriptor<VisitPlace>(
+        let start = interval?.start ?? .distantPast
+        let end = interval?.end ?? .distantFuture
+        let descriptor = FetchDescriptor<VisitPlace>(
+            predicate: #Predicate { visit in visit.arrivalDate >= start && visit.arrivalDate < end },
             sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .reverse)]
         )
-        descriptor.fetchLimit = 200
         let visits = try context.fetch(descriptor)
-        let identifierSet = identifiers.map(Set.init)
-        return visits.compactMap { visit in
-            if let identifierSet, !identifierSet.contains(visit.id.uuidString) {
-                return nil
-            }
-            if let interval, !interval.contains(visit.arrivalDate) {
-                return nil
-            }
-            return VisitEntity(visit: visit)
+        guard let identifiers else {
+            return visits.prefix(Self.entityListLimit).map { VisitEntity(visit: $0) }
         }
+        let identifierSet = Set(identifiers)
+        return visits
+            .filter { identifierSet.contains($0.id.uuidString) }
+            .map { VisitEntity(visit: $0) }
     }
 
     func moveEntities(
@@ -336,21 +343,23 @@ final class MovesIntentRuntime {
     ) throws -> [MoveEntity] {
         guard let modelContainer else { throw MovesIntentError.runtimeUnavailable }
         let context = ModelContext(modelContainer)
-        var descriptor = FetchDescriptor<MoveSegment>(
+        let start = interval?.start ?? .distantPast
+        let end = interval?.end ?? .distantFuture
+        // `timelineStartDate` is computed, so fetch every move touching the period and check it here.
+        let descriptor = FetchDescriptor<MoveSegment>(
+            predicate: #Predicate { move in move.endDate >= start && move.startDate < end },
             sortBy: [SortDescriptor(\MoveSegment.startDate, order: .reverse)]
         )
-        descriptor.fetchLimit = 200
-        let moves = try context.fetch(descriptor)
-        let identifierSet = identifiers.map(Set.init)
-        return moves.compactMap { move in
-            if let identifierSet, !identifierSet.contains(move.id.uuidString) {
-                return nil
-            }
-            if let interval, !interval.contains(move.timelineStartDate) {
-                return nil
-            }
-            return MoveEntity(move: move)
+        let moves = try context.fetch(descriptor).filter { move in
+            interval?.holds(move.timelineStartDate) ?? true
         }
+        guard let identifiers else {
+            return moves.prefix(Self.entityListLimit).map { MoveEntity(move: $0) }
+        }
+        let identifierSet = Set(identifiers)
+        return moves
+            .filter { identifierSet.contains($0.id.uuidString) }
+            .map { MoveEntity(move: $0) }
     }
 
     func whereWasI(at date: Date, includeCoordinates: Bool) throws -> String {
@@ -365,6 +374,9 @@ final class MovesIntentRuntime {
             includeCoordinates: includeCoordinates
         )
     }
+
+    /// The most visits or moves a period listing returns. Lookups by id are not capped.
+    private static let entityListLimit = 200
 
     private static func distanceText(_ meters: CLLocationDistance) -> String {
         let formatter = MeasurementFormatter()
@@ -392,8 +404,11 @@ struct VisitedPlaceEntity: IndexedEntity, URLRepresentableEntity {
 
     init(place: VisitPlace) {
         id = place.id.uuidString
-        let label = place.displayTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        name = label.isEmpty ? "Visited place" : label
+        // `displayTitle` falls back to coordinates, which Spotlight must never receive.
+        name = PlaceDisplayNamer.meaningful(place.userLabel)
+            ?? PlaceDisplayNamer.meaningful(place.autoLabel)
+            ?? PlaceDisplayNamer.meaningful(place.knownPlace?.name)
+            ?? "Visited place"
         visitedAt = place.arrivalDate
         dayKey = place.dayTimeline?.dayKey ?? DayTimeline.makeDayKey(for: place.arrivalDate)
     }

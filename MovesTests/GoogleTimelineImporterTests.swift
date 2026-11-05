@@ -82,6 +82,106 @@ final class GoogleTimelineImporterTests: XCTestCase {
         XCTAssertEqual(count, 2)
     }
 
+    func testRecordsScannerReadsFilesLargerThanItsReadBuffer() throws {
+        let data = recordsJSON(count: 3_000)
+        XCTAssertGreaterThan(data.count, 3 * 64 * 1024)
+        let url = try temporaryFile(named: "Records.json", contents: data)
+
+        var incomplete = false
+        var points = 0
+        let count = try GoogleTimelineRecordsScanner.forEachRecord(at: url, onIncomplete: {
+            incomplete = true
+        }) { _ in
+            points += 1
+            return true
+        }
+
+        XCTAssertEqual(count, 3_000)
+        XCTAssertEqual(points, 3_000)
+        XCTAssertFalse(incomplete)
+    }
+
+    func testRecordsScannerReportsAFileThatEndsEarly() throws {
+        let whole = recordsJSON(count: 3_000)
+
+        var cutMidRecord = false
+        let midRecord = try GoogleTimelineRecordsScanner.forEachRecord(
+            in: whole.prefix(whole.count - 30),
+            onIncomplete: { cutMidRecord = true }
+        ) { _ in true }
+        XCTAssertTrue(cutMidRecord)
+        XCTAssertEqual(midRecord, 2_999)
+
+        var cutBeforeClose = false
+        let beforeClose = try GoogleTimelineRecordsScanner.forEachRecord(
+            in: whole.prefix(whole.count - 4),
+            onIncomplete: { cutBeforeClose = true }
+        ) { _ in true }
+        XCTAssertTrue(cutBeforeClose)
+        XCTAssertEqual(beforeClose, 3_000)
+    }
+
+    func testTruncatedRecordsImportWhatWasReadAndSaySo() async throws {
+        let whole = recordsJSON(count: 200)
+        let url = try temporaryFile(named: "Records.json", contents: whole.prefix(whole.count - 30))
+        let collected = GoogleTimelineCollectedSources(recordsURLs: [url])
+
+        let report = try await GoogleTimelineImportPipeline.run(
+            collected: collected,
+            container: try makeInMemoryContainer(),
+            skipNaming: true,
+            progress: { _, _ in }
+        )
+
+        XCTAssertEqual(report.recordsRead, 199)
+        XCTAssertTrue(report.recordsWereIncomplete)
+        XCTAssertTrue(report.summary.contains("Records.json was incomplete"))
+    }
+
+    func testTwoZipsWithTheSameMemberNameKeepBothFiles() throws {
+        let first = recordsJSON(count: 1)
+        let second = recordsJSON(count: 2)
+        let firstZip = try temporaryFile(
+            named: "takeout-1.zip",
+            contents: MovesZipArchive.pack([MovesZipFile(path: "Records.json", data: first)])
+        )
+        let secondZip = try temporaryFile(
+            named: "takeout-2.zip",
+            contents: MovesZipArchive.pack([MovesZipFile(path: "Records.json", data: second)])
+        )
+
+        let collected = try GoogleTimelineSourceCollector.collect(from: [firstZip, secondZip])
+        defer {
+            if let temporary = collected.temporaryDirectory {
+                try? FileManager.default.removeItem(at: temporary)
+            }
+        }
+
+        XCTAssertEqual(collected.recordsURLs.count, 2)
+        XCTAssertEqual(Set(collected.recordsURLs).count, 2)
+        let contents = Set(try collected.recordsURLs.map { try Data(contentsOf: $0) })
+        XCTAssertEqual(contents, [first, second])
+    }
+
+    func testAbsurdTimestampsAreIgnoredInsteadOfTrapping() {
+        let huge = Data(#"{"latitudeE7":525200000,"longitudeE7":134000000,"timestamp":1e300}"#.utf8)
+        XCTAssertNil(GoogleTimelineParser.parseRecordObject(data: huge))
+        XCTAssertNil(GoogleTimelineTime.parse(1e300))
+        XCTAssertNil(GoogleTimelineTime.parse("inf"))
+        XCTAssertNotNil(GoogleTimelineTime.parse(1_600_000_000))
+        XCTAssertNotNil(GoogleTimelineTime.parse("1600000000000"))
+    }
+
+    func testOnDeviceVisitReadsAGeoStringPlaceLocation() throws {
+        let json = #"""
+        [{"startTime":"2024-06-01T08:00:00Z","endTime":"2024-06-01T09:00:00Z",
+          "visit":{"topCandidate":{"placeLocation":"geo:52.52,13.40"}}}]
+        """#
+        let draft = try GoogleTimelineParser.parseOnDevice(data: Data(json.utf8))
+        XCTAssertEqual(draft.stays.count, 1)
+        XCTAssertEqual(draft.stays.first?.latitude ?? 0, 52.52, accuracy: 0.0001)
+    }
+
     // MARK: Semantic month
 
     func testSemanticMonthCoversEdgeCases() throws {
@@ -305,6 +405,27 @@ final class GoogleTimelineImporterTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .appending(path: "import-staging/GoogleTimeline", directoryHint: .isDirectory)
+    }
+
+    /// A pretty-printed `locations` array, one small record per line.
+    private func recordsJSON(count: Int) -> Data {
+        let start = Date(timeIntervalSince1970: 1_600_000_000)
+        let formatter = ISO8601DateFormatter()
+        let records = (0..<count).map { index -> String in
+            let timestamp = formatter.string(from: start.addingTimeInterval(TimeInterval(index * 60)))
+            return #"    {"latitudeE7": \#(525_200_000 + index), "longitudeE7": 134000000, "accuracy": 20, "timestamp": "\#(timestamp)"}"#
+        }
+        return Data("{\n  \"locations\": [\n\(records.joined(separator: ",\n"))\n  ]\n}\n".utf8)
+    }
+
+    private func temporaryFile(named name: String, contents: Data) throws -> URL {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("moves-google-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: folder) }
+        let url = folder.appendingPathComponent(name)
+        try contents.write(to: url)
+        return url
     }
 
     private func detect(_ fileName: String) throws -> GoogleTimelineFormat? {

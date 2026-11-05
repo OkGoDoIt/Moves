@@ -3,6 +3,7 @@ import MapKit
 
 struct WatchMovesContentView: View {
     @EnvironmentObject private var tracker: WatchLocationTracker
+    @Environment(\.scenePhase) private var scenePhase
 
     @State private var camera: MapCameraPosition = .automatic
 
@@ -39,8 +40,10 @@ struct WatchMovesContentView: View {
             latitude: (minLatitude + maxLatitude) / 2,
             longitude: (minLongitude + maxLongitude) / 2
         )
-        let latitudeDelta = max((maxLatitude - minLatitude) * 1.35, 0.01)
-        let longitudeDelta = max((maxLongitude - minLongitude) * 1.35, 0.01)
+        // MapKit rejects a span past 360° or a region past the poles. A Sydney to Los Angeles
+        // day reaches the first once it is padded.
+        let latitudeDelta = min(max((maxLatitude - minLatitude) * 1.35, 0.01), 2 * max(90 - abs(center.latitude), 0.005))
+        let longitudeDelta = min(max((maxLongitude - minLongitude) * 1.35, 0.01), 360)
         return MKCoordinateRegion(
             center: center,
             span: MKCoordinateSpan(latitudeDelta: latitudeDelta, longitudeDelta: longitudeDelta)
@@ -137,6 +140,11 @@ struct WatchMovesContentView: View {
         }
         .onChange(of: tracker.todayRouteCoordinates.count) { _, _ in
             camera = .region(mapRegion)
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .active {
+                tracker.refreshToday()
+            }
         }
     }
 }
