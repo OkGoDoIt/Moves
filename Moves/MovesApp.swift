@@ -46,6 +46,7 @@ struct MovesApp: App {
     private static let cloudKitContainerIdentifier = MovesAppIdentity.cloudKitContainerIdentifier
 
     private let sharedModelContainer: ModelContainer
+    private static var processContainer: ModelContainer?
     @StateObject private var undoController = AppUndoController()
     @StateObject private var captureManager: MovesLocationCaptureManager
     @StateObject private var watchRouteInbox: WatchRouteInbox
@@ -57,7 +58,7 @@ struct MovesApp: App {
 
     init() {
         do {
-            let container = try Self.makeModelContainer()
+            let container = try Self.sharedContainer()
             let captureManager = MovesLocationCaptureManager(modelContainer: container)
             self.sharedModelContainer = container
             _captureManager = StateObject(
@@ -94,7 +95,19 @@ struct MovesApp: App {
         }
     }
 
-    static func makeModelContainer() throws -> ModelContainer {
+    /// The store's one container for this process.
+    ///
+    /// Background tasks launch alongside the app, and a second container would mean a
+    /// second CloudKit mirror and a second coordinator on one file, with neither told
+    /// about the other's deletes.
+    static func sharedContainer() throws -> ModelContainer {
+        if let processContainer { return processContainer }
+        let container = try makeModelContainer()
+        processContainer = container
+        return container
+    }
+
+    private static func makeModelContainer() throws -> ModelContainer {
         let timelineSchema = Schema(MovesTimelineSchema.models)
         let cacheSchema = Schema([ShareMapAggregate.self])
         let schema = Schema(MovesTimelineSchema.models + [ShareMapAggregate.self])

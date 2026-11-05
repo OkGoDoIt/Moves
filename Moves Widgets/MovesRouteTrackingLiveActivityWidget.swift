@@ -2,6 +2,12 @@ import ActivityKit
 import SwiftUI
 import WidgetKit
 
+/// `start...end` traps once `end` has passed, and the system keeps rendering a
+/// Live Activity after its tracking window closes.
+func timerRange(from start: Date, to end: Date) -> ClosedRange<Date> {
+    start...max(start, end)
+}
+
 struct MovesRouteTrackingLiveActivityWidget: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: MovesRouteTrackingAttributes.self) { context in
@@ -14,7 +20,7 @@ struct MovesRouteTrackingLiveActivityWidget: Widget {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Real route tracking")
                         .font(.headline)
-                    Text(timerInterval: context.attributes.startedAt...context.state.endsAt, countsDown: false)
+                    Text(timerInterval: timerRange(from: context.attributes.startedAt, to: context.state.endsAt), countsDown: false)
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
@@ -48,7 +54,7 @@ struct MovesRouteTrackingLiveActivityWidget: Widget {
                     HStack {
                         Text("Real route tracking")
                         Spacer()
-                        Text(timerInterval: Date.now...context.state.endsAt, countsDown: true)
+                        Text(timerInterval: timerRange(from: Date.now, to: context.state.endsAt), countsDown: true)
                             .monospacedDigit()
                     }
                     .font(.caption)

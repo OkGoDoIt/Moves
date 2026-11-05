@@ -713,7 +713,8 @@ final class TimelineAssemblerTests: XCTestCase {
             placeNameResolver: StubPlaceNameResolver()
         )
 
-        let t0 = Date(timeIntervalSince1970: 1_710_000_000)
+        // Trips come from the reconciler, which reads the last week.
+        let t0 = Date().addingTimeInterval(-3 * 60 * 60)
         await assembler.ingestVisit(
             MockVisit(
                 coordinate: CLLocationCoordinate2D(latitude: 52.50, longitude: 13.40),

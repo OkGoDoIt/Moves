@@ -511,36 +511,64 @@ final class DefaultTimelineAssembler: TimelineAssembler {
     func ingestLocations(_ locations: [CLLocation], source: LocationSampleSource) async {
         guard !locations.isEmpty else { return }
 
-        do {
-            _ = try repository.appendSamples(from: locations, source: source)
-            try repository.saveIfNeeded()
-        } catch {
-            print("Failed to persist location samples: \(error.localizedDescription)")
-        }
+        await withStoreWriteTime {
+            do {
+                _ = try repository.appendSamples(from: locations, source: source)
+                try repository.saveIfNeeded()
+            } catch {
+                print("Failed to persist location samples: \(error.localizedDescription)")
+            }
 
-        await reconcileSampleStays()
+            await reconcileSampleStays()
+        }
     }
 
     func ingestVisit(_ visit: CLVisit) async {
-        // A kilometre-wide visit fix is a cell tower, not a place. The sample
-        // is already stored; stays are built from the fixes that are actually
-        // near the person.
-        guard visit.horizontalAccuracy <= 300 else {
-            Self.timelineLog.info("Skipped a visit whose accuracy was \(Int(visit.horizontalAccuracy)) m")
+        await withStoreWriteTime {
+            // A kilometre-wide visit fix is a cell tower, not a place. The sample
+            // is already stored; stays are built from the fixes that are actually
+            // near the person.
+            guard visit.horizontalAccuracy <= 300 else {
+                Self.timelineLog.info("Skipped a visit whose accuracy was \(Int(visit.horizontalAccuracy)) m")
+                await reconcileSampleStays()
+                return
+            }
+
+            do {
+                let visitPlace = try repository.addOrUpdateVisit(from: visit)
+                try repository.applyPlaceLearning(to: visitPlace)
+                await fillAutomaticPlaceLabelIfNeeded(for: visitPlace)
+                try repository.saveIfNeeded()
+            } catch {
+                print("Failed to build timeline segment: \(error.localizedDescription)")
+            }
+
             await reconcileSampleStays()
-            return
+        }
+    }
+
+    /// Keeps the process running until a store write finishes.
+    ///
+    /// The store is in the shared App Group container, and iOS kills a process it
+    /// would otherwise suspend while it holds a lock on a file there (0xdead10cc).
+    /// Location callbacks arrive in the background, so that suspension is a real risk.
+    private func withStoreWriteTime(_ work: () async -> Void) async {
+        final class Assertion {
+            var identifier = UIBackgroundTaskIdentifier.invalid
+
+            func end() {
+                guard identifier != .invalid else { return }
+                UIApplication.shared.endBackgroundTask(identifier)
+                identifier = .invalid
+            }
         }
 
-        do {
-            let visitPlace = try repository.addOrUpdateVisit(from: visit)
-            try repository.applyPlaceLearning(to: visitPlace)
-            await fillAutomaticPlaceLabelIfNeeded(for: visitPlace)
-            try repository.saveIfNeeded()
-        } catch {
-            print("Failed to build timeline segment: \(error.localizedDescription)")
+        let assertion = Assertion()
+        assertion.identifier = UIApplication.shared.beginBackgroundTask(withName: "Timeline write") {
+            assertion.end()
         }
-
-        await reconcileSampleStays()
+        await work()
+        assertion.end()
     }
 
     func approachWasAutomotive(before date: Date) async -> Bool {
@@ -563,7 +591,9 @@ final class DefaultTimelineAssembler: TimelineAssembler {
         }
 
         let task = Task { @MainActor in
-            await self.performSampleStayReconciliation()
+            await self.withStoreWriteTime {
+                await self.performSampleStayReconciliation()
+            }
         }
         reconcileTask = task
         await task.value
@@ -600,7 +630,7 @@ final class DefaultTimelineAssembler: TimelineAssembler {
                     stepCount: steps
                 )
                 let between = try repository.samples(from: leg.startDate, to: leg.endDate)
-                _ = try repository.upsertMove(
+                let move = try repository.upsertMove(
                     startPlace: leg.startPlace,
                     endPlace: leg.endPlace,
                     startDate: leg.startDate,
@@ -610,11 +640,26 @@ final class DefaultTimelineAssembler: TimelineAssembler {
                     stepCount: steps,
                     samples: between
                 )
+                // Ask only about what the rules left unsure, and never ask twice.
+                if move.reviewState == .none,
+                   move.transportModeSource == .auto,
+                   transportMode == classification.mode,
+                   classification.confidence < TimelineReviewHeuristics.uncertainModeConfidence {
+                    move.reviewState = .pending
+                }
+                if leg.startPlace.reviewState == .none,
+                   TimelineReviewHeuristics.isShortTransitStop(leg.startPlace) {
+                    leg.startPlace.reviewState = .pending
+                }
             }
 
+            for place in result.newPlaces {
+                try repository.applyPlaceLearning(to: place)
+            }
             for place in result.newPlaces.prefix(8) {
                 await fillAutomaticPlaceLabelIfNeeded(for: place)
             }
+            try repository.saveIfNeeded()
 
             if !result.newPlaces.isEmpty || !result.moveLegs.isEmpty {
                 Self.timelineLog.info(

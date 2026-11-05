@@ -130,43 +130,62 @@ enum ShareMapAggregateStore {
         return String(format: "month:%04d-%02d", year, month)
     }
 
+    /// The fields of one move or place that decide whether a stored aggregate still holds.
+    struct SourceRow: Sendable {
+        let id: String
+        let dayStart: Date
+        let text: String
+    }
+
+    static func moveRow(_ move: MoveSegment, dayStart: Date) -> SourceRow {
+        let storedRouteBytes = (move.manualRouteCoordinatesData?.count ?? 0)
+            + (move.routeCacheCoordinatesData?.count ?? 0)
+        let id = move.id.uuidString
+        return SourceRow(
+            id: id,
+            dayStart: dayStart,
+            text: [
+                id,
+                move.transportModeRawValue,
+                String(move.startDate.timeIntervalSinceReferenceDate),
+                String(move.endDate.timeIntervalSinceReferenceDate),
+                String(Int(move.distanceMeters.rounded())),
+                move.routeCacheSignature ?? "",
+                String(storedRouteBytes)
+            ].joined(separator: ":")
+        )
+    }
+
+    static func placeRow(_ place: VisitPlace, dayStart: Date) -> SourceRow {
+        let id = place.id.uuidString
+        return SourceRow(
+            id: id,
+            dayStart: dayStart,
+            text: [
+                id,
+                String(place.arrivalDate.timeIntervalSinceReferenceDate),
+                String(place.departureDate?.timeIntervalSinceReferenceDate ?? 0),
+                String(Int((place.latitude * 100_000).rounded())),
+                String(Int((place.longitude * 100_000).rounded()))
+            ].joined(separator: ":")
+        )
+    }
+
     static func sourceSignature(for timelines: [DayTimeline]) -> String {
-        let source = timelines
-            .sorted { $0.dayKey < $1.dayKey }
-            .map { day in
-                let moves = day.moves.sorted { $0.id.uuidString < $1.id.uuidString }
-                let places = day.places.sorted { $0.id.uuidString < $1.id.uuidString }
-                let moveSignature = moves.map { move in
-                    let storedRouteBytes = (move.manualRouteCoordinatesData?.count ?? 0)
-                        + (move.routeCacheCoordinatesData?.count ?? 0)
-                    return [
-                        move.id.uuidString,
-                        move.transportModeRawValue,
-                        String(move.startDate.timeIntervalSinceReferenceDate),
-                        String(move.endDate.timeIntervalSinceReferenceDate),
-                        String(Int(move.distanceMeters.rounded())),
-                        move.routeCacheSignature ?? "",
-                        String(storedRouteBytes)
-                    ].joined(separator: ":")
-                }
-                .joined(separator: ",")
-                let placeSignature = places.map { place in
-                    [
-                        place.id.uuidString,
-                        String(place.arrivalDate.timeIntervalSinceReferenceDate),
-                        String(place.departureDate?.timeIntervalSinceReferenceDate ?? 0),
-                        String(Int((place.latitude * 100_000).rounded())),
-                        String(Int((place.longitude * 100_000).rounded()))
-                    ].joined(separator: ":")
-                }
-                .joined(separator: ",")
-                return [day.dayKey, moveSignature, placeSignature].joined(separator: "|")
-            }
-            .joined(separator: ";")
+        sourceSignature(
+            moves: timelines.flatMap { day in day.moves.map { moveRow($0, dayStart: day.dayStart) } },
+            places: timelines.flatMap { day in day.places.map { placeRow($0, dayStart: day.dayStart) } }
+        )
+    }
+
+    static func sourceSignature(moves: [SourceRow], places: [SourceRow]) -> String {
+        let source = [moves, places]
+            .map { rows in rows.sorted { $0.id < $1.id }.map(\.text).joined(separator: ",") }
+            .joined(separator: "|")
         let digest = SHA256.hash(data: Data(source.utf8))
             .map { String(format: "%02x", $0) }
             .joined()
-        return "tracks-v2:" + digest
+        return "tracks-v3:" + digest
     }
 
     static func cachedTracks(
@@ -229,15 +248,50 @@ enum ShareMapAggregateStore {
 enum ShareMapAggregateBuilder {
     private static let log = Logger(subsystem: MovesAppIdentity.bundleIdentifier, category: "ShareMapAggregate")
 
+    /// Reads the store into plain values before doing any work with them.
+    ///
+    /// This runs on its own context while the reconciler, CloudKit, and the person's
+    /// edits delete rows on others. Touching a model whose row has gone aborts the
+    /// process with nothing to catch, so nothing here walks a relationship lazily:
+    /// each fetch names what it needs up front and is copied out at once.
+    private struct Source {
+        var moves: [ShareMapAggregateStore.SourceRow]
+        var places: [ShareMapAggregateStore.SourceRow]
+
+        init(in context: ModelContext) throws {
+            var moveFetch = FetchDescriptor<MoveSegment>()
+            moveFetch.relationshipKeyPathsForPrefetching = [\.dayTimeline]
+            moves = try context.fetch(moveFetch).compactMap { move in
+                move.dayTimeline.map { ShareMapAggregateStore.moveRow(move, dayStart: $0.dayStart) }
+            }
+            var placeFetch = FetchDescriptor<VisitPlace>()
+            placeFetch.relationshipKeyPathsForPrefetching = [\.dayTimeline]
+            places = try context.fetch(placeFetch).compactMap { place in
+                place.dayTimeline.map { ShareMapAggregateStore.placeRow(place, dayStart: $0.dayStart) }
+            }
+        }
+    }
+
     static func refreshAll(in modelContainer: ModelContainer) async {
         let work = Task.detached(priority: .utility) {
             do {
                 try Task.checkCancellation()
                 let context = ModelContext(modelContainer)
-                let timelines = try context.fetch(
-                    FetchDescriptor<DayTimeline>(sortBy: [SortDescriptor(\.dayStart, order: .forward)])
-                )
-                try refresh(timelines: timelines, in: context)
+                let source = try Source(in: context)
+                for period in [MovesSharePeriod.month, .year] {
+                    let moves = Dictionary(grouping: source.moves) { period.start(for: $0.dayStart) }
+                    let places = Dictionary(grouping: source.places) { period.start(for: $0.dayStart) }
+                    for periodStart in Set(moves.keys).union(places.keys).sorted() {
+                        try Task.checkCancellation()
+                        try rebuildIfNeeded(
+                            moves: moves[periodStart] ?? [],
+                            places: places[periodStart] ?? [],
+                            period: period,
+                            periodStart: periodStart,
+                            in: context
+                        )
+                    }
+                }
             } catch is CancellationError {
                 return
             } catch {
@@ -257,16 +311,10 @@ enum ShareMapAggregateBuilder {
             do {
                 try Task.checkCancellation()
                 let context = ModelContext(modelContainer)
-                let timelines = try context.fetch(
-                    FetchDescriptor<DayTimeline>(sortBy: [SortDescriptor(\.dayStart, order: .forward)])
-                )
-                let selected = selectedTimelines(
-                    from: timelines,
-                    period: period,
-                    periodStart: periodStart
-                )
+                let source = try Source(in: context)
                 try rebuildIfNeeded(
-                    timelines: selected,
+                    moves: source.moves.filter { period.contains($0.dayStart, periodStart: periodStart) },
+                    places: source.places.filter { period.contains($0.dayStart, periodStart: periodStart) },
                     period: period,
                     periodStart: period.start(for: periodStart),
                     in: context
@@ -280,34 +328,16 @@ enum ShareMapAggregateBuilder {
         await withTaskCancellationHandler(operation: { await work.value }, onCancel: { work.cancel() })
     }
 
-    private static func refresh(timelines: [DayTimeline], in context: ModelContext) throws {
-        let activeTimelines = timelines.filter(\.hasRecordedActivity)
-        for period in [MovesSharePeriod.month, .year] {
-            try Task.checkCancellation()
-            let grouped = Dictionary(grouping: activeTimelines) {
-                period.start(for: $0.dayStart)
-            }
-            for periodStart in grouped.keys.sorted() {
-                try Task.checkCancellation()
-                try rebuildIfNeeded(
-                    timelines: grouped[periodStart] ?? [],
-                    period: period,
-                    periodStart: periodStart,
-                    in: context
-                )
-            }
-        }
-    }
-
     private static func rebuildIfNeeded(
-        timelines: [DayTimeline],
+        moves: [ShareMapAggregateStore.SourceRow],
+        places: [ShareMapAggregateStore.SourceRow],
         period: MovesSharePeriod,
         periodStart: Date,
         in context: ModelContext
     ) throws {
-        guard !timelines.isEmpty,
+        guard !moves.isEmpty || !places.isEmpty,
               let key = ShareMapAggregateStore.periodKey(for: period, date: periodStart) else { return }
-        let signature = ShareMapAggregateStore.sourceSignature(for: timelines)
+        let signature = ShareMapAggregateStore.sourceSignature(moves: moves, places: places)
         let descriptor = FetchDescriptor<ShareMapAggregate>(
             predicate: #Predicate { $0.periodKey == key },
             sortBy: [SortDescriptor(\.generatedAt, order: .reverse)]
@@ -317,30 +347,7 @@ enum ShareMapAggregateBuilder {
             return
         }
 
-        let maximumCoordinateCount = period == .year ? 80 : 120
-        let tracks = timelines
-            .flatMap(\.moves)
-            .sorted { $0.startDate < $1.startDate }
-            .compactMap { move -> ShareMapAggregateTrack? in
-                guard !Task.isCancelled else { return nil }
-                let fallback = MoveRouteGeometry.rawCoordinates(for: move)
-                let routeSignature = MoveRouteGeometry.cacheSignature(for: move, fallback: fallback)
-                let coordinates = move.manualRouteCoordinates
-                    ?? move.cachedRouteCoordinates(for: routeSignature)
-                    ?? fallback
-                guard coordinates.count > 1 else { return nil }
-                let dayStart = move.dayTimeline?.dayStart
-                    ?? Calendar.autoupdatingCurrent.startOfDay(for: move.startDate)
-                return ShareMapAggregateTrack(
-                    id: move.id,
-                    transportMode: move.transportMode,
-                    coordinates: downsampled(coordinates, maximumCount: maximumCoordinateCount),
-                    dayStart: dayStart,
-                    startDate: move.startDate,
-                    endDate: move.endDate,
-                    distanceMeters: move.distanceMeters
-                )
-            }
+        let tracks = try tracks(for: period, periodStart: periodStart, in: context)
         try Task.checkCancellation()
         let data = try ShareMapAggregateStore.encodeTracks(tracks)
 
@@ -369,13 +376,42 @@ enum ShareMapAggregateBuilder {
         log.info("Stored \(tracks.count) tracks for \(key, privacy: .public)")
     }
 
-    private static func selectedTimelines(
-        from timelines: [DayTimeline],
-        period: MovesSharePeriod,
-        periodStart: Date
-    ) -> [DayTimeline] {
-        timelines.filter {
-            $0.hasRecordedActivity && period.contains($0.dayStart, periodStart: periodStart)
+    private static func tracks(
+        for period: MovesSharePeriod,
+        periodStart: Date,
+        in context: ModelContext
+    ) throws -> [ShareMapAggregateTrack] {
+        guard let interval = period.dateInterval(containing: periodStart) else { return [] }
+        // A move belongs to the day it started on, but editing its times can leave it
+        // a little way outside. Read a day either side and keep what the day says.
+        let lowerBound = interval.start.addingTimeInterval(-24 * 60 * 60)
+        let upperBound = interval.end.addingTimeInterval(24 * 60 * 60)
+        var fetch = FetchDescriptor<MoveSegment>(
+            predicate: #Predicate { $0.startDate >= lowerBound && $0.startDate < upperBound },
+            sortBy: [SortDescriptor(\.startDate)]
+        )
+        fetch.relationshipKeyPathsForPrefetching = [\.dayTimeline, \.startPlace, \.endPlace, \.samplesStorage]
+
+        let maximumCoordinateCount = period == .year ? 80 : 120
+        return try context.fetch(fetch).compactMap { move -> ShareMapAggregateTrack? in
+            guard !Task.isCancelled,
+                  let dayStart = move.dayTimeline?.dayStart,
+                  period.contains(dayStart, periodStart: periodStart) else { return nil }
+            let fallback = MoveRouteGeometry.rawCoordinates(for: move)
+            let routeSignature = MoveRouteGeometry.cacheSignature(for: move, fallback: fallback)
+            let coordinates = move.manualRouteCoordinates
+                ?? move.cachedRouteCoordinates(for: routeSignature)
+                ?? fallback
+            guard coordinates.count > 1 else { return nil }
+            return ShareMapAggregateTrack(
+                id: move.id,
+                transportMode: move.transportMode,
+                coordinates: downsampled(coordinates, maximumCount: maximumCoordinateCount),
+                dayStart: dayStart,
+                startDate: move.startDate,
+                endDate: move.endDate,
+                distanceMeters: move.distanceMeters
+            )
         }
     }
 
@@ -415,7 +451,7 @@ enum ShareMapAggregateBackgroundTask {
         scheduleNextRun()
         let work = Task {
             do {
-                let container = try await MainActor.run { try MovesApp.makeModelContainer() }
+                let container = try await MainActor.run { try MovesApp.sharedContainer() }
                 await ShareMapAggregateBuilder.refreshAll(in: container)
                 task.setTaskCompleted(success: !Task.isCancelled)
             } catch {

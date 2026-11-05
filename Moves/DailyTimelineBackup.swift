@@ -231,7 +231,7 @@ enum DailyTimelineBackup {
                 return
             }
             do {
-                let container = try await MainActor.run { try MovesApp.makeModelContainer() }
+                let container = try await MainActor.run { try MovesApp.sharedContainer() }
                 _ = try await saveYesterday(in: container)
                 task.setTaskCompleted(success: true)
             } catch {

@@ -219,6 +219,7 @@ struct PlaceMapDetailView: View {
         let undoPayload = DeletedPlaceUndoPayload(place: place)
         let undoManager = undoController.manager
 
+        SwiftDataTimelineRepository(modelContext: modelContext).recordRemoval(of: place)
         modelContext.delete(place)
         do {
             try modelContext.save()
@@ -1045,6 +1046,7 @@ struct MoveMapDetailView: View {
         let undoPayload = DeletedMoveUndoPayload(segment: segment)
         let undoManager = undoController.manager
 
+        SwiftDataTimelineRepository(modelContext: modelContext).recordRemoval(of: segment)
         modelContext.delete(segment)
         do {
             try modelContext.save()

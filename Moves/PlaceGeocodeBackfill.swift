@@ -519,7 +519,7 @@ enum PlaceGeocodeBackfill {
         scheduleNextRun()
         let work = Task {
             do {
-                let container = try await MainActor.run { try MovesApp.makeModelContainer() }
+                let container = try await MainActor.run { try MovesApp.sharedContainer() }
                 _ = await run(in: container)
                 task.setTaskCompleted(success: !Task.isCancelled)
             } catch {

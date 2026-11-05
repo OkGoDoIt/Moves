@@ -251,6 +251,285 @@ final class SampleStayReconciliationTests: XCTestCase {
         XCTAssertLessThan(walk.distanceMeters, 450)
     }
 
+    // MARK: - The person's corrections outlast the reconciler
+
+    func testSameVisitReportedTwiceIsOneStop() throws {
+        let container = try makeContainer()
+        let repository = SwiftDataTimelineRepository(modelContainer: container)
+        let arrival = Date().addingTimeInterval(-3 * 60 * 60)
+        let first = CLLocationCoordinate2D(latitude: 10.76, longitude: 106.70)
+        let refined = offset(first, north: 180, east: 60)
+
+        _ = try repository.addOrUpdateVisit(
+            from: MockVisit(coordinate: first, horizontalAccuracy: 30, arrivalDate: arrival, departureDate: .distantFuture)
+        )
+        let departure = arrival.addingTimeInterval(60 * 60)
+        _ = try repository.addOrUpdateVisit(
+            from: MockVisit(coordinate: refined, horizontalAccuracy: 14, arrivalDate: arrival, departureDate: departure)
+        )
+
+        let places = try ModelContext(container).fetch(FetchDescriptor<VisitPlace>())
+        XCTAssertEqual(places.count, 1)
+        XCTAssertEqual(places.first?.departureDate, departure)
+        XCTAssertLessThan(distance(try XCTUnwrap(places.first).coordinate, refined), 1)
+    }
+
+    func testCorrectedTripKeepsItsModeAndIsNotRebuilt() async throws {
+        let scene = try await makeTwoStopScene(separation: 300, tripMinutes: 8)
+        let move = try XCTUnwrap(try scene.fetchMoves().first)
+        try scene.repository.setTransportMode(.automotive, for: move, source: .user)
+        let id = move.id
+
+        await scene.assembler.reconcileSampleStays()
+        await scene.assembler.reconcileSampleStays()
+
+        let moves = try scene.fetchMoves()
+        XCTAssertEqual(moves.map(\.id), [id])
+        XCTAssertEqual(moves.first?.transportMode, .automotive)
+        XCTAssertEqual(moves.first?.transportModeSource, .user)
+    }
+
+    func testRideThatKeepsItsLabelIsNotRebuiltOnEveryPass() async throws {
+        let scene = try await makeTwoStopScene(separation: 300, tripMinutes: 8, steps: 0)
+        let id = try XCTUnwrap(try scene.fetchMoves().first).id
+        XCTAssertEqual(try scene.fetchMoves().first?.transportMode, .automotive)
+
+        await scene.assembler.reconcileSampleStays()
+        await scene.assembler.reconcileSampleStays()
+
+        XCTAssertEqual(try scene.fetchMoves().map(\.id), [id])
+    }
+
+    func testRemovedTripStaysRemoved() async throws {
+        let scene = try await makeTwoStopScene(separation: 2_000, tripMinutes: 10)
+        let move = try XCTUnwrap(try scene.fetchMoves().first)
+        scene.repository.recordRemoval(of: move)
+        scene.context.delete(move)
+        try scene.context.save()
+
+        await scene.assembler.reconcileSampleStays()
+
+        XCTAssertEqual(try scene.fetchMoves().count, 0)
+    }
+
+    func testRemovedStopIsNotRebuiltFromItsFixes() async throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let repository = SwiftDataTimelineRepository(modelContext: context)
+        let assembler = DefaultTimelineAssembler(
+            repository: repository,
+            motionClassifier: FixedMotionClassifier(mode: .automotive, steps: 0),
+            placeNameResolver: EmptyPlaceNameResolver()
+        )
+        let start = Date().addingTimeInterval(-6 * 60 * 60)
+        let cafe = CLLocationCoordinate2D(latitude: 10.76, longitude: 106.70)
+        _ = try repository.appendSamples(
+            from: (0...6).map { location(cafe, at: start.addingTimeInterval(Double($0) * 10 * 60)) },
+            source: .significantChange
+        )
+
+        await assembler.reconcileSampleStays()
+        let rebuilt = try XCTUnwrap(try context.fetch(FetchDescriptor<VisitPlace>()).first)
+        repository.recordRemoval(of: rebuilt)
+        context.delete(rebuilt)
+        try context.save()
+
+        await assembler.reconcileSampleStays()
+
+        XCTAssertEqual(try ModelContext(container).fetchCount(FetchDescriptor<VisitPlace>()), 0)
+    }
+
+    func testEditedTimesAreNotStretchedBackOverFixes() async throws {
+        let scene = try await makeTwoStopScene(separation: 2_000, tripMinutes: 10)
+        let place = try XCTUnwrap(try scene.fetchPlaces().first)
+        let arrival = place.arrivalDate.addingTimeInterval(60 * 60)
+        let departure = place.departureDate
+        try scene.repository.updateTimes(of: place, arrival: arrival, departure: departure)
+        XCTAssertEqual(place.origin, .manual)
+
+        await scene.assembler.reconcileSampleStays()
+
+        XCTAssertEqual(try scene.fetchPlaces().first?.arrivalDate, arrival)
+    }
+
+    func testSplitStopStaysSplit() async throws {
+        let scene = try await makeTwoStopScene(separation: 2_000, tripMinutes: 10)
+        let place = try XCTUnwrap(try scene.fetchPlaces().first)
+        let middle = place.arrivalDate.addingTimeInterval(60 * 60)
+        let before = try scene.fetchPlaces().count
+        _ = try scene.repository.splitVisit(place, at: middle)
+
+        await scene.assembler.reconcileSampleStays()
+
+        XCTAssertEqual(try scene.fetchPlaces().count, before + 1)
+        XCTAssertEqual(try scene.fetchPlaces().first?.departureDate, middle)
+    }
+
+    func testUnsureTripGoesToReviewAndConfidentOneDoesNot() async throws {
+        let unsure = try await makeTwoStopScene(separation: 2_000, tripMinutes: 10, confidence: 0.4)
+        XCTAssertEqual(try unsure.fetchMoves().first?.reviewState, .pending)
+        XCTAssertEqual(try unsure.fetchMoves().first?.transportModeSource, .auto)
+
+        let sure = try await makeTwoStopScene(separation: 2_000, tripMinutes: 10, confidence: 0.9)
+        await sure.assembler.reconcileSampleStays()
+        XCTAssertEqual(try sure.fetchMoves().first?.reviewState, ReviewState.none)
+    }
+
+    func testDismissedTripIsNotAskedAboutAgain() async throws {
+        let scene = try await makeTwoStopScene(separation: 2_000, tripMinutes: 10, confidence: 0.4)
+        let move = try XCTUnwrap(try scene.fetchMoves().first)
+        move.reviewState = .dismissed
+        try scene.context.save()
+
+        await scene.assembler.reconcileSampleStays()
+
+        XCTAssertEqual(try scene.fetchMoves().first?.reviewState, .dismissed)
+    }
+
+    func testPhotoLocationsDoNotBecomeStops() async throws {
+        let container = try makeContainer()
+        let repository = SwiftDataTimelineRepository(modelContainer: container)
+        let assembler = DefaultTimelineAssembler(
+            repository: repository,
+            motionClassifier: FixedMotionClassifier(mode: .automotive, steps: 0),
+            placeNameResolver: EmptyPlaceNameResolver()
+        )
+        let start = Date().addingTimeInterval(-6 * 60 * 60)
+        let paris = CLLocationCoordinate2D(latitude: 48.85, longitude: 2.35)
+        _ = try repository.appendSamples(
+            from: (0...6).map { location(paris, at: start.addingTimeInterval(Double($0) * 10 * 60)) },
+            source: .photoLibrary
+        )
+
+        await assembler.reconcileSampleStays()
+
+        XCTAssertEqual(try ModelContext(container).fetchCount(FetchDescriptor<VisitPlace>()), 0)
+    }
+
+    func testRepairMergesReportedTwiceStopsAndKeepsWhatTheyCarried() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let repository = SwiftDataTimelineRepository(modelContext: context)
+        let arrival = Date().addingTimeInterval(-30 * 24 * 60 * 60)
+        let coordinate = CLLocationCoordinate2D(latitude: 10.76, longitude: 106.70)
+        let twin = offset(coordinate, north: 150, east: 0)
+
+        let known = KnownPlace(name: "Studio", latitude: twin.latitude, longitude: twin.longitude)
+        context.insert(known)
+        let open = VisitPlace(
+            arrivalDate: arrival,
+            departureDate: nil,
+            latitude: coordinate.latitude,
+            longitude: coordinate.longitude,
+            horizontalAccuracy: 30,
+            userLabel: "Studio"
+        )
+        open.knownPlace = known
+        open.assignmentSource = .user
+        let photo = PhotoAttachment(assetLocalIdentifier: "asset", capturedAt: arrival)
+        context.insert(photo)
+        photo.visitPlace = open
+        let closed = VisitPlace(
+            arrivalDate: arrival,
+            departureDate: arrival.addingTimeInterval(60 * 60),
+            latitude: twin.latitude,
+            longitude: twin.longitude,
+            horizontalAccuracy: 14
+        )
+        context.insert(open)
+        context.insert(closed)
+        try context.save()
+
+        try repository.repairDuplicateStays()
+
+        let verification = ModelContext(container)
+        let places = try verification.fetch(FetchDescriptor<VisitPlace>())
+        XCTAssertEqual(places.count, 1)
+        let kept = try XCTUnwrap(places.first)
+        XCTAssertEqual(kept.departureDate, arrival.addingTimeInterval(60 * 60))
+        XCTAssertEqual(kept.userLabel, "Studio")
+        XCTAssertEqual(kept.knownPlace?.id, known.id)
+        XCTAssertEqual(kept.photoAttachments.count, 1, "Photos must move, not cascade-delete with the duplicate")
+    }
+
+    func testRepairKeepsStopsTheyNamedDifferently() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let arrival = Date().addingTimeInterval(-30 * 24 * 60 * 60)
+        let coordinate = CLLocationCoordinate2D(latitude: 10.76, longitude: 106.70)
+        for (label, north) in [("Bakery", 0.0), ("Barber", 150.0)] {
+            let place = offset(coordinate, north: north, east: 0)
+            context.insert(VisitPlace(
+                arrivalDate: arrival,
+                departureDate: arrival.addingTimeInterval(60 * 60),
+                latitude: place.latitude,
+                longitude: place.longitude,
+                horizontalAccuracy: 14,
+                userLabel: label
+            ))
+        }
+        try context.save()
+
+        try SwiftDataTimelineRepository(modelContext: context).repairDuplicateStays()
+
+        XCTAssertEqual(try ModelContext(container).fetchCount(FetchDescriptor<VisitPlace>()), 2)
+    }
+
+    /// Two stops with fixes that hold still at each and one trip the reconciler built between them.
+    private struct TwoStopScene {
+        let context: ModelContext
+        let repository: SwiftDataTimelineRepository
+        let assembler: DefaultTimelineAssembler
+
+        func fetchMoves() throws -> [MoveSegment] {
+            try context.fetch(FetchDescriptor<MoveSegment>())
+        }
+
+        func fetchPlaces() throws -> [VisitPlace] {
+            try context.fetch(FetchDescriptor<VisitPlace>(sortBy: [SortDescriptor(\.arrivalDate)]))
+        }
+    }
+
+    private func makeTwoStopScene(
+        separation: Double,
+        tripMinutes: Double,
+        steps: Int = 40,
+        confidence: Double = 0.9
+    ) async throws -> TwoStopScene {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let repository = SwiftDataTimelineRepository(modelContext: context)
+        let assembler = DefaultTimelineAssembler(
+            repository: repository,
+            motionClassifier: FixedMotionClassifier(mode: .automotive, steps: steps, confidence: confidence),
+            placeNameResolver: EmptyPlaceNameResolver()
+        )
+        let start = Date().addingTimeInterval(-8 * 60 * 60)
+        let home = CLLocationCoordinate2D(latitude: 10.76, longitude: 106.70)
+        let work = offset(home, north: separation, east: 0)
+        let left = start.addingTimeInterval(3 * 60 * 60)
+        let arrived = left.addingTimeInterval(tripMinutes * 60)
+        _ = try repository.addOrUpdateVisit(
+            from: MockVisit(coordinate: home, horizontalAccuracy: 20, arrivalDate: start, departureDate: left)
+        )
+        _ = try repository.addOrUpdateVisit(
+            from: MockVisit(
+                coordinate: work,
+                horizontalAccuracy: 20,
+                arrivalDate: arrived,
+                departureDate: arrived.addingTimeInterval(2 * 60 * 60)
+            )
+        )
+        _ = try repository.appendSamples(
+            from: (0...4).map { location(home, at: start.addingTimeInterval(Double($0) * 40 * 60)) }
+                + [location(home, at: left)]
+                + (0...3).map { location(work, at: arrived.addingTimeInterval(Double($0) * 40 * 60)) },
+            source: .significantChange
+        )
+        await assembler.reconcileSampleStays()
+        return TwoStopScene(context: context, repository: repository, assembler: assembler)
+    }
+
     private func timelineFixes(
         start: Date,
         home: CLLocationCoordinate2D,
@@ -291,12 +570,7 @@ final class SampleStayReconciliationTests: XCTestCase {
     }
 
     private func makeContainer() throws -> ModelContainer {
-        let schema = Schema([
-            DayTimeline.self,
-            VisitPlace.self,
-            MoveSegment.self,
-            LocationSample.self
-        ])
+        let schema = Schema(MovesTimelineSchema.models)
         let configuration = ModelConfiguration(
             schema: schema,
             isStoredInMemoryOnly: true,

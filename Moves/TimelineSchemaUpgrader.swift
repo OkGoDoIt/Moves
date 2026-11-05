@@ -8,7 +8,7 @@ import SwiftData
 /// launch: a UserDefaults version key skips work that already completed, and
 /// the individual steps are idempotent if the key is missing.
 enum TimelineSchemaUpgrader {
-    static let currentVersion = 1
+    static let currentVersion = 2
     static let userDefaultsKey = "moves.timelineSchemaVersion"
 
     /// Schedules an upgrade when the stored version is behind `currentVersion`.
@@ -36,6 +36,7 @@ enum TimelineSchemaUpgrader {
         try clusterUserLabeledPlaces(in: context)
         try backfillShortStops(in: context)
         try backfillRouteMatchPolicies(in: context)
+        try SwiftDataTimelineRepository(modelContext: context).repairDuplicateStays()
         if context.hasChanges {
             try context.save()
         }

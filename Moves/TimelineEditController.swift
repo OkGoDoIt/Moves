@@ -358,7 +358,8 @@ final class TimelineEditController: TimelineItemActions {
     private func deletePlace(_ visit: VisitPlace) {
         guard let context = modelContext else { return }
         let payload = TimelineDeletedPlacePayload(place: visit)
-        performStructural(named: String(localized: "Deleted")) { _, context in
+        performStructural(named: String(localized: "Deleted")) { repo, context in
+            repo.recordRemoval(of: visit)
             context.delete(visit)
             try context.save()
             registerRestore(payload, on: context)
@@ -368,7 +369,8 @@ final class TimelineEditController: TimelineItemActions {
     private func deleteMove(_ move: MoveSegment) {
         guard let context = modelContext else { return }
         let payload = TimelineDeletedMovePayload(segment: move)
-        performStructural(named: String(localized: "Deleted")) { _, context in
+        performStructural(named: String(localized: "Deleted")) { repo, context in
+            repo.recordRemoval(of: move)
             context.delete(move)
             try context.save()
             registerRestore(payload, on: context)

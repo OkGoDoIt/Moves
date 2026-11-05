@@ -1565,7 +1565,7 @@ enum RouteMatchBackgroundTask {
         scheduleNextRun()
         let work = Task {
             do {
-                let container = try await MainActor.run { try MovesApp.makeModelContainer() }
+                let container = try await MainActor.run { try MovesApp.sharedContainer() }
                 await rematchPendingMoves(in: container)
                 task.setTaskCompleted(success: !Task.isCancelled)
             } catch {
