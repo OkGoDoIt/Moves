@@ -49,9 +49,36 @@ struct TripListView: View {
     }
 
     private func delete(_ trip: NamedTrip) {
-        modelContext.undoManager?.setActionName(String(localized: "Delete trip"))
-        modelContext.delete(trip)
-        try? modelContext.save()
+        trip.delete(in: modelContext)
+    }
+}
+
+extension NamedTrip {
+    /// Deletes with a restore of its own, since SwiftData's undo of a delete can crash.
+    func delete(in context: ModelContext) {
+        let name = name
+        let startDate = startDate
+        let endDate = endDate
+        let notes = notes
+        let id = id
+        let createdAt = createdAt
+        let manager = context.undoManager
+
+        context.undoManager = nil
+        context.delete(self)
+        try? context.save()
+        context.undoManager = manager
+
+        manager?.registerUndo(withTarget: context) { context in
+            let current = context.undoManager
+            context.undoManager = nil
+            context.insert(
+                NamedTrip(name: name, startDate: startDate, endDate: endDate, notes: notes, id: id, createdAt: createdAt)
+            )
+            try? context.save()
+            context.undoManager = current
+        }
+        manager?.setActionName(String(localized: "Delete trip"))
     }
 }
 

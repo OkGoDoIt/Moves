@@ -8,7 +8,7 @@ import SwiftData
 /// launch: a UserDefaults version key skips work that already completed, and
 /// the individual steps are idempotent if the key is missing.
 enum TimelineSchemaUpgrader {
-    static let currentVersion = 2
+    static let currentVersion = 3
     static let userDefaultsKey = "moves.timelineSchemaVersion"
 
     @MainActor private static var running: Task<Void, Never>?
@@ -33,13 +33,17 @@ enum TimelineSchemaUpgrader {
         container: ModelContainer,
         defaults: UserDefaults = .standard
     ) {
-        guard defaults.integer(forKey: userDefaultsKey) < currentVersion else { return }
+        let storedVersion = defaults.integer(forKey: userDefaultsKey)
+        guard storedVersion < currentVersion else { return }
 
         running = Task.detached(priority: .userInitiated) {
             let context = ModelContext(container)
             context.autosaveEnabled = false
             do {
-                try upgrade(in: context)
+                try upgrade(in: context, from: storedVersion)
+                if storedVersion < 3 {
+                    await repairLongTrips(in: container)
+                }
                 defaults.set(currentVersion, forKey: userDefaultsKey)
             } catch {
                 print("Timeline schema upgrade failed: \(error.localizedDescription)")
@@ -49,13 +53,37 @@ enum TimelineSchemaUpgrader {
 
     /// Applies every backfill step. Exposed for tests; calling twice is a no-op
     /// besides rewriting the same derived values.
-    static func upgrade(in context: ModelContext) throws {
-        try clusterUserLabeledPlaces(in: context)
-        try backfillShortStops(in: context)
-        try backfillRouteMatchPolicies(in: context)
-        try SwiftDataTimelineRepository(modelContext: context).repairDuplicateStays()
+    static func upgrade(in context: ModelContext, from storedVersion: Int = 0) throws {
+        if storedVersion < 1 {
+            try clusterUserLabeledPlaces(in: context)
+            try backfillShortStops(in: context)
+            try backfillRouteMatchPolicies(in: context)
+        }
+        if storedVersion < 3 {
+            let repository = SwiftDataTimelineRepository(modelContext: context)
+            try repository.repairDuplicateStays()
+            try repository.repairTripLabels()
+        }
         if context.hasChanges {
             try context.save()
+        }
+    }
+
+    /// Older trips that swallowed a stop, rebuilt from stored fixes. Names for any stops
+    /// this finds come from the geocode backfill, so the upgrade never waits on the network.
+    @MainActor
+    static func repairLongTrips(in container: ModelContainer) async {
+        await DefaultTimelineAssembler(
+            repository: SwiftDataTimelineRepository(modelContainer: container),
+            motionClassifier: CoreMotionTransportClassifier(),
+            placeNameResolver: UnnamedPlaceResolver()
+        )
+        .repairLongHistoricalTrips()
+    }
+
+    private struct UnnamedPlaceResolver: PlaceNameResolver {
+        func resolveName(for coordinate: CLLocationCoordinate2D) async -> String? {
+            nil
         }
     }
 

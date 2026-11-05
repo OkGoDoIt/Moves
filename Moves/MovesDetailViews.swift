@@ -216,8 +216,12 @@ struct PlaceMapDetailView: View {
         isDeleting = true
         defer { isDeleting = false }
 
-        let undoPayload = DeletedPlaceUndoPayload(place: place)
+        let undoPayload = TimelineDeletedPlacePayload(place: place)
         let undoManager = undoController.manager
+        // Undo restores from the payload; SwiftData's own undo of a delete can crash.
+        let contextUndoManager = modelContext.undoManager
+        modelContext.undoManager = nil
+        defer { modelContext.undoManager = contextUndoManager }
 
         SwiftDataTimelineRepository(modelContext: modelContext).recordRemoval(of: place)
         place.keepPhotosOnDay()
@@ -225,7 +229,7 @@ struct PlaceMapDetailView: View {
         do {
             try modelContext.save()
             undoManager.registerUndo(withTarget: modelContext) { context in
-                undoPayload.restore(in: context)
+                context.restoreWithoutUndo(undoPayload)
             }
             undoManager.setActionName("Delete Place")
             dismiss()
@@ -799,10 +803,15 @@ struct MoveMapDetailView: View {
         guard segment.transportMode != newMode else { return }
 
         let previousMode = segment.transportMode
+        let previousModeSource = segment.transportModeSource
+        let previousReviewState = segment.reviewState
         let previousRouteCacheSignature = segment.routeCacheSignature
         let previousRouteCacheCoordinatesData = segment.routeCacheCoordinatesData
         let previousManualRouteCoordinatesData = segment.manualRouteCoordinatesData
         segment.transportMode = newMode
+        // Marks this as the person's choice so background repair leaves it alone.
+        segment.transportModeSource = .user
+        segment.reviewState = .confirmed
         segment.clearCachedRouteCoordinates()
         segment.clearManualRouteCoordinates()
         routeCoordinates = MoveRouteGeometry.rawCoordinates(for: segment)
@@ -822,6 +831,8 @@ struct MoveMapDetailView: View {
             }
         } catch {
             segment.transportMode = previousMode
+            segment.transportModeSource = previousModeSource
+            segment.reviewState = previousReviewState
             segment.routeCacheSignature = previousRouteCacheSignature
             segment.routeCacheCoordinatesData = previousRouteCacheCoordinatesData
             segment.manualRouteCoordinatesData = previousManualRouteCoordinatesData
@@ -1047,15 +1058,19 @@ struct MoveMapDetailView: View {
         isDeleting = true
         defer { isDeleting = false }
 
-        let undoPayload = DeletedMoveUndoPayload(segment: segment)
+        let undoPayload = TimelineDeletedMovePayload(segment: segment)
         let undoManager = undoController.manager
+        // Undo restores from the payload; SwiftData's own undo of a delete can crash.
+        let contextUndoManager = modelContext.undoManager
+        modelContext.undoManager = nil
+        defer { modelContext.undoManager = contextUndoManager }
 
         SwiftDataTimelineRepository(modelContext: modelContext).recordRemoval(of: segment)
         modelContext.delete(segment)
         do {
             try modelContext.save()
             undoManager.registerUndo(withTarget: modelContext) { context in
-                undoPayload.restore(in: context)
+                context.restoreWithoutUndo(undoPayload)
             }
             undoManager.setActionName("Delete Move")
             dismiss()
@@ -1088,149 +1103,6 @@ private struct ManualRouteWaypointMarker: View {
                     .stroke(Color.accentColor, lineWidth: isActive ? 3 : 2)
             }
             .shadow(color: .black.opacity(0.2), radius: 2, y: 1)
-    }
-}
-
-private struct DeletedPlaceUndoPayload {
-    let id: UUID
-    let arrivalDate: Date
-    let departureDate: Date?
-    let latitude: Double
-    let longitude: Double
-    let horizontalAccuracy: Double
-    let userLabel: String?
-    let autoLabel: String?
-    let comment: String?
-    let createdAt: Date
-    let dayTimeline: DayTimeline?
-    let outgoingMoves: [MoveSegment]
-    let incomingMoves: [MoveSegment]
-
-    init(place: VisitPlace) {
-        id = place.id
-        arrivalDate = place.arrivalDate
-        departureDate = place.departureDate
-        latitude = place.latitude
-        longitude = place.longitude
-        horizontalAccuracy = place.horizontalAccuracy
-        userLabel = place.userLabel
-        autoLabel = place.autoLabel
-        comment = place.comment
-        createdAt = place.createdAt
-        dayTimeline = place.dayTimeline
-        outgoingMoves = place.outgoingMoves
-        incomingMoves = place.incomingMoves
-    }
-
-    @MainActor
-    func restore(in context: ModelContext) {
-        guard !containsPlace(with: id, in: context) else { return }
-
-        let restored = VisitPlace(
-            arrivalDate: arrivalDate,
-            departureDate: departureDate,
-            latitude: latitude,
-            longitude: longitude,
-            horizontalAccuracy: horizontalAccuracy,
-            userLabel: userLabel,
-            autoLabel: autoLabel,
-            comment: comment
-        )
-        restored.id = id
-        restored.createdAt = createdAt
-        restored.dayTimeline = dayTimeline
-        context.insert(restored)
-
-        for move in outgoingMoves {
-            move.startPlace = restored
-        }
-        for move in incomingMoves {
-            move.endPlace = restored
-        }
-    }
-
-    private func containsPlace(with id: UUID, in context: ModelContext) -> Bool {
-        do {
-            return try context.fetch(FetchDescriptor<VisitPlace>()).contains { $0.id == id }
-        } catch {
-            print("Failed to inspect place undo state: \(error.localizedDescription)")
-            return false
-        }
-    }
-}
-
-private struct DeletedMoveUndoPayload {
-    let id: UUID
-    let dedupeKey: String
-    let startDate: Date
-    let endDate: Date
-    let transportMode: TransportMode
-    let distanceMeters: Double
-    let stepCount: Int?
-    let comment: String?
-    let createdAt: Date
-    let startPlace: VisitPlace?
-    let endPlace: VisitPlace?
-    let dayTimeline: DayTimeline?
-    let routeCacheSignature: String?
-    let routeCacheCoordinatesData: Data?
-    let manualRouteCoordinatesData: Data?
-    let samples: [LocationSample]
-
-    init(segment: MoveSegment) {
-        id = segment.id
-        dedupeKey = segment.dedupeKey
-        startDate = segment.startDate
-        endDate = segment.endDate
-        transportMode = segment.transportMode
-        distanceMeters = segment.distanceMeters
-        stepCount = segment.stepCount
-        comment = segment.comment
-        createdAt = segment.createdAt
-        startPlace = segment.startPlace
-        endPlace = segment.endPlace
-        dayTimeline = segment.dayTimeline
-        routeCacheSignature = segment.routeCacheSignature
-        routeCacheCoordinatesData = segment.routeCacheCoordinatesData
-        manualRouteCoordinatesData = segment.manualRouteCoordinatesData
-        samples = segment.samples
-    }
-
-    @MainActor
-    func restore(in context: ModelContext) {
-        guard !containsMove(with: id, in: context) else { return }
-
-        let restored = MoveSegment(
-            dedupeKey: dedupeKey,
-            startDate: startDate,
-            endDate: endDate,
-            transportMode: transportMode,
-            distanceMeters: distanceMeters,
-            stepCount: stepCount,
-            comment: comment
-        )
-        restored.id = id
-        restored.createdAt = createdAt
-        restored.startPlace = startPlace
-        restored.endPlace = endPlace
-        restored.dayTimeline = dayTimeline
-        restored.routeCacheSignature = routeCacheSignature
-        restored.routeCacheCoordinatesData = routeCacheCoordinatesData
-        restored.manualRouteCoordinatesData = manualRouteCoordinatesData
-        context.insert(restored)
-
-        for sample in samples {
-            sample.moveSegment = restored
-        }
-    }
-
-    private func containsMove(with id: UUID, in context: ModelContext) -> Bool {
-        do {
-            return try context.fetch(FetchDescriptor<MoveSegment>()).contains { $0.id == id }
-        } catch {
-            print("Failed to inspect move undo state: \(error.localizedDescription)")
-            return false
-        }
     }
 }
 

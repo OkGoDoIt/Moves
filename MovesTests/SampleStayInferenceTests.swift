@@ -90,6 +90,43 @@ final class SampleStayInferenceTests: XCTestCase {
         XCTAssertEqual(stays.count, 1)
     }
 
+    func testRideReadAsAWalkIsRelabeledByItsSteps() {
+        // 7 km in 24 minutes with 600 steps: a motorbike in traffic.
+        XCTAssertEqual(
+            ImplausibleWalk.mode(proposed: .walking, straightLine: 7_100, duration: 24 * 60, stepCount: 600),
+            .cycling
+        )
+        XCTAssertEqual(
+            ImplausibleWalk.mode(proposed: .walking, straightLine: 20_000, duration: 25 * 60, stepCount: 200),
+            .automotive
+        )
+    }
+
+    func testLongFastRideIsNotABikeRide() {
+        XCTAssertEqual(
+            ImplausibleWalk.mode(proposed: .cycling, straightLine: 64_000, duration: 146 * 60, stepCount: nil),
+            .automotive
+        )
+        // A real long ride at a cyclist's pace keeps its label.
+        XCTAssertEqual(
+            ImplausibleWalk.mode(proposed: .cycling, straightLine: 30_000, duration: 150 * 60, stepCount: nil),
+            .cycling
+        )
+    }
+
+    func testRealWalkWithSloppyTimesStaysAWalk() {
+        // 555 steps in 5.7 minutes is a walking pace, whatever the clock says about speed.
+        XCTAssertEqual(
+            ImplausibleWalk.mode(proposed: .walking, straightLine: 1_284, duration: 5.7 * 60, stepCount: 555),
+            .walking
+        )
+        // An imported log has no steps, and this pace is a plausible walk.
+        XCTAssertEqual(
+            ImplausibleWalk.mode(proposed: .walking, straightLine: 1_777, duration: 19 * 60, stepCount: 0),
+            .walking
+        )
+    }
+
     func testLastBlockAfterARideIsWalkingWhenThereAreSteps() {
         let mode = LastBlockWalk.mode(
             proposed: .automotive,
@@ -450,6 +487,167 @@ final class SampleStayReconciliationTests: XCTestCase {
         XCTAssertEqual(kept.userLabel, "Studio")
         XCTAssertEqual(kept.knownPlace?.id, known.id)
         XCTAssertEqual(kept.photoAttachments.count, 1, "Photos must move, not cascade-delete with the duplicate")
+    }
+
+    func testTripThatSwallowedANightBecomesAStop() async throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let repository = SwiftDataTimelineRepository(modelContext: context)
+        let assembler = DefaultTimelineAssembler(
+            repository: repository,
+            motionClassifier: FixedMotionClassifier(mode: .walking, steps: 0),
+            placeNameResolver: EmptyPlaceNameResolver()
+        )
+        let evening = Date().addingTimeInterval(-40 * 24 * 60 * 60)
+        let hotel = CLLocationCoordinate2D(latitude: 10.34, longitude: 107.08)
+        let beach = offset(hotel, north: 400, east: 0)
+        let morning = evening.addingTimeInterval(16 * 60 * 60)
+        let first = try repository.addOrUpdateVisit(
+            from: MockVisit(coordinate: hotel, horizontalAccuracy: 20, arrivalDate: evening.addingTimeInterval(-60 * 60), departureDate: evening)
+        )
+        let second = try repository.addOrUpdateVisit(
+            from: MockVisit(coordinate: beach, horizontalAccuracy: 20, arrivalDate: morning, departureDate: morning.addingTimeInterval(2 * 60 * 60))
+        )
+        // Fixes hold at the hotel, go silent overnight, then reach the beach.
+        let samples = try repository.appendSamples(
+            from: (0...3).map { location(hotel, at: evening.addingTimeInterval(Double($0) * -20 * 60)) }
+                + [location(hotel, at: morning.addingTimeInterval(-10 * 60))]
+                + [location(beach, at: morning)],
+            source: .fileRouteImport
+        )
+        _ = try repository.upsertMove(
+            startPlace: first,
+            endPlace: second,
+            startDate: evening,
+            endDate: morning,
+            transportMode: .unknown,
+            distanceMeters: 400,
+            stepCount: 0,
+            samples: samples
+        )
+
+        await assembler.repairLongHistoricalTrips()
+
+        let moves = try ModelContext(container).fetch(FetchDescriptor<MoveSegment>())
+        XCTAssertFalse(
+            moves.contains { $0.endDate.timeIntervalSince($0.startDate) > 6 * 60 * 60 },
+            "The night should be a stop, not one long trip"
+        )
+        let places = try ModelContext(container).fetch(FetchDescriptor<VisitPlace>(sortBy: [SortDescriptor(\.arrivalDate)]))
+        XCTAssertGreaterThan(
+            try XCTUnwrap(places.first?.departureDate).timeIntervalSince(evening),
+            8 * 60 * 60,
+            "The hotel stop should run through the night"
+        )
+    }
+
+    func testLongFlightIsLeftAlone() async throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let repository = SwiftDataTimelineRepository(modelContext: context)
+        let takeoff = Date().addingTimeInterval(-40 * 24 * 60 * 60)
+        let landing = takeoff.addingTimeInterval(14 * 60 * 60)
+        let saigon = try repository.addOrUpdateVisit(
+            from: MockVisit(coordinate: CLLocationCoordinate2D(latitude: 10.81, longitude: 106.66), horizontalAccuracy: 20, arrivalDate: takeoff.addingTimeInterval(-60 * 60), departureDate: takeoff)
+        )
+        let sanFrancisco = try repository.addOrUpdateVisit(
+            from: MockVisit(coordinate: CLLocationCoordinate2D(latitude: 37.62, longitude: -122.38), horizontalAccuracy: 20, arrivalDate: landing, departureDate: landing.addingTimeInterval(60 * 60))
+        )
+        let flight = try repository.upsertMove(
+            startPlace: saigon,
+            endPlace: sanFrancisco,
+            startDate: takeoff,
+            endDate: landing,
+            transportMode: .plane,
+            distanceMeters: 12_700_000,
+            stepCount: 0,
+            samples: []
+        )
+
+        XCTAssertEqual(try repository.implausiblyLongTrips().count, 0)
+        XCTAssertEqual(flight.transportMode, .plane)
+    }
+
+    func testPhantomTripBetweenTheSameStopMerges() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let repository = SwiftDataTimelineRepository(modelContext: context)
+        let start = Date().addingTimeInterval(-30 * 24 * 60 * 60)
+        let home = CLLocationCoordinate2D(latitude: 10.76, longitude: 106.70)
+        let wander = offset(home, north: 124, east: 0)
+        let first = try repository.addOrUpdateVisit(
+            from: MockVisit(coordinate: home, horizontalAccuracy: 14, arrivalDate: start, departureDate: start.addingTimeInterval(3 * 60 * 60))
+        )
+        let second = try repository.addOrUpdateVisit(
+            from: MockVisit(coordinate: wander, horizontalAccuracy: 19, arrivalDate: start.addingTimeInterval(3 * 60 * 60 + 84), departureDate: start.addingTimeInterval(4 * 60 * 60))
+        )
+        _ = try repository.upsertMove(
+            startPlace: first,
+            endPlace: second,
+            startDate: start.addingTimeInterval(3 * 60 * 60),
+            endDate: start.addingTimeInterval(3 * 60 * 60 + 84),
+            transportMode: .walking,
+            distanceMeters: 1_017,
+            stepCount: 0,
+            samples: []
+        )
+
+        try repository.repairDuplicateStays()
+
+        let verification = ModelContext(container)
+        XCTAssertEqual(try verification.fetchCount(FetchDescriptor<VisitPlace>()), 1)
+        XCTAssertEqual(try verification.fetchCount(FetchDescriptor<MoveSegment>()), 0)
+    }
+
+    func testLateReportOfARemovedStopDoesNotBringItBack() async throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let repository = SwiftDataTimelineRepository(modelContext: context)
+        let assembler = DefaultTimelineAssembler(
+            repository: repository,
+            motionClassifier: FixedMotionClassifier(mode: .walking, steps: 0),
+            placeNameResolver: EmptyPlaceNameResolver()
+        )
+        let arrival = Date().addingTimeInterval(-3 * 60 * 60)
+        let cafe = CLLocationCoordinate2D(latitude: 10.76, longitude: 106.70)
+        let place = try repository.addOrUpdateVisit(
+            from: MockVisit(coordinate: cafe, horizontalAccuracy: 20, arrivalDate: arrival, departureDate: .distantFuture)
+        )
+        repository.recordRemoval(of: place)
+        context.delete(place)
+        try context.save()
+
+        await assembler.ingestVisit(
+            MockVisit(coordinate: cafe, horizontalAccuracy: 14, arrivalDate: arrival, departureDate: arrival.addingTimeInterval(60 * 60))
+        )
+
+        XCTAssertEqual(try ModelContext(container).fetchCount(FetchDescriptor<VisitPlace>()), 0)
+    }
+
+    func testStopThatRanPastAnOutingResumesAfterIt() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let repository = SwiftDataTimelineRepository(modelContext: context)
+        let evening = Date().addingTimeInterval(-40 * 24 * 60 * 60)
+        let home = CLLocationCoordinate2D(latitude: 10.76, longitude: 106.70)
+        let dinner = offset(home, north: 1_000, east: 0)
+        let stop = try repository.addOrUpdateVisit(
+            from: MockVisit(coordinate: home, horizontalAccuracy: 15, arrivalDate: evening, departureDate: evening.addingTimeInterval(14 * 60 * 60))
+        )
+        stop.userLabel = "Home"
+        _ = try repository.addOrUpdateVisit(
+            from: MockVisit(coordinate: dinner, horizontalAccuracy: 20, arrivalDate: evening.addingTimeInterval(60 * 60), departureDate: evening.addingTimeInterval(2 * 60 * 60))
+        )
+
+        let stretches = try repository.splitStopsAroundContainedOnes()
+
+        XCTAssertEqual(stretches.count, 1)
+        let places = try ModelContext(container).fetch(FetchDescriptor<VisitPlace>(sortBy: [SortDescriptor(\.arrivalDate)]))
+        XCTAssertEqual(places.count, 3)
+        XCTAssertEqual(places[0].departureDate, evening.addingTimeInterval(60 * 60))
+        XCTAssertEqual(places[2].arrivalDate, evening.addingTimeInterval(2 * 60 * 60))
+        XCTAssertEqual(places[2].departureDate, evening.addingTimeInterval(14 * 60 * 60))
+        XCTAssertEqual(places[2].userLabel, "Home")
     }
 
     func testRepairKeepsStopsTheyNamedDifferently() throws {

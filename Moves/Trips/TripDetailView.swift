@@ -265,9 +265,7 @@ struct TripDetailView: View {
 
     private func deleteTrip() {
         guard let trip else { return }
-        modelContext.undoManager?.setActionName(String(localized: "Delete trip"))
-        modelContext.delete(trip)
-        try? modelContext.save()
+        trip.delete(in: modelContext)
         dismiss()
     }
 

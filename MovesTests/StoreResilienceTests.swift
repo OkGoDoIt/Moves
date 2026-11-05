@@ -72,7 +72,24 @@ final class StoreResilienceTests: XCTestCase {
         XCTAssertEqual(try context.fetchCount(FetchDescriptor<MoveSegment>()), before.moves)
         XCTAssertEqual(try context.fetchCount(FetchDescriptor<LocationSample>()), before.samples)
 
+        let flightsBefore = try Self.flightStarts(in: ModelContext(container))
+        let pendingBefore = try ModelContext(container).fetch(FetchDescriptor<MoveSegment>())
+            .filter { $0.reviewState == .pending }
+            .count
         try TimelineSchemaUpgrader.upgrade(in: ModelContext(container))
+        await TimelineSchemaUpgrader.repairLongTrips(in: container)
+        XCTAssertEqual(try Self.flightStarts(in: ModelContext(container)), flightsBefore, "A flight changed")
+        let repaired = try ModelContext(container).fetch(FetchDescriptor<MoveSegment>())
+        XCTAssertEqual(
+            repaired.filter { $0.transportMode != .plane && $0.endDate.timeIntervalSince($0.startDate) > 6 * 60 * 60 }.count,
+            0,
+            "A trip still swallows a stop"
+        )
+        XCTAssertLessThanOrEqual(
+            repaired.filter { $0.reviewState == .pending }.count,
+            pendingBefore + 3,
+            "An upgrade should not fill the Review inbox"
+        )
 
         let afterUpgrade = ModelContext(container)
         XCTAssertEqual(try afterUpgrade.fetchCount(FetchDescriptor<LocationSample>()), before.samples)
@@ -104,6 +121,8 @@ final class StoreResilienceTests: XCTestCase {
         let quality = try Self.quality(of: finalContext)
         XCTAssertLessThanOrEqual(quality.open, 1, "Only the current stop may be open")
         XCTAssertEqual(quality.selfLoops, 0, "A trip may not start and end at the same stop")
+        XCTAssertEqual(quality.partialOverlaps, 0, "Nobody is in two places at once")
+        XCTAssertEqual(quality.containedStops, 0, "A stop still runs straight past an outing")
 
         await ShareMapAggregateBuilder.refreshAll(in: container)
         XCTAssertFalse(try ModelContext(container).fetch(FetchDescriptor<ShareMapAggregate>()).isEmpty)
@@ -253,6 +272,10 @@ final class StoreResilienceTests: XCTestCase {
             throw XCTSkip("Could not query the store copy")
         }
         return Int(sqlite3_column_int64(statement, 0))
+    }
+
+    private static func flightStarts(in context: ModelContext) throws -> Set<Date> {
+        Set(try context.fetch(FetchDescriptor<MoveSegment>()).filter { $0.transportMode == .plane }.map(\.startDate))
     }
 
     private struct Quality {

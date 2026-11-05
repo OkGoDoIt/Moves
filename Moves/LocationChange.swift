@@ -535,6 +535,10 @@ final class DefaultTimelineAssembler: TimelineAssembler {
             }
 
             do {
+                if try repository.visitWasRemoved(visit) {
+                    await reconcileSampleStays()
+                    return
+                }
                 let visitPlace = try repository.addOrUpdateVisit(from: visit)
                 try repository.applyPlaceLearning(to: visitPlace)
                 await fillAutomaticPlaceLabelIfNeeded(for: visitPlace)
@@ -608,67 +612,94 @@ final class DefaultTimelineAssembler: TimelineAssembler {
     private func performSampleStayReconciliation() async {
         await TimelineSchemaUpgrader.waitUntilFinished()
         do {
-            let result = try repository.reconcileSampleStays(now: .now)
-
-            for leg in result.moveLegs {
-                let classification = await motionClassifier.classifyTransport(
-                    start: leg.startDate,
-                    end: leg.endDate,
-                    locations: leg.locations
-                )
-                let steps = await motionClassifier.stepCount(start: leg.startDate, end: leg.endDate)
-                let straightLine = CLLocation(
-                    latitude: leg.startPlace.latitude,
-                    longitude: leg.startPlace.longitude
-                ).distance(from: CLLocation(
-                    latitude: leg.endPlace.latitude,
-                    longitude: leg.endPlace.longitude
-                ))
-                let transportMode = LastBlockWalk.mode(
-                    proposed: classification.mode,
-                    distance: straightLine,
-                    duration: leg.endDate.timeIntervalSince(leg.startDate),
-                    stepCount: steps
-                )
-                let between = try repository.samples(from: leg.startDate, to: leg.endDate)
-                let move = try repository.upsertMove(
-                    startPlace: leg.startPlace,
-                    endPlace: leg.endPlace,
-                    startDate: leg.startDate,
-                    endDate: leg.endDate,
-                    transportMode: transportMode,
-                    distanceMeters: leg.distanceMeters,
-                    stepCount: steps,
-                    samples: between
-                )
-                // Ask only about what the rules left unsure, and never ask twice.
-                if move.reviewState == .none,
-                   move.transportModeSource == .auto,
-                   transportMode == classification.mode,
-                   classification.confidence < TimelineReviewHeuristics.uncertainModeConfidence {
-                    move.reviewState = .pending
-                }
-                if leg.startPlace.reviewState == .none,
-                   TimelineReviewHeuristics.isShortTransitStop(leg.startPlace) {
-                    leg.startPlace.reviewState = .pending
-                }
-            }
-
-            for place in result.newPlaces {
-                try repository.applyPlaceLearning(to: place)
-            }
-            for place in result.newPlaces.prefix(8) {
-                await fillAutomaticPlaceLabelIfNeeded(for: place)
-            }
-            try repository.saveIfNeeded()
-
-            if !result.newPlaces.isEmpty || !result.moveLegs.isEmpty {
-                Self.timelineLog.info(
-                    "Rebuilt \(result.newPlaces.count) stops and \(result.moveLegs.count) trips from stored fixes"
-                )
-            }
+            try await apply(try repository.reconcileSampleStays(now: .now))
         } catch {
             Self.timelineLog.error("Failed to rebuild stops from fixes: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// One-time repair of older trips that swallowed a stop, rebuilt from their own fixes.
+    func repairLongHistoricalTrips() async {
+        do {
+            // Rebuilt trips have no motion history this far back, so most would read as
+            // unsure. Nobody should be asked to review August because of an upgrade.
+            for trip in try repository.implausiblyLongTrips() {
+                try await apply(try repository.reconcileSampleStays(covering: trip), asksForReview: false)
+            }
+            for stretch in try repository.splitStopsAroundContainedOnes() {
+                try await apply(try repository.reconcileSampleStays(covering: stretch), asksForReview: false)
+            }
+            try repository.repairTripLabels()
+        } catch {
+            Self.timelineLog.error("Failed to repair long trips: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func apply(_ result: SampleStayReconciliationResult, asksForReview: Bool = true) async throws {
+        for leg in result.moveLegs {
+            let classification = await motionClassifier.classifyTransport(
+                start: leg.startDate,
+                end: leg.endDate,
+                locations: leg.locations
+            )
+            let steps = await motionClassifier.stepCount(start: leg.startDate, end: leg.endDate)
+            let straightLine = CLLocation(
+                latitude: leg.startPlace.latitude,
+                longitude: leg.startPlace.longitude
+            ).distance(from: CLLocation(
+                latitude: leg.endPlace.latitude,
+                longitude: leg.endPlace.longitude
+            ))
+            let duration = leg.endDate.timeIntervalSince(leg.startDate)
+            let afterLastBlock = LastBlockWalk.mode(
+                proposed: classification.mode,
+                distance: straightLine,
+                duration: duration,
+                stepCount: steps
+            )
+            let transportMode = ImplausibleWalk.mode(
+                proposed: afterLastBlock,
+                straightLine: straightLine,
+                duration: duration,
+                stepCount: steps
+            )
+            let between = try repository.samples(from: leg.startDate, to: leg.endDate)
+            let move = try repository.upsertMove(
+                startPlace: leg.startPlace,
+                endPlace: leg.endPlace,
+                startDate: leg.startDate,
+                endDate: leg.endDate,
+                transportMode: transportMode,
+                distanceMeters: leg.distanceMeters,
+                stepCount: steps,
+                samples: between
+            )
+            // Ask only about what the rules left unsure, and never ask twice. A ride read
+            // as a walk is one of those: the steps rule it out, but not which vehicle.
+            let unsureOfMode = transportMode == classification.mode
+                ? classification.confidence < TimelineReviewHeuristics.uncertainModeConfidence
+                : transportMode != afterLastBlock
+            if asksForReview, move.reviewState == .none, move.transportModeSource == .auto, unsureOfMode {
+                move.reviewState = .pending
+            }
+            if asksForReview, leg.startPlace.reviewState == .none,
+               TimelineReviewHeuristics.isShortTransitStop(leg.startPlace) {
+                leg.startPlace.reviewState = .pending
+            }
+        }
+
+        for place in result.newPlaces {
+            try repository.applyPlaceLearning(to: place)
+        }
+        for place in result.newPlaces.prefix(8) {
+            await fillAutomaticPlaceLabelIfNeeded(for: place)
+        }
+        try repository.saveIfNeeded()
+
+        if !result.newPlaces.isEmpty || !result.moveLegs.isEmpty {
+            Self.timelineLog.info(
+                "Rebuilt \(result.newPlaces.count) stops and \(result.moveLegs.count) trips from stored fixes"
+            )
         }
     }
 

@@ -608,11 +608,17 @@ final class MoveSegment {
         routeCacheCoordinatesData = nil
     }
 
+    /// True once this row has left the store, which a long await can outlast.
+    var hasLeftStore: Bool {
+        isDeleted || (modelContext == nil && persistentModelID.storeIdentifier != nil)
+    }
+
     /// Route caches and match labels are derived data. With the undo manager attached they
     /// land on the undo stack above the person's own edit, and the next Undo reverts a cache
     /// instead of that edit. Saves inside the window because SwiftData registers pending
     /// changes with whichever manager is attached when it processes them.
     func writeDerivedRouteData(_ write: () -> Void) {
+        guard !hasLeftStore else { return }
         guard let context = modelContext, let undoManager = context.undoManager else {
             write()
             return
@@ -905,6 +911,9 @@ final class NamedTrip {
 
 protocol TimelineRepository {
     func addOrUpdateVisit(from visit: CLVisit) throws -> VisitPlace
+    /// True when iOS is reporting a stop the person already removed. Its departure report
+    /// can arrive after the removal.
+    func visitWasRemoved(_ visit: CLVisit) throws -> Bool
     func appendSamples(from locations: [CLLocation], source: LocationSampleSource) throws -> [LocationSample]
     func latestPlace(before date: Date, excluding placeID: UUID?) throws -> VisitPlace?
     func samples(from startDate: Date, to endDate: Date) throws -> [LocationSample]
@@ -915,6 +924,15 @@ protocol TimelineRepository {
     /// one trip covering every hour until the next visit arrived. This pass
     /// reads those fixes and corrects that.
     func reconcileSampleStays(now: Date) throws -> SampleStayReconciliationResult
+    /// Trips too long and too slow to be one journey, usually a stop that was never closed.
+    func implausiblyLongTrips() throws -> [DateInterval]
+    /// Corrects labels the rules would no longer give, leaving corrected trips alone.
+    func repairTripLabels() throws
+    /// Ends stops that run straight past an outing somewhere else, resuming them afterward.
+    /// Returns the stretches whose trips now need rebuilding.
+    func splitStopsAroundContainedOnes() throws -> [DateInterval]
+    /// Rebuilds stops and trips across one older stretch, allowing for nights of silence.
+    func reconcileSampleStays(covering trip: DateInterval) throws -> SampleStayReconciliationResult
     func upsertMove(
         startPlace: VisitPlace,
         endPlace: VisitPlace,
@@ -1520,6 +1538,45 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             _ = try collapseDuplicateMoves(around: move)
         }
         try saveIfNeeded()
+    }
+
+    /// One-time correction of labels the rules would no longer give: rides read as walks,
+    /// and short hops still marked stationary or unknown. Corrected trips stay as they are.
+    func repairTripLabels() throws {
+        for move in try modelContext.fetch(FetchDescriptor<MoveSegment>()) where !isUserCurated(move) {
+            guard let start = move.startPlace?.coordinate, let end = move.endPlace?.coordinate else { continue }
+            let straightLine = Self.distanceMeters(from: start, to: end)
+            let duration = move.endDate.timeIntervalSince(move.startDate)
+            let mode = ImplausibleWalk.mode(
+                proposed: LastBlockWalk.mode(
+                    proposed: move.transportMode,
+                    distance: straightLine,
+                    duration: duration,
+                    stepCount: move.stepCount
+                ),
+                straightLine: straightLine,
+                duration: duration,
+                stepCount: move.stepCount
+            )
+            if mode != move.transportMode {
+                move.transportMode = mode
+                move.clearCachedRouteCoordinates()
+            }
+        }
+        try saveIfNeeded()
+    }
+
+    func visitWasRemoved(_ visit: CLVisit) throws -> Bool {
+        let arrival = normalizedArrivalDate(for: visit)
+        guard try existingVisit(near: arrival, coordinate: visit.coordinate) == nil else { return false }
+        return try modelContext.fetch(FetchDescriptor<RemovedTimelineSpan>()).contains { span in
+            span.kind == .stop
+                && abs(span.startDate.timeIntervalSince(arrival)) <= Self.placeDedupeArrivalWindow
+                && Self.distanceMeters(
+                    from: visit.coordinate,
+                    to: CLLocationCoordinate2D(latitude: span.latitude, longitude: span.longitude)
+                ) <= Self.removedStopMatchDistance
+        }
     }
 
     func addOrUpdateVisit(from visit: CLVisit) throws -> VisitPlace {
@@ -2176,16 +2233,120 @@ final class SwiftDataTimelineRepository: TimelineRepository {
     }
 
     func reconcileSampleStays(now: Date) throws -> SampleStayReconciliationResult {
-        let windowStart = try reconciliationWindowStart(through: now)
+        try reconcileSampleStays(
+            from: try reconciliationWindowStart(through: now),
+            through: now,
+            placesThrough: now,
+            configuration: SampleStayInference.Configuration()
+        )
+    }
+
+    func reconcileSampleStays(covering trip: DateInterval) throws -> SampleStayReconciliationResult {
+        var configuration = SampleStayInference.Configuration()
+        configuration.maximumStillGap = 30 * 60 * 60
+        let end = trip.end.addingTimeInterval(60 * 60)
+        return try reconcileSampleStays(
+            from: trip.start.addingTimeInterval(-60 * 60),
+            through: end,
+            placesThrough: end.addingTimeInterval(36 * 60 * 60),
+            configuration: configuration
+        )
+    }
+
+    func splitStopsAroundContainedOnes() throws -> [DateInterval] {
+        let places = try modelContext.fetch(
+            FetchDescriptor<VisitPlace>(sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .forward)])
+        )
+        var stretches: [DateInterval] = []
+
+        for (index, stop) in places.enumerated() {
+            guard stop.origin == .sensor, let departure = stop.departureDate else { continue }
+            let outings = places[(index + 1)...]
+                .prefix { $0.arrivalDate < departure }
+                .filter { other in
+                    guard let otherEnd = other.departureDate else { return false }
+                    return otherEnd <= departure
+                        && departure.timeIntervalSince(other.arrivalDate) > 60
+                        && Self.distanceMeters(from: stop.coordinate, to: other.coordinate) > Self.overlappingStayMatchDistance
+                }
+            guard let first = outings.first,
+                  let last = outings.last,
+                  let backAt = last.departureDate
+            else { continue }
+
+            // A few minutes left over isn't a return, just a stray fix at the end.
+            let leavesFrom: VisitPlace
+            if departure.timeIntervalSince(backAt) >= SampleStayInference.Configuration().minimumStayDuration {
+                let resumed = VisitPlace(
+                    arrivalDate: backAt,
+                    departureDate: departure,
+                    latitude: stop.latitude,
+                    longitude: stop.longitude,
+                    horizontalAccuracy: stop.horizontalAccuracy,
+                    userLabel: stop.userLabel,
+                    autoLabel: stop.autoLabel,
+                    comment: stop.comment
+                )
+                resumed.knownPlace = stop.knownPlace
+                resumed.assignmentSource = stop.assignmentSource
+                resumed.assignmentConfidence = stop.assignmentConfidence
+                resumed.countryCode = stop.countryCode
+                resumed.locality = stop.locality
+                resumed.administrativeArea = stop.administrativeArea
+                resumed.thoroughfare = stop.thoroughfare
+                resumed.formattedAddress = stop.formattedAddress
+                resumed.dayTimeline = try timeline(for: backAt)
+                modelContext.insert(resumed)
+                leavesFrom = resumed
+            } else {
+                leavesFrom = last
+            }
+            for move in stop.outgoingMoves {
+                move.startPlace = leavesFrom
+            }
+            stop.departureDate = first.arrivalDate
+            stretches.append(DateInterval(start: first.arrivalDate, end: max(departure, first.arrivalDate)))
+        }
+
+        try saveIfNeeded()
+        return stretches
+    }
+
+    func implausiblyLongTrips() throws -> [DateInterval] {
+        try modelContext.fetch(
+            FetchDescriptor<MoveSegment>(sortBy: [SortDescriptor(\MoveSegment.startDate, order: .forward)])
+        )
+        .compactMap { move -> DateInterval? in
+            let duration = move.endDate.timeIntervalSince(move.startDate)
+            guard duration >= 3 * 60 * 60,
+                  move.transportMode != .plane,
+                  !isUserCurated(move),
+                  let start = move.startPlace?.coordinate,
+                  let end = move.endPlace?.coordinate
+            else { return nil }
+            // A long real trip covers ground. This only finds candidates: the rebuild adds
+            // a stop only where fixes hold still, so a hike that ends where it began stays.
+            let speed = Self.distanceMeters(from: start, to: end) / duration
+            guard speed < (duration >= 6 * 60 * 60 ? 4 : 1) else { return nil }
+            return DateInterval(start: move.startDate, end: move.endDate)
+        }
+    }
+
+    private func reconcileSampleStays(
+        from windowStart: Date,
+        through now: Date,
+        placesThrough: Date,
+        configuration: SampleStayInference.Configuration
+    ) throws -> SampleStayReconciliationResult {
         // A photo's location says where it was taken, which may not be where the person
         // was: photos arrive from other people with their original place and time.
         let storedSamples = try samples(from: windowStart, to: now.addingTimeInterval(60))
             .filter { $0.source != .photoLibrary }
         let removedSpans = try removedSpans(since: windowStart.addingTimeInterval(-36 * 60 * 60))
         let points = storedSamples.map { LocationLogPoint(location: $0.asLocation) }
-        let inferred = SampleStayInference.stays(from: points, now: now)
+        let inferred = SampleStayInference.stays(from: points, now: now, configuration: configuration)
 
-        var places = try placesArriving(from: windowStart.addingTimeInterval(-36 * 60 * 60), through: now)
+        var places = try placesArriving(from: windowStart.addingTimeInterval(-36 * 60 * 60), through: placesThrough)
         let clamped = inferred.flatMap { split($0, aroundFarPlaces: places) }
         var newPlaces: [VisitPlace] = []
 
@@ -2243,7 +2404,10 @@ final class SwiftDataTimelineRepository: TimelineRepository {
     /// A correction, an import, a comment, a hand-drawn route, a Health workout, or a
     /// reviewed trip is the person's account of it. Automatic repair must leave it alone.
     private func isUserCurated(_ move: MoveSegment) -> Bool {
-        if move.transportModeSource != .auto || move.origin != .sensor || move.routeMatchPolicy != .auto {
+        // `.recorded` is not on this list: the schema upgrader sets it on any trip with
+        // route fixes, so it says nothing about what the person chose.
+        if move.transportModeSource != .auto || move.origin != .sensor
+            || move.routeMatchPolicy == .manual || move.routeMatchPolicy == .roads {
             return true
         }
         if move.reviewState == .confirmed || move.reviewState == .dismissed {
@@ -2538,7 +2702,10 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             let sameNamedHandoff = abs(gap) <= 60
                 && !currentName.isEmpty
                 && currentName == next.userLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let reach = overlaps || sameNamedHandoff ? Self.overlappingStayMatchDistance : Self.stayMatchDistance
+            let phantom = hasPhantomTrip(from: current, to: next, separation: distance)
+            let reach = overlaps || sameNamedHandoff || phantom
+                ? Self.overlappingStayMatchDistance
+                : Self.stayMatchDistance
             guard current.origin == .sensor, next.origin == .sensor, distance <= reach else {
                 index += 1
                 continue
@@ -2550,7 +2717,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                 around: current.coordinate,
                 samples: samples
             )
-            guard overlaps || stayed || sameNamedHandoff else {
+            guard overlaps || stayed || sameNamedHandoff || phantom else {
                 index += 1
                 continue
             }
@@ -2569,6 +2736,10 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                 }
             }
             mergePlace(next, into: current)
+            // The trip between them, if any, now goes nowhere.
+            for move in current.outgoingMoves where move.endPlace?.id == current.id && !isUserCurated(move) {
+                modelContext.delete(move)
+            }
             if let nextDeparture = next.departureDate, nextDeparture > (current.departureDate ?? current.arrivalDate) {
                 current.departureDate = nextDeparture
             } else if next.departureDate == nil {
@@ -2577,6 +2748,18 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             current.arrivalDate = min(current.arrivalDate, next.arrivalDate)
             modelContext.delete(next)
             places.remove(at: index + 1)
+        }
+    }
+
+    /// A short hop between two ends that barely differ, with almost no steps, is GPS
+    /// wandering around a door rather than a departure.
+    private func hasPhantomTrip(from current: VisitPlace, to next: VisitPlace, separation: CLLocationDistance) -> Bool {
+        guard separation <= 150 else { return false }
+        return current.outgoingMoves.contains { move in
+            move.endPlace?.id == next.id
+                && !isUserCurated(move)
+                && move.endDate.timeIntervalSince(move.startDate) <= 5 * 60
+                && (move.stepCount ?? 0) < 60
         }
     }
 
@@ -3326,9 +3509,13 @@ final class SwiftDataTimelineRepository: TimelineRepository {
     func visits(in range: DateInterval) throws -> [VisitPlace] {
         let rangeStart = range.start
         let rangeEnd = range.end
+        // Every map scrub lands here, so don't load all of history to find what overlaps.
+        // Two months is longer than any stay that isn't simply still open.
+        let earliestArrival = rangeStart.addingTimeInterval(-60 * 24 * 60 * 60)
         let descriptor = FetchDescriptor<VisitPlace>(
             predicate: #Predicate { place in
                 place.arrivalDate < rangeEnd
+                    && (place.arrivalDate >= earliestArrival || place.departureDate == nil)
             },
             sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .forward)]
         )

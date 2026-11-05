@@ -24,12 +24,9 @@ extension View {
     /// only add extra scroll range, so mid-list rows still draw through the pill.
     /// A layout sibling shrinks the viewport instead.
     func movesFloatingTabBarClearance() -> some View {
-        VStack(spacing: 0) {
-            self
-            Color.clear
-                .frame(height: MovesChromeMetrics.floatingTabBarClearance)
-                .accessibilityHidden(true)
-        }
+        // An inset, not a spacer: rows keep scrolling under the floating bar and the last
+        // one can still scroll clear of it.
+        safeAreaPadding(.bottom, MovesChromeMetrics.floatingTabBarClearance)
     }
 }
 

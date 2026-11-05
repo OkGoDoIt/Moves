@@ -505,8 +505,23 @@ struct EditTimesBounds {
 }
 
 @MainActor
-private protocol TimelineUndoRestoring {
+protocol TimelineUndoRestoring {
     func restore(in context: ModelContext)
+}
+
+extension ModelContext {
+    /// Restores a deleted item with the undo manager detached, so the restore itself
+    /// doesn't become a step on the person's undo stack.
+    @MainActor
+    func restoreWithoutUndo(_ payload: some TimelineUndoRestoring) {
+        let manager = undoManager
+        undoManager = nil
+        payload.restore(in: self)
+        if hasChanges {
+            try? save()
+        }
+        undoManager = manager
+    }
 }
 
 /// Undo payloads outlive the rows they describe, so they keep IDs and find the live row
@@ -539,7 +554,7 @@ private enum LiveTimelineRows {
     }
 }
 
-private struct TimelineDeletedPlacePayload: TimelineUndoRestoring {
+struct TimelineDeletedPlacePayload: TimelineUndoRestoring {
     let id: UUID
     let arrivalDate: Date
     let departureDate: Date?
@@ -638,7 +653,7 @@ private struct TimelineDeletedPlacePayload: TimelineUndoRestoring {
     }
 }
 
-private struct TimelineDeletedMovePayload: TimelineUndoRestoring {
+struct TimelineDeletedMovePayload: TimelineUndoRestoring {
     let id: UUID
     let dedupeKey: String
     let startDate: Date

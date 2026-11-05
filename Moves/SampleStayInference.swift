@@ -209,6 +209,39 @@ enum SampleStayInference {
     }
 }
 
+/// A ride the motion sensors read as walking.
+///
+/// Phones in a pocket on a motorbike or in traffic can report walking for a whole trip.
+/// Steps tell them apart: a real walk runs near 100 steps a minute even when its start
+/// and end times are sloppy enough to make the speed look wrong, so a fast trip with few
+/// steps is the only case relabeled.
+enum ImplausibleWalk {
+    static func mode(
+        proposed: TransportMode,
+        straightLine: CLLocationDistance,
+        duration: TimeInterval,
+        stepCount: Int?
+    ) -> TransportMode {
+        guard straightLine >= 800, duration > 0 else { return proposed }
+        let speed = straightLine / duration
+
+        // Sixty kilometres at 25 km/h is a road trip, not a bike ride.
+        if proposed == .cycling {
+            return straightLine >= 20_000 && speed >= 6 ? .automotive : proposed
+        }
+
+        guard proposed == .walking || proposed == .running, speed >= 2.5 else { return proposed }
+        let ride: TransportMode = speed >= 9 || straightLine >= 20_000 ? .automotive : .cycling
+
+        if let stepCount, stepCount > 0 {
+            return Double(stepCount) / (duration / 60) < 50 ? ride : proposed
+        }
+        // No step data, as in an imported log. Only a sustained pace rules out feet.
+        let fastestOnFoot: CLLocationSpeed = proposed == .running ? 6 : 3.5
+        return speed >= fastestOnFoot && duration >= 5 * 60 ? ride : proposed
+    }
+}
+
 /// The shape of "got off a ride and walked the last couple of blocks."
 ///
 /// Low-power fixes often have nothing between the kerb and the door, so the

@@ -213,6 +213,8 @@ enum RoadRouteMatcher {
 
     static func matchedCoordinates(for move: MoveSegment) async -> [CLLocationCoordinate2D] {
         let coordinates = await resolveDisplayedCoordinates(for: move)
+        // Matching can take seconds, and the person may have deleted the trip meanwhile.
+        guard !move.hasLeftStore else { return coordinates }
         // The stored distance is what was measured or imported, and totals read it, so
         // showing a path leaves it alone. Only a path the person drew, or a move with no
         // distance yet, takes the displayed length.
@@ -354,6 +356,7 @@ enum RoadRouteMatcher {
     }
 
     private static func apply(resolution: RouteMatchResolution, to move: MoveSegment) {
+        guard !move.hasLeftStore else { return }
         let becomesManual = resolution.summary == RouteMatchSummaries.manual && move.routeMatchPolicy != .manual
         guard becomesManual
             || move.routeMatchConfidence != resolution.confidence
@@ -373,6 +376,7 @@ enum RoadRouteMatcher {
         signature: String,
         on move: MoveSegment
     ) {
+        guard !move.hasLeftStore else { return }
         guard move.routeCacheSignature != signature || move.routeCacheCoordinatesData == nil else { return }
         move.writeDerivedRouteData {
             move.storeCachedRouteCoordinates(coordinates, signature: signature)
