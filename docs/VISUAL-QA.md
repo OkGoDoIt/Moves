@@ -63,3 +63,11 @@ The remaining matrix includes the shortest supported iPhone, large iPhones,
 maximum accessibility text, dark appearance, secondary sheets, and the final
 combined upstream feature build. Duo remains lower priority. Each new or changed
 surface must receive its own rendered interaction check before it is called done.
+
+The final compact-layout source (`0b4ae17e`) passed its full suite: 392 tests,
+zero failures, and zero runtime warnings. Fifteen checks were skipped because the
+isolated worktree lacks optional private import fixtures and calendar permission;
+the copied-phone store-preservation test passed. Result bundle:
+`/tmp/Moves-phone-polish-final-tests.xcresult`. The broader integration chat owns
+the combined merge and pre-push suite. These post-walk polish changes are not yet
+installed on G17; build 44 remains the verified phone baseline.
