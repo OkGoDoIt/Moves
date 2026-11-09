@@ -220,6 +220,8 @@ struct TransportModeMenu: View {
             HStack(spacing: 3) {
                 Text(move.transportMode.title)
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
                 Image(systemName: "chevron.up.chevron.down")
                     .font(.system(size: 8, weight: .bold))
             }

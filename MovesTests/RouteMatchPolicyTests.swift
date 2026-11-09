@@ -328,6 +328,24 @@ final class RouteMatchPolicyTests: XCTestCase {
         XCTAssertNil(try storedMove(moveID))
     }
 
+    func testDeferredMatchingResumesAmongMovesWithTheSameStartTime() async throws {
+        let fixture = try loadFixture("sparse-car")
+        let firstID = makeMove(from: fixture, includePlaces: true).id
+        let secondID = makeMove(from: fixture, includePlaces: true).id
+        try context.save()
+        RoadRouteMatcher.directionsProvider = FakeDirectionsProvider(style: .close)
+        let defaults = try makeDefaults()
+
+        for _ in 0..<3 {
+            _ = await RouteMatchBackgroundTask.matchWaitingMoves(in: container, limit: 1, defaults: defaults)
+        }
+
+        XCTAssertNotNil(try XCTUnwrap(try storedMove(firstID)).routeCacheCoordinatesData)
+        XCTAssertNotNil(try XCTUnwrap(try storedMove(secondID)).routeCacheCoordinatesData)
+        XCTAssertNil(defaults.object(forKey: RouteMatchBackgroundTask.cursorKey))
+        XCTAssertNil(defaults.object(forKey: RouteMatchBackgroundTask.cursorIDsKey))
+    }
+
     func testDeferredMatchingStopsAndKeepsItsPlaceWhenTheBudgetRunsOut() async throws {
         let move = makeMove(from: try loadFixture("sparse-car"), includePlaces: true)
         try context.save()
@@ -351,6 +369,37 @@ final class RouteMatchPolicyTests: XCTestCase {
         let resumed = await RouteMatchBackgroundTask.matchWaitingMoves(in: container, defaults: defaults)
         XCTAssertEqual(resumed, .finished)
         XCTAssertNotNil(try XCTUnwrap(try storedMove(moveID)).routeCacheCoordinatesData)
+    }
+
+    func testDeferredMatchingPreservesACorrectionMadeDuringTheRequest() async throws {
+        let move = makeMove(from: try loadFixture("sparse-car"), includePlaces: true)
+        try context.save()
+        let moveID = move.id
+        RoadRouteMatcher.directionsProvider = CorrectingDirectionsProvider(container: container, moveID: moveID)
+
+        _ = await RoadRouteMatcher.matchDeferred(moveID: moveID, in: container)
+
+        let corrected = try XCTUnwrap(try storedMove(moveID))
+        XCTAssertEqual(corrected.transportMode, .walking)
+        XCTAssertEqual(corrected.transportModeSource, .user)
+        XCTAssertEqual(corrected.routeMatchPolicy, .recorded)
+        XCTAssertEqual(corrected.routeMatchConfidence, .unknown)
+        XCTAssertNil(corrected.routeMatchSummary)
+        XCTAssertNil(corrected.routeCacheCoordinatesData)
+    }
+
+    func testForegroundMatchingReturnsTheNewManualPathAfterAnInFlightEdit() async throws {
+        let move = makeMove(from: try loadFixture("sparse-car"), includePlaces: true)
+        let manual = [CLLocationCoordinate2D(latitude: 52.5, longitude: 13.4), CLLocationCoordinate2D(latitude: 52.501, longitude: 13.401)]
+        RoadRouteMatcher.directionsProvider = ManualEditingDirectionsProvider(move: move, coordinates: manual)
+
+        let result = await RoadRouteMatcher.matchedCoordinates(for: move)
+
+        XCTAssertEqual(result.count, manual.count)
+        XCTAssertEqual(result.first?.latitude, manual.first?.latitude)
+        XCTAssertEqual(move.routeMatchPolicy, .manual)
+        XCTAssertEqual(move.routeMatchSummary, RouteMatchSummaries.manual)
+        XCTAssertEqual(move.distanceMeters, routeDistance(for: manual), accuracy: 0.1)
     }
 
     private func storedMove(_ id: UUID) throws -> MoveSegment? {
@@ -427,8 +476,58 @@ actor FakeDirectionsProvider: DirectionsProvider {
     }
 }
 
-/// Deletes a move on another context while its directions request is in flight, the way a
-/// person or the stay reconciler can while a background match runs.
+/// Simulates a person's correction while the directions service is answering.
+@MainActor
+private final class ManualEditingDirectionsProvider: DirectionsProvider {
+    let move: MoveSegment
+    let coordinates: [CLLocationCoordinate2D]
+
+    init(move: MoveSegment, coordinates: [CLLocationCoordinate2D]) {
+        self.move = move
+        self.coordinates = coordinates
+    }
+
+    func routes(from start: CLLocationCoordinate2D, to end: CLLocationCoordinate2D, transportType: MKDirectionsTransportType, requestsAlternateRoutes: Bool) async throws -> [[CLLocationCoordinate2D]] {
+        move.storeManualRouteCoordinates(coordinates)
+        move.routeMatchPolicy = .manual
+        return [[start, end]]
+    }
+}
+
+/// Simulates a correction on a different context during background matching.
+private actor CorrectingDirectionsProvider: DirectionsProvider {
+    let container: ModelContainer
+    let moveID: UUID
+
+    init(container: ModelContainer, moveID: UUID) {
+        self.container = container
+        self.moveID = moveID
+    }
+
+    func routes(
+        from start: CLLocationCoordinate2D,
+        to end: CLLocationCoordinate2D,
+        transportType: MKDirectionsTransportType,
+        requestsAlternateRoutes: Bool
+    ) async throws -> [[CLLocationCoordinate2D]] {
+        let container = container
+        let moveID = moveID
+        try await MainActor.run {
+            let context = ModelContext(container)
+            let descriptor = FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.id == moveID })
+            if let move = try context.fetch(descriptor).first {
+                move.transportMode = .walking
+                move.transportModeSource = .user
+                move.routeMatchPolicy = .recorded
+                move.clearCachedRouteCoordinates()
+                try context.save()
+            }
+        }
+        return [[start, end]]
+    }
+}
+
+/// Deletes a move on another context while its directions request is in flight.
 private actor DeletingDirectionsProvider: DirectionsProvider {
     let container: ModelContainer
     let moveID: UUID

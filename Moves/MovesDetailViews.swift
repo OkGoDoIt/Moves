@@ -40,7 +40,13 @@ struct PlaceMapDetailView: View {
 
     var body: some View {
         GeometryReader { proxy in
-            if LandscapeLayoutSettings.isLandscapePhone(proxy.size) {
+            if #available(iOS 27.1, *) {
+                MovesDetailArrangement {
+                    placeMap
+                } controls: {
+                    placeControls
+                }
+            } else if LandscapeLayoutSettings.usesSplitLayout(proxy.size) {
                 LandscapeSplitView {
                     placeMap
                 } controlPane: {
@@ -73,7 +79,7 @@ struct PlaceMapDetailView: View {
                 Button(role: .destructive) {
                     isConfirmingDeletion = true
                 } label: {
-                    Image(systemName: "trash")
+                    Label("Delete place", systemImage: "trash")
                 }
                 .disabled(isDeleting)
             }
@@ -329,7 +335,13 @@ struct MoveMapDetailView: View {
 
     var body: some View {
         GeometryReader { proxy in
-            if LandscapeLayoutSettings.isLandscapePhone(proxy.size) {
+            if #available(iOS 27.1, *) {
+                MovesDetailArrangement {
+                    moveMap
+                } controls: {
+                    moveControls
+                }
+            } else if LandscapeLayoutSettings.usesSplitLayout(proxy.size) {
                 LandscapeSplitView {
                     moveMap
                 } controlPane: {
@@ -374,8 +386,7 @@ struct MoveMapDetailView: View {
                 .help("Transport mode")
             }
 
-            ToolbarItem(placement: .topBarTrailing) {
-                HStack(spacing: 10) {
+            ToolbarItemGroup(placement: .topBarTrailing) {
                     if segment.usesHealthWorkoutRoute {
                         Button {
                             openAppleHealth()
@@ -391,7 +402,7 @@ struct MoveMapDetailView: View {
                     Button {
                         setManualRouteEditing(!isEditingManualRoute)
                     } label: {
-                        Image(systemName: isEditingManualRoute ? "hand.draw.fill" : "hand.draw")
+                        Label(isEditingManualRoute ? "Stop editing route" : "Edit route", systemImage: isEditingManualRoute ? "hand.draw.fill" : "hand.draw")
                     }
                     .disabled(routeCoordinates.count < 2 || isSavingManualRoute)
                     .help(isEditingManualRoute ? "Stop editing route" : "Edit route")
@@ -399,10 +410,9 @@ struct MoveMapDetailView: View {
                     Button(role: .destructive) {
                         isConfirmingDeletion = true
                     } label: {
-                        Image(systemName: "trash")
+                        Label("Delete move", systemImage: "trash")
                     }
                     .disabled(isDeleting)
-                }
             }
         }
         .confirmationDialog(

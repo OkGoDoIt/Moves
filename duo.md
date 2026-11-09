@@ -1,5 +1,7 @@
 # Moves on iPhone Duo
 
+Implementation update (2026-11-09): the shared wide layout now uses iOS 27.1 `ArrangementView` with split styling, and place/move details use an overlay arrangement. The fallback chooses layouts from available width and preserves pane identity with `AnyLayout`. Detail toolbar actions are separate system items. Capture and sync services remain owned by the app, above view identity. Device Hub verification is recorded in `docs/RELEASE-2026-11-09.md`. The analysis below remains the design brief.
+
 Analysis date: 2026-09-14. This plan applies Apple’s iPhone Duo HIG to the current SwiftUI/MapKit timeline app.
 
 Revision 2026-09-14 (second pass): re-read the published HIG page and added layout options per surface, control ownership, bar-free map surfaces, an explicit open/close transition contract, and the conditional reserved regions — including the Dynamic Island expansion that the route-tracking Live Activity causes. Nothing from the first pass was removed.

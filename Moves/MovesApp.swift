@@ -56,6 +56,7 @@ struct MovesApp: App {
     @StateObject private var locationServiceSyncManager: LocationServiceSyncManager
     @StateObject private var photoLibraryController: PhotoLibraryController
     @StateObject private var webhookSyncManager: WebhookSyncManager
+    @StateObject private var calendarSync: MovesCalendarSync
 
     init() {
         do {
@@ -83,6 +84,7 @@ struct MovesApp: App {
             _webhookSyncManager = StateObject(
                 wrappedValue: WebhookSyncManager(modelContainer: container)
             )
+            _calendarSync = StateObject(wrappedValue: MovesCalendarSync(container: container))
             MovesIntentRuntime.shared.configure(
                 modelContainer: container,
                 captureManager: captureManager
@@ -239,6 +241,7 @@ struct MovesApp: App {
                     .environmentObject(locationServiceSyncManager)
                     .environmentObject(photoLibraryController)
                     .environmentObject(webhookSyncManager)
+                    .environmentObject(calendarSync)
             }
         }
         .modelContainer(sharedModelContainer)
@@ -257,6 +260,7 @@ struct MovesApp: App {
                     await locationServiceSyncManager.syncNewSamplesIfEnabled()
                     await photoLibraryController.handleSceneBecameActive()
                     await webhookSyncManager.syncNewItemsIfEnabled()
+                    calendarSync.schedule()
                 }
                 Task(priority: .utility) {
                     await ShareMapAggregateBuilder.refreshAll(in: sharedModelContainer)

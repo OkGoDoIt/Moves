@@ -212,9 +212,14 @@ enum RoadRouteMatcher {
     }
 
     static func matchedCoordinates(for move: MoveSegment) async -> [CLLocationCoordinate2D] {
+        guard !move.hasLeftStore else { return [] }
+        let signature = matchCacheSignature(for: move, fallback: MoveRouteGeometry.rawCoordinates(for: move))
         let coordinates = await resolveDisplayedCoordinates(for: move)
         // Matching can take seconds, and the person may have deleted the trip meanwhile.
         guard !move.hasLeftStore else { return coordinates }
+        guard matchesCurrentInput(move, signature: signature) else {
+            return await matchedCoordinates(for: move)
+        }
         // The stored distance is what was measured or imported, and totals read it, so
         // showing a path leaves it alone. Only a path the person drew, or a move with no
         // distance yet, takes the displayed length.
@@ -327,7 +332,10 @@ enum RoadRouteMatcher {
             return .throttled
         }
         let writeContext = ModelContext(container)
-        guard let current = fetchMove(id: moveID, in: writeContext) else { return .skipped }
+        guard !Task.isCancelled,
+              let current = fetchMove(id: moveID, in: writeContext),
+              matchesCurrentInput(current, signature: cacheSignature)
+        else { return .skipped }
         await persist(result, on: current, cacheKey: cacheKey, cacheSignature: cacheSignature)
         if writeContext.hasChanges {
             try? writeContext.save()
@@ -382,6 +390,9 @@ enum RoadRouteMatcher {
         cacheKey: Int,
         cacheSignature: String
     ) async {
+        // A person can change the mode or draw a path while directions are in flight.
+        // An older answer must never overwrite that correction's route metadata.
+        guard matchesCurrentInput(move, signature: cacheSignature) else { return }
         apply(resolution: result, to: move)
         if result.rejected {
             await memo.storeRejected(result, for: cacheKey, ttl: rejectedMemoTTL)
@@ -420,11 +431,16 @@ enum RoadRouteMatcher {
         signature: String,
         on move: MoveSegment
     ) {
-        guard !move.hasLeftStore else { return }
+        guard matchesCurrentInput(move, signature: signature) else { return }
         guard move.routeCacheSignature != signature || move.routeCacheCoordinatesData == nil else { return }
         move.writeDerivedRouteData {
             move.storeCachedRouteCoordinates(coordinates, signature: signature)
         }
+    }
+
+    private static func matchesCurrentInput(_ move: MoveSegment, signature: String) -> Bool {
+        guard !move.hasLeftStore else { return false }
+        return matchCacheSignature(for: move, fallback: MoveRouteGeometry.rawCoordinates(for: move)) == signature
     }
 
     private static func recordedCoordinates(
@@ -1631,6 +1647,7 @@ enum RouteMatchBackgroundTask {
 
     /// Start date of the last move a walk through history reached.
     static let cursorKey = "routing.deferredMatch.cursor"
+    static let cursorIDsKey = "routing.deferredMatch.cursorIDs"
     private static let movesPerRun = 200
     /// Long enough for `DirectionsRequestLimiter`'s per-minute window to clear.
     private static let throttleWait: Duration = .seconds(61)
@@ -1662,6 +1679,7 @@ enum RouteMatchBackgroundTask {
     /// of wherever the last walk got to.
     static func scheduleAfterImport(defaults: UserDefaults = .standard) {
         defaults.removeObject(forKey: cursorKey)
+        defaults.removeObject(forKey: cursorIDsKey)
         submit(earliestBeginDate: nil)
     }
 
@@ -1712,17 +1730,23 @@ enum RouteMatchBackgroundTask {
         defaults: UserDefaults = .standard
     ) async -> RunResult {
         let cursor = defaults.object(forKey: cursorKey) as? Date ?? .distantFuture
+        let cursorIDs = (defaults.stringArray(forKey: cursorIDsKey) ?? []).compactMap(UUID.init(uuidString:))
         var descriptor = FetchDescriptor<MoveSegment>(
             predicate: #Predicate { move in
                 move.routeMatchPolicyRaw == "auto"
                     && move.routeCacheCoordinatesData == nil
-                    && move.startDate < cursor
+                    && (move.startDate < cursor || (move.startDate == cursor && !cursorIDs.contains(move.id)))
             },
             sortBy: [SortDescriptor(\.startDate, order: .reverse)]
         )
         descriptor.fetchLimit = limit
         // Values only: these rows must not be held across the directions requests.
-        let waiting = ((try? ModelContext(container).fetch(descriptor)) ?? []).map { (id: $0.id, startDate: $0.startDate) }
+        let waiting: [(id: UUID, startDate: Date)]
+        do {
+            waiting = try ModelContext(container).fetch(descriptor).map { (id: $0.id, startDate: $0.startDate) }
+        } catch {
+            return .interrupted
+        }
 
         for move in waiting {
             guard !Task.isCancelled else { return .interrupted }
@@ -1733,11 +1757,19 @@ enum RouteMatchBackgroundTask {
                 outcome = await RoadRouteMatcher.matchDeferred(moveID: move.id, in: container)
                 if case .throttled = outcome { return .throttled }
             }
+            guard !Task.isCancelled else { return .interrupted }
+            // Imports can have several moves at the same instant. Keep their IDs so a
+            // run ending in the middle of that group does not skip the remaining moves.
+            let sameDate = defaults.object(forKey: cursorKey) as? Date == move.startDate
+            var completedIDs = sameDate ? defaults.stringArray(forKey: cursorIDsKey) ?? [] : []
+            completedIDs.append(move.id.uuidString)
+            defaults.set(completedIDs, forKey: cursorIDsKey)
             defaults.set(move.startDate, forKey: cursorKey)
         }
 
         if waiting.count < limit {
             defaults.removeObject(forKey: cursorKey)
+            defaults.removeObject(forKey: cursorIDsKey)
             return .finished
         }
         return .more

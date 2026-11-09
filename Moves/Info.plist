@@ -270,6 +270,8 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Moves uses calendar access to keep your completed visits up to date in a separate Moves calendar.</string>
 	<key>NSUbiquitousContainers</key>
 	<dict>
 		<key>MOVES_ICLOUD_CONTAINER_KEY</key>

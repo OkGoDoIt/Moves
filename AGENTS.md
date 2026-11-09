@@ -14,7 +14,7 @@ This clone is Roger’s fork of [holgerkrupp/Moves](https://github.com/holgerkru
 
 | Need | Use |
 |---|---|
-| Xcode | 27.x (this machine: 27.0 / iOS 27 SDK). Deployment target is **iOS 26** / watchOS 26. |
+| Xcode | 27.x (this machine: 27.1 / iOS 27.1 SDK). Deployment target is **iOS 26** / watchOS 26. |
 | Project | `Moves.xcodeproj`, scheme **Moves** (embeds Widgets + Watch). |
 | Simulator default | iPhone 18 Pro, iOS 27.0 (`159ACCC1-78B1-4E1A-9BDE-F1315C3FE5B2`) |
 | Physical iPhone | **G17**, iPhone 17, iOS 27.0, UDID `00008150-000534E2368A401C`. Developer Mode is on. |
@@ -110,7 +110,8 @@ Optional: `DEVICE_UDID=... ./Scripts/install-iphone.sh`.
 | App Intents / Siri / Action button | `Moves/MovesAppIntents.swift` |
 | Widgets + Live Activity | `Moves Widgets/` (route Canvas from `TimelineWidgetSnapshot.routePoints`; Live Activity uses the mode palette) |
 | Watch companion GPS | `Moves Watch App/` (today’s route uses mode color assets) |
-| iPhone Duo layout notes (not implemented) | `duo.md` |
+| Adaptive / iPhone Duo layouts | `ContentView.swift` (`LandscapeSplitView`, `MovesDetailArrangement`), `MovesDetailViews.swift`, `MovesTimelineViews.swift`; design and verification in `duo.md` |
+| Optional calendar sync | `Moves/CalendarSync.swift`; Settings → Calendar. Dedicated Moves calendar, names and times only, explicit account/start-date selection, off by default. |
 
 Keep capture, Live Activity, uploads, and SwiftData writes **independent of view identity**. Fold/open/rotation must not tear down `MovesLocationCaptureManager`.
 

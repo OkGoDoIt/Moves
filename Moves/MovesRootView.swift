@@ -40,6 +40,7 @@ final class MovesRootController: ObservableObject {
     @Published var selectedDayKey = ""
     @Published var shouldOpenToday = false
     @Published var requestedPlaceID: UUID?
+    @Published var requestedMoveDetailID: UUID?
     /// Opens a learned place in the Places tab (`moves://place/{knownPlaceID}`).
     @Published var requestedKnownPlaceID: UUID?
     @Published var requestedJumpDate: Date?
@@ -408,6 +409,10 @@ struct MovesRootView: View {
                 controller.selectedTab = .timeline
                 controller.requestedPlaceID = placeID
             }
+        case "calendar-visit":
+            guard let id = CalendarVisit.ownedID(in: url) else { return }
+            controller.selectedTab = .timeline
+            controller.requestedPlaceID = id
         case "day":
             guard let raw = url.pathComponents.dropFirst().first,
                   let date = TimelineDeepLink.parseTimestamp(raw) else { return }

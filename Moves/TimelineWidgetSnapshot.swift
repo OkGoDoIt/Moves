@@ -27,7 +27,10 @@ enum TimelineWidgetSnapshotPhoneRelay {
         guard WCSession.isSupported() else { return }
 
         let session = WCSession.default
-        guard session.activationState == .activated else { return }
+        guard session.activationState == .activated,
+              session.isPaired,
+              session.isWatchAppInstalled
+        else { return }
 
         try? session.updateApplicationContext([
             MovesWidgetSharedStore.snapshotKey: data

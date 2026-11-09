@@ -1,6 +1,6 @@
 # Moves — Product & Implementation Plan
 
-Status: **agreed direction, not yet started** (2026‑09‑20).
+Status: **M0–M4 implemented; release verification in progress** (2026‑11‑09). The original workstream briefs below are retained as design history. Calendar sync and adaptive iPhone Duo layouts are included in the November 9 release; replay and Arc import remain explicitly deferred. See `docs/RELEASE-2026-11-09.md` for the current verification record.
 Owner: Roger. This document is the shared brief for every agent working on the fork. Read `AGENTS.md` first (tooling, signing, layout), then this file. Each workstream below is written so that one agent can own it end‑to‑end with minimal coordination; the **Foundations** workstream must land before the others start in parallel.
 
 ---
@@ -45,7 +45,7 @@ A private, lifelong location diary that the user fully owns. It runs quietly in 
 
 ---
 
-## 3. Current state (HEAD `00fdc56`)
+## 3. Original baseline (HEAD `00fdc56`, September 2026)
 
 The engine is ahead of the UI. Detailed inventory lives in the session transcript; the short version:
 
@@ -53,7 +53,7 @@ The engine is ahead of the UI. Detailed inventory lives in the session transcrip
 
 **Missing / weak (UX):** single screen with everything behind three toolbar icons; no Places, Map, or Insights destinations; map strip is small and collapses walk/run/bike/car into one color (`RenderedRoute.tint`); statistics are all‑time only (`MovesStatisticsSnapshot`); no time‑of‑day lookup (`MovesJumpToDateView` is day‑grain); no onboarding; no merge/split/time edit; no photos; no Google/Arc import; CloudKit invisible; widgets have route points but draw no map.
 
-**In flight (do not touch):** `Moves/LocationLogImport.swift`, `MovesTests/LocationLogImportTests.swift`, and the related edits in `RouteFileImport.swift` / `VisitedLocation.swift` / `project.pbxproj` are being worked on separately. HEAD + that WIP does not compile yet (`RouteFileImport.swift:74`). Branch from `main` and rebase when it lands.
+**Historical in-flight note (since merged):** `Moves/LocationLogImport.swift`, `MovesTests/LocationLogImportTests.swift`, and the related edits in `RouteFileImport.swift` / `VisitedLocation.swift` / `project.pbxproj` are being worked on separately. HEAD + that WIP does not compile yet (`RouteFileImport.swift:74`). Branch from `main` and rebase when it lands.
 
 ---
 

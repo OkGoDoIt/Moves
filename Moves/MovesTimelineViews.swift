@@ -153,7 +153,6 @@ struct DayTimelinePageContent: View {
     @State private var expandedHiddenStopIDs: Set<String> = []
     @State private var highlightedEntryID: String?
     @State private var isMapExpanded = false
-    @State private var screenshotOpenedMove: MoveSegment?
 
     init(dayTimeline: DayTimeline, isActive: Bool) {
         self.dayTimeline = dayTimeline
@@ -335,7 +334,7 @@ struct DayTimelinePageContent: View {
 
     var body: some View {
         GeometryReader { proxy in
-            if LandscapeLayoutSettings.isLandscapePhone(proxy.size) {
+            if usesSplitTimeline(proxy) {
                 landscapeContent
             } else {
                 portraitContent(pageSize: proxy.size)
@@ -372,14 +371,11 @@ struct DayTimelinePageContent: View {
         .onAppear {
             applyScreenshotAgentFlagsIfNeeded()
         }
-        .navigationDestination(isPresented: Binding(
-            get: { screenshotOpenedMove != nil },
-            set: { if !$0 { screenshotOpenedMove = nil } }
-        )) {
-            if let move = screenshotOpenedMove {
-                MoveMapDetailView(segment: move)
-            }
-        }
+    }
+
+    private func usesSplitTimeline(_ proxy: GeometryProxy) -> Bool {
+        if #available(iOS 27.1, *), !proxy.reservedRegions(kind: .division).isEmpty { return true }
+        return LandscapeLayoutSettings.usesSplitLayout(proxy.size)
     }
 
     /// `MOVES_EXPAND_MAP` / `MOVES_OPEN_FIRST_MOVE` let screenshot agents reach
@@ -390,9 +386,9 @@ struct DayTimelinePageContent: View {
             isMapExpanded = true
         }
         if env["MOVES_OPEN_FIRST_MOVE"] == "1" {
-            screenshotOpenedMove = dayTimeline.moves
+            rootController.requestedMoveDetailID = dayTimeline.moves
                 .sorted { $0.timelineStartDate < $1.timelineStartDate }
-                .first
+                .first?.id
         }
     }
 
@@ -583,7 +579,9 @@ struct DayTimelinePageContent: View {
             if usesSelection {
                 HStack(spacing: 0) {
                     row
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     timelineDetailLink(for: entry)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
                 .applyTimelineItemActions(for: entry)
             } else {
@@ -639,6 +637,7 @@ struct DayTimelinePageContent: View {
                 detailChevron
             }
             .buttonStyle(.plain)
+            .navigationLinkIndicatorVisibility(.hidden)
 
         case .move(let move):
             NavigationLink {
@@ -647,6 +646,7 @@ struct DayTimelinePageContent: View {
                 detailChevron
             }
             .buttonStyle(.plain)
+            .navigationLinkIndicatorVisibility(.hidden)
 
         case .hiddenStops, .liveRoute, .start, .sample:
             EmptyView()
@@ -2110,11 +2110,16 @@ private struct StorylineRowBody: View {
             }
 
             if case .move(let segment) = entry, let actions {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    TransportModeMenu(move: segment, actions: actions)
-                    Text(entry.moveDetailsText)
-                        .font(.system(size: 12, weight: .medium, design: .rounded))
-                        .foregroundStyle(Color.primary.opacity(0.68))
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        TransportModeMenu(move: segment, actions: actions)
+                        moveDetails
+                    }
+                    .fixedSize(horizontal: true, vertical: false)
+                    VStack(alignment: .leading, spacing: 3) {
+                        TransportModeMenu(move: segment, actions: actions)
+                        moveDetails
+                    }
                 }
             } else {
                 Text(entry.subtitleText)
@@ -2136,6 +2141,13 @@ private struct StorylineRowBody: View {
         .padding(.top, 6)
         .padding(.bottom, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var moveDetails: some View {
+        Text(entry.moveDetailsText)
+            .font(.system(size: 12, weight: .medium, design: .rounded))
+            .foregroundStyle(Color.primary.opacity(0.68))
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -2437,9 +2449,14 @@ enum TimelineEntry: Identifiable {
     private static func averageSpeedText(for segment: MoveSegment) -> String? {
         guard segment.timelineDuration > 0 else { return nil }
 
-        let kilometersPerHour = max(segment.distanceMeters, 0) / segment.timelineDuration * 3.6
-        let formattedSpeed = kilometersPerHour.formatted(.number.precision(.fractionLength(1)))
-        return "\(formattedSpeed) km/h"
+        let speed = Measurement(value: max(segment.distanceMeters, 0) / segment.timelineDuration, unit: UnitSpeed.metersPerSecond)
+        let unit: UnitSpeed = Locale.autoupdatingCurrent.measurementSystem == .metric ? .kilometersPerHour : .milesPerHour
+        let formatter = MeasurementFormatter()
+        formatter.unitOptions = .providedUnit
+        formatter.unitStyle = .short
+        formatter.numberFormatter.minimumFractionDigits = 1
+        formatter.numberFormatter.maximumFractionDigits = 1
+        return formatter.string(from: speed.converted(to: unit))
     }
 
     private static func timeString(from date: Date) -> String {

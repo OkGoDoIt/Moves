@@ -230,6 +230,15 @@ struct MovesSettingsView: View {
                     }
                     .id(SettingsScreenshotAnchor.webhookRow)
 
+                    SettingsCard(title: "Calendar") {
+                        NavigationLink {
+                            CalendarSyncSettingsView()
+                        } label: {
+                            SettingsNavigationRow(title: "Sync visits to Calendar", systemImage: "calendar", status: nil)
+                        }
+                        .buttonStyle(.plain)
+                    }
+
                     SettingsCard(title: "GPX Export") {
                         SettingsActionRow(
                             title: "Selected Day (.gpx)",
@@ -871,10 +880,10 @@ struct SettingsCard<Content: View>: View {
     }
 }
 
-private struct SettingsActionRow: View {
+struct SettingsActionRow: View {
     let title: String
     let systemImage: String
-    let isDisabled: Bool
+    var isDisabled: Bool = false
     let action: () -> Void
 
     var body: some View {

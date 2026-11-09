@@ -26,17 +26,18 @@ enum TrackingStatusBannerContext {
 enum LandscapeLayoutSettings {
     static let controlsOnLeftKey = "landscapeControlsOnLeft"
 
-    static func isLandscapePhone(_ size: CGSize) -> Bool {
-        UIDevice.current.userInterfaceIdiom == .phone && size.width > size.height
+    static func usesSplitLayout(_ size: CGSize) -> Bool {
+        size.width >= 600
     }
 
     static func controlPaneWidth(for size: CGSize) -> CGFloat {
-        min(max(size.width * 0.42, 300), 390)
+        min(max(size.width * 0.42, 280), min(420, size.width * 0.5))
     }
 }
 
 struct LandscapeSplitView<MapPane: View, ControlPane: View>: View {
     @AppStorage(LandscapeLayoutSettings.controlsOnLeftKey) private var controlsOnLeft = false
+    @Environment(\.layoutDirection) private var direction
 
     let spacing: CGFloat
     @ViewBuilder let mapPane: () -> MapPane
@@ -54,22 +55,71 @@ struct LandscapeSplitView<MapPane: View, ControlPane: View>: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let controlWidth = LandscapeLayoutSettings.controlPaneWidth(for: proxy.size)
-
-            HStack(spacing: spacing) {
-                if controlsOnLeft {
-                    controlPane()
-                        .frame(width: controlWidth)
+            if #available(iOS 27.1, *) {
+                ArrangementView {
                     mapPane()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    mapPane()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .environment(\.layoutDirection, direction)
+                } secondary: {
                     controlPane()
-                        .frame(width: controlWidth)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .environment(\.layoutDirection, direction)
                 }
+                .arrangementViewStyle(.split)
+                .environment(\.layoutDirection, controlsOnLeft && proxy.size.width > proxy.size.height ? .rightToLeft : direction)
+            } else {
+                let horizontal = proxy.size.width > proxy.size.height
+                let layout = horizontal
+                    ? AnyLayout(HStackLayout(spacing: spacing))
+                    : AnyLayout(VStackLayout(spacing: spacing))
+                layout {
+                    mapPane()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .environment(\.layoutDirection, direction)
+                    controlPane()
+                        .frame(width: horizontal ? LandscapeLayoutSettings.controlPaneWidth(for: proxy.size) : nil)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .environment(\.layoutDirection, direction)
+                }
+                .environment(\.layoutDirection, horizontal && controlsOnLeft ? .rightToLeft : direction)
             }
         }
+    }
+}
+
+/// The system moves detail controls below or beside the map when the display folds.
+/// The controls and map keep their identity as the arrangement changes.
+@available(iOS 27.1, *)
+struct MovesDetailArrangement<MapPane: View, Controls: View>: View {
+    @ViewBuilder var map: () -> MapPane
+    @ViewBuilder var controls: () -> Controls
+
+    var body: some View {
+        ArrangementView {
+            MovesArrangementControls(content: controls)
+        } secondary: {
+            map()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .arrangementViewStyle(.overlay)
+    }
+}
+
+@available(iOS 27.1, *)
+private struct MovesArrangementControls<Content: View>: View {
+    @Environment(\.overlayArrangementZIndex) private var zIndex
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        ScrollView {
+            content()
+                .padding(12)
+        }
+        .scrollBounceBehavior(.basedOnSize)
+        .frame(maxHeight: zIndex > 0 ? 320 : .infinity)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
+        .safeAreaPadding(12)
+        .frame(maxHeight: .infinity, alignment: .bottom)
     }
 }
 
@@ -432,6 +482,15 @@ struct ContentView: View {
             
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
+            .navigationDestination(isPresented: Binding(
+                get: { rootController.requestedMoveDetailID != nil },
+                set: { if !$0 { rootController.requestedMoveDetailID = nil } }
+            )) {
+                if let id = rootController.requestedMoveDetailID,
+                   let move = dayTimelines.lazy.flatMap(\.moves).first(where: { $0.id == id }) {
+                    MoveMapDetailView(segment: move)
+                }
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
