@@ -121,7 +121,7 @@ struct DayTimelinePage: View {
 
     @MainActor
     private func loadDayTimeline() async {
-        let descriptor = FetchDescriptor<DayTimeline>(
+        var descriptor = FetchDescriptor<DayTimeline>(
             predicate: #Predicate { timeline in
                 timeline.dayKey == dayKey
             },
@@ -129,7 +129,14 @@ struct DayTimelinePage: View {
         )
 
         do {
+            descriptor.fetchLimit = 1
             dayTimeline = try modelContext.fetch(descriptor).first
+            if dayTimeline == nil {
+                let formatter = DateFormatter()
+                formatter.locale = Locale(identifier: "en_US_POSIX")
+                formatter.dateFormat = "yyyy-MM-dd"
+                if let date = formatter.date(from: dayKey) { dayTimeline = DayTimeline(dayStart: date) }
+            }
             loadErrorMessage = dayTimeline == nil ? "Day not found" : nil
         } catch {
             dayTimeline = nil
@@ -378,18 +385,15 @@ struct DayTimelinePageContent: View {
         return LandscapeLayoutSettings.usesSplitLayout(proxy.size)
     }
 
-    /// `MOVES_EXPAND_MAP` / `MOVES_OPEN_FIRST_MOVE` let screenshot agents reach
-    /// screens that otherwise need a tap, without a Simulator.app window.
+    /// Expands the map for visual review. ContentView owns the one-shot move-detail flag
+    /// so adjacent pages cannot repeatedly present competing navigation destinations.
     private func applyScreenshotAgentFlagsIfNeeded() {
+        guard isActive else { return }
         let env = ProcessInfo.processInfo.environment
         if env["MOVES_EXPAND_MAP"] == "1" {
             isMapExpanded = true
         }
-        if env["MOVES_OPEN_FIRST_MOVE"] == "1" {
-            rootController.requestedMoveDetailID = dayTimeline.moves
-                .sorted { $0.timelineStartDate < $1.timelineStartDate }
-                .first?.id
-        }
+
     }
 
     private var momentJumpTaskID: String {
@@ -1195,44 +1199,52 @@ struct DayMapStrip: View {
             let dimsForOtherSelection = selection != nil && !isSelected
 
             if route.shadowCoordinates.count > 1 {
-                MapPolyline(coordinates: route.shadowCoordinates)
-                    .stroke(
-                        route.shadowTint,
-                        lineWidth: isSelected ? route.shadowLineWidth + 4 : route.shadowLineWidth
-                    )
+                ForEach(Array(RouteCoordinateOps.mapPolylineSegments(route.shadowCoordinates).enumerated()), id: \.offset) { _, coordinates in
+                    MapPolyline(coordinates: coordinates)
+                        .stroke(
+                            route.shadowTint,
+                            lineWidth: isSelected ? route.shadowLineWidth + 4 : route.shadowLineWidth
+                        )
+                }
             }
 
             if route.coordinates.count > 1 {
                 let emphasis = dimsForOtherSelection ? 0.28 : 1.0
                 let width = isSelected ? route.lineWidth + 4 : route.lineWidth
-                MapPolyline(coordinates: route.coordinates)
-                    .stroke(
-                        route.strokeGradient(shadeBySpeed: allowsSpeedShading, emphasis: emphasis),
-                        style: RouteStrokeStyle.make(for: route, lineWidth: width)
-                    )
-                if let overlayTint = route.recordedOverlayTint {
-                    MapPolyline(coordinates: route.coordinates)
+                ForEach(Array(RouteCoordinateOps.mapPolylineSegments(route.coordinates).enumerated()), id: \.offset) { _, coordinates in
+                    MapPolyline(coordinates: coordinates)
                         .stroke(
-                            MovesPalette.opaqueRouteColor(overlayTint, opacity: emphasis),
-                            style: RouteStrokeStyle.make(
-                                for: route,
-                                lineWidth: max(width - 2.25, 1.25)
-                            )
+                            route.strokeGradient(shadeBySpeed: allowsSpeedShading, emphasis: emphasis),
+                            style: RouteStrokeStyle.make(for: route, lineWidth: width)
                         )
+                }
+                if let overlayTint = route.recordedOverlayTint {
+                    ForEach(Array(RouteCoordinateOps.mapPolylineSegments(route.coordinates).enumerated()), id: \.offset) { _, coordinates in
+                        MapPolyline(coordinates: coordinates)
+                            .stroke(
+                                MovesPalette.opaqueRouteColor(overlayTint, opacity: emphasis),
+                                style: RouteStrokeStyle.make(
+                                    for: route,
+                                    lineWidth: max(width - 2.25, 1.25)
+                                )
+                            )
+                    }
                 }
             }
         }
 
         if let liveRouteSnapshot,
            liveRouteSnapshot.coordinates.count > 1 {
-            MapPolyline(coordinates: liveRouteSnapshot.coordinates)
-                .stroke(
-                    MovesPalette.opaqueRouteColor(
-                        MovesPalette.routeTracking,
-                        opacity: selection != nil && !isLiveRouteSelected ? 0.28 : 1
-                    ),
-                    lineWidth: isLiveRouteSelected ? 9 : 5
-                )
+            ForEach(Array(RouteCoordinateOps.mapPolylineSegments(liveRouteSnapshot.coordinates).enumerated()), id: \.offset) { _, coordinates in
+                MapPolyline(coordinates: coordinates)
+                    .stroke(
+                        MovesPalette.opaqueRouteColor(
+                            MovesPalette.routeTracking,
+                            opacity: selection != nil && !isLiveRouteSelected ? 0.28 : 1
+                        ),
+                        lineWidth: isLiveRouteSelected ? 9 : 5
+                    )
+            }
         }
 
         ForEach(placeMarkers) { marker in
@@ -1418,16 +1430,7 @@ struct DayMapStrip: View {
         options.size = size
         options.scale = scale
 
-        let snapshotter = MKMapSnapshotter(options: options)
-        let snapshot = try await withCheckedThrowingContinuation { continuation in
-            snapshotter.start { snapshot, error in
-                if let snapshot {
-                    continuation.resume(returning: snapshot)
-                } else {
-                    continuation.resume(throwing: error ?? CancellationError())
-                }
-            }
-        }
+        let snapshot = try await TimelineMapSnapshotPool.shared.snapshot(options: options)
 
         return renderCollapsedSnapshotOverlay(
             snapshot: snapshot,
@@ -2475,4 +2478,56 @@ struct PlaceMarker: Identifiable {
     let id: UUID
     let title: String
     let coordinate: CLLocationCoordinate2D
+}
+
+/// Shares bounded base-map snapshots across views. Route overlays are drawn fresh, so an edit
+/// cannot return a stale route. The last cancelled consumer stops MapKit's outstanding work.
+@MainActor
+private final class TimelineMapSnapshotPool {
+    static let shared = TimelineMapSnapshotPool()
+    private struct Pending {
+        let task: Task<MKMapSnapshotter.Snapshot, Error>
+        var consumers: Set<UUID>
+    }
+    private var pending: [String: Pending] = [:]
+    private let cache = NSCache<NSString, MKMapSnapshotter.Snapshot>()
+    private init() { cache.countLimit = 16; cache.totalCostLimit = 40 * 1024 * 1024 }
+    func snapshot(options: MKMapSnapshotter.Options) async throws -> MKMapSnapshotter.Snapshot {
+        let r = options.region
+        let style = UITraitCollection.current.userInterfaceStyle.rawValue
+        let key = "\(r.center.latitude)|\(r.center.longitude)|\(r.span.latitudeDelta)|\(r.span.longitudeDelta)|\(options.size.width)|\(options.size.height)|\(options.scale)|\(style)"
+        if let cached = cache.object(forKey: key as NSString) { return cached }
+        let consumer = UUID()
+        let task: Task<MKMapSnapshotter.Snapshot, Error>
+        if var work = pending[key] {
+            work.consumers.insert(consumer)
+            pending[key] = work
+            task = work.task
+        } else {
+            task = Task {
+                try Task.checkCancellation()
+                let snapshotter = MKMapSnapshotter(options: options)
+                return try await withTaskCancellationHandler {
+                    try Task.checkCancellation()
+                    return try await snapshotter.start()
+                } onCancel: { snapshotter.cancel() }
+            }
+            pending[key] = Pending(task: task, consumers: [consumer])
+        }
+        defer { release(key, consumer) }
+        return try await withTaskCancellationHandler {
+            let snapshot = try await task.value
+            try Task.checkCancellation()
+            let cost = Int(snapshot.image.size.width * snapshot.image.size.height * snapshot.image.scale * snapshot.image.scale * 4)
+            cache.setObject(snapshot, forKey: key as NSString, cost: cost)
+            return snapshot
+        } onCancel: {
+            Task { @MainActor in self.release(key, consumer) }
+        }
+    }
+    private func release(_ key: String, _ consumer: UUID) {
+        guard var work = pending[key], work.consumers.remove(consumer) != nil else { return }
+        if work.consumers.isEmpty { pending[key] = nil; work.task.cancel() }
+        else { pending[key] = work }
+    }
 }

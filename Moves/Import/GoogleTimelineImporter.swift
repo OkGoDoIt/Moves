@@ -82,7 +82,9 @@ final class GoogleTimelineImporter: ObservableObject {
         }
 
         do {
-            let collected = try GoogleTimelineSourceCollector.collect(from: urls)
+            let collected = try await importWorkerValue(Task.detached(priority: .utility) {
+                try GoogleTimelineSourceCollector.collect(from: urls)
+            })
             guard collected.hasWork else {
                 throw GoogleTimelineImportError.noTimelineData
             }
@@ -94,7 +96,7 @@ final class GoogleTimelineImporter: ObservableObject {
             let skipNaming = ProcessInfo.processInfo.isRunningUnitTests
             let container = modelContainer
 
-            let report = try await Task.detached(priority: .userInitiated) {
+            let report = try await importWorkerValue(Task.detached(priority: .userInitiated) {
                 try await GoogleTimelineImportPipeline.run(
                     collected: collected,
                     container: container,
@@ -103,7 +105,7 @@ final class GoogleTimelineImporter: ObservableObject {
                         reporter.report(fraction, text)
                     }
                 )
-            }.value
+            })
 
             NotificationCenter.default.post(name: .movesLocationSamplesDidChange, object: nil)
             RouteMatchBackgroundTask.scheduleAfterImport()
@@ -159,6 +161,7 @@ enum GoogleTimelineSourceCollector {
             return
         }
         for case let fileURL as URL in enumerator {
+            try Task.checkCancellation()
             let values = try fileURL.resourceValues(forKeys: [.isRegularFileKey])
             guard values.isRegularFile == true else { continue }
             try appendFile(fileURL, into: &collected)
@@ -235,6 +238,7 @@ enum GoogleTimelineImportPipeline {
         let semanticTotal = max(collected.semanticURLs.count, 1)
 
         for (index, url) in collected.semanticURLs.enumerated() {
+            try Task.checkCancellation()
             progress(
                 0.02 + 0.28 * Double(index) / Double(semanticTotal),
                 "Reading \(url.lastPathComponent)…"
@@ -247,6 +251,7 @@ enum GoogleTimelineImportPipeline {
         }
 
         for url in collected.onDeviceURLs {
+            try Task.checkCancellation()
             progress(0.32, "Reading \(url.lastPathComponent)…")
             let data = try Data(contentsOf: url, options: [.mappedIfSafe])
             draft.append(try GoogleTimelineParser.parseOnDevice(data: data))
@@ -270,6 +275,7 @@ enum GoogleTimelineImportPipeline {
         }
 
         for url in collected.recordsURLs {
+            try Task.checkCancellation()
             progress(0.66, "Streaming \(url.lastPathComponent)…")
             var gapPoints: [LocationLogPoint] = []
             var read = 0
@@ -281,6 +287,7 @@ enum GoogleTimelineImportPipeline {
             }, onIncomplete: {
                 incomplete = true
             }) { point in
+                if Task.isCancelled { return false }
                 read += 1
                 if occupancy.covers(point) {
                     skipped += 1
@@ -289,6 +296,7 @@ enum GoogleTimelineImportPipeline {
                 }
                 return true
             }
+            try Task.checkCancellation()
             report.recordsRead += read
             report.recordsSkippedAsDuplicate += skipped
             report.formats.insert(.records)
@@ -373,18 +381,20 @@ private final class GoogleTimelineProgressReporter: @unchecked Sendable {
 
 struct GoogleTimelineImportSettingsView: View {
     @Environment(\.dismiss) private var dismiss
-    @StateObject private var importer: GoogleTimelineImporter
+    @EnvironmentObject private var importQueue: DurableImportQueue
+    private var importer: GoogleTimelineImporter { importQueue.google }
     @State private var isShowingFileImporter = false
     @State private var importMessage = ""
     @State private var isShowingImportMessage = false
 
     init(modelContext: ModelContext) {
-        _importer = StateObject(wrappedValue: GoogleTimelineImporter(modelContext: modelContext))
+        // The app owns the queue and writers independently of this screen.
     }
 
     var body: some View {
         ScrollView {
             LazyVStack(spacing: 14) {
+                ImportQueueCard()
                 GoogleTimelineImportCard(title: "Google Timeline") {
                     Button {
                         isShowingFileImporter = true
@@ -403,23 +413,8 @@ struct GoogleTimelineImportSettingsView: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .disabled(importer.isImporting)
+                    .disabled(importer.isImporting || importQueue.isStaging)
 
-                    if importer.isImporting {
-                        if let progress = importer.importProgress {
-                            ProgressView(value: progress)
-                                .tint(MovesPalette.routeTracking)
-                        } else {
-                            ProgressView()
-                                .tint(MovesPalette.routeTracking)
-                        }
-
-                        if !importer.importProgressText.isEmpty {
-                            Text(importer.importProgressText)
-                                .font(.system(size: 12, weight: .medium, design: .rounded))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
 
                     Text("Select the Location History (Timeline) folder from a Google Takeout. Moves reads Semantic Location History first, then streams Records.json. A zip or a single JSON file (one month, Records, or an on-device Timeline.json) also works. Settings.json is ignored.")
                         .font(.system(size: 12, weight: .medium, design: .rounded))
@@ -453,11 +448,8 @@ struct GoogleTimelineImportSettingsView: View {
             switch result {
             case .success(let urls):
                 Task { @MainActor in
-                    await importer.importSelection(urls: urls)
-                    importMessage = importer.lastReport?.summary
-                        ?? importer.lastErrorMessage
-                        ?? "No timeline data was imported."
-                    isShowingImportMessage = true
+                    do { try await importQueue.enqueue(urls, kind: .google) }
+                    catch { importMessage = error.localizedDescription; isShowingImportMessage = true }
                 }
             case .failure(let error):
                 importMessage = "File import failed: \(error.localizedDescription)"

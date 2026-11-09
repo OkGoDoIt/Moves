@@ -136,3 +136,15 @@ To check a change against real history before it reaches a phone, back up the de
 The upstream tree committed `build/`, `.DS_Store`, and `xcuserdata/`. This fork has a `.gitignore` for those; do not add more DerivedData or `*.xcuserstate`. Do not `git rm --cached` the historical `build/` tree unless the user asks for a cleanup commit.
 
 `Config/Moves.local.xcconfig` is gitignored and holds this machine’s team ID and bundle prefix. Never commit it, and never move its values into a tracked file.
+
+
+## Upstream integration maintenance
+
+Read `UPSTREAM.md` before pulling upstream again. Reviewed tip is not merged ancestry.
+The local `DurableImportQueue` owns route/Google/archive imports; interrupted work resumes
+explicitly and must preserve corrections and removal tombstones. `DetailedExploration`
+uses original ground observations plus separately stored undated Fog coverage. Coverage
+exports obey privacy zones. `Packages/RouteFileKit` and `Packages/FogOfWorldKit` are
+vendored upstream source, with fork adaptations recorded in `UPSTREAM.md`; Quick Look
+extensions have no timeline-store or capture access. Native Mac/multiple-device work is
+deferred. The process-owned `MovesRuntime` must outlive view rotation/navigation.

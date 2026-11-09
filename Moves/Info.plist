@@ -2,6 +2,33 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>UTImportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key><string>com.topografix.gpx</string>
+			<key>UTTypeDescription</key><string>GPS Exchange Format</string>
+			<key>UTTypeConformsTo</key><array><string>public.xml</string></array>
+			<key>UTTypeTagSpecification</key><dict><key>public.filename-extension</key><array><string>gpx</string></array></dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key><string>com.garmin.tcx</string>
+			<key>UTTypeDescription</key><string>Training Center XML</string>
+			<key>UTTypeConformsTo</key><array><string>public.xml</string></array>
+			<key>UTTypeTagSpecification</key><dict><key>public.filename-extension</key><array><string>tcx</string></array></dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key><string>com.google.earth.kml</string>
+			<key>UTTypeDescription</key><string>Keyhole Markup Language</string>
+			<key>UTTypeConformsTo</key><array><string>public.xml</string></array>
+			<key>UTTypeTagSpecification</key><dict><key>public.filename-extension</key><array><string>kml</string></array></dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key><string>public.geojson</string>
+			<key>UTTypeDescription</key><string>GeoJSON</string>
+			<key>UTTypeConformsTo</key><array><string>public.json</string></array>
+			<key>UTTypeTagSpecification</key><dict><key>public.filename-extension</key><array><string>geojson</string></array></dict>
+		</dict>
+	</array>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
 		<string>$(PRODUCT_BUNDLE_IDENTIFIER).dailyTimelineBackup</string>

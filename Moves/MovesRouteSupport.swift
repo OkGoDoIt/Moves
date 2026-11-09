@@ -382,7 +382,7 @@ enum MapRegionFactory {
 }
 
 enum MoveRouteGeometry {
-    private static let routeMatchingVersion = "route-v9-plausibility-fallback"
+    private static let routeMatchingVersion = "route-v10-great-circle"
 
     static func rawCoordinates(for move: MoveSegment) -> [CLLocationCoordinate2D] {
         let sampleCoordinates = move.samples.preferredRouteDisplaySamples
@@ -485,6 +485,59 @@ extension MoveSegment {
 }
 
 enum RouteCoordinateOps {
+    static func mapPolylineSegments(
+        _ coordinates: [CLLocationCoordinate2D]
+    ) -> [[CLLocationCoordinate2D]] {
+        let coordinates = coordinates.filter(CLLocationCoordinate2DIsValid)
+        guard let first = coordinates.first else { return [] }
+        var segments: [[CLLocationCoordinate2D]] = []
+        var current = [first]
+
+        for coordinate in coordinates.dropFirst() {
+            if let previous = current.last, crossesAntimeridian(from: previous, to: coordinate) {
+                let split = antimeridianSplit(from: previous, to: coordinate)
+                current.append(split.edgeCoordinate)
+                if current.count > 1 { segments.append(current) }
+                current = [split.oppositeEdgeCoordinate, coordinate]
+            } else {
+                current.append(coordinate)
+            }
+        }
+
+        if current.count > 1 { segments.append(current) }
+        return segments
+    }
+
+    static func crossesAntimeridian(
+        from start: CLLocationCoordinate2D,
+        to end: CLLocationCoordinate2D
+    ) -> Bool {
+        abs(end.longitude - start.longitude) > 180
+    }
+
+    private static func antimeridianSplit(
+        from start: CLLocationCoordinate2D,
+        to end: CLLocationCoordinate2D
+    ) -> (edgeCoordinate: CLLocationCoordinate2D, oppositeEdgeCoordinate: CLLocationCoordinate2D) {
+        var unwrappedEnd = end.longitude
+        if unwrappedEnd - start.longitude > 180 {
+            unwrappedEnd -= 360
+        } else if unwrappedEnd - start.longitude < -180 {
+            unwrappedEnd += 360
+        }
+
+        let boundary = unwrappedEnd > 180 ? 180.0 : -180.0
+        let denominator = unwrappedEnd - start.longitude
+        let fraction = denominator == 0
+            ? 0.5
+            : min(max((boundary - start.longitude) / denominator, 0), 1)
+        let latitude = start.latitude + ((end.latitude - start.latitude) * fraction)
+        let edge = CLLocationCoordinate2D(latitude: latitude, longitude: boundary)
+        let opposite = CLLocationCoordinate2D(latitude: latitude, longitude: -boundary)
+        return (edge, opposite)
+    }
+
+
     static func dedupeSequentialCoordinates(
         _ coordinates: [CLLocationCoordinate2D],
         minimumDistanceMeters: CLLocationDistance
@@ -587,73 +640,42 @@ enum RouteCoordinateOps {
     }
 }
 
+/// Spherical interpolation adapted from upstream, including a stable antipodal fallback.
+/// This is an estimated path; original fixes and exported observations remain unchanged.
 enum PlaneRouteGeometry {
     static func arcCoordinates(from fallback: [CLLocationCoordinate2D]) -> [CLLocationCoordinate2D] {
-        guard let start = fallback.first, let end = fallback.last else {
-            return fallback
-        }
-
-        guard RouteCoordinateOps.distanceMeters(from: start, to: end) > 15 else {
-            return [start, end]
-        }
-
-        return arcCoordinates(from: start, to: end)
+        guard let start = fallback.first, let end = fallback.last,
+              CLLocationCoordinate2DIsValid(start), CLLocationCoordinate2DIsValid(end) else { return fallback }
+        return greatCircleCoordinates(from: start, to: end)
     }
 
-    private static func arcCoordinates(
-        from start: CLLocationCoordinate2D,
-        to end: CLLocationCoordinate2D
-    ) -> [CLLocationCoordinate2D] {
-        let latitudeDelta = end.latitude - start.latitude
-        let longitudeDelta = end.longitude - start.longitude
-        let vectorLength = max(hypot(latitudeDelta, longitudeDelta), 0.0001)
-
-        let midpoint = CLLocationCoordinate2D(
-            latitude: (start.latitude + end.latitude) / 2,
-            longitude: (start.longitude + end.longitude) / 2
-        )
-
-        let perpendicular = CLLocationCoordinate2D(
-            latitude: -longitudeDelta / vectorLength,
-            longitude: latitudeDelta / vectorLength
-        )
-
-        let span = max(abs(latitudeDelta), abs(longitudeDelta))
-        let curvature = min(max(span * 0.35, 0.02), 5.5)
-        let preferredVerticalDirection = midpoint.latitude >= 0 ? 1.0 : -1.0
-        let bendSign = (perpendicular.latitude * preferredVerticalDirection) >= 0 ? 1.0 : -1.0
-
-        var controlLatitude = midpoint.latitude + (perpendicular.latitude * curvature * bendSign)
-        let controlLongitude = midpoint.longitude + (perpendicular.longitude * curvature * bendSign)
-
-        // Keep the arch consistently above the shadow line in the north and below in the south.
-        if (controlLatitude - midpoint.latitude) * preferredVerticalDirection <= 0 {
-            controlLatitude = midpoint.latitude + (preferredVerticalDirection * max(curvature * 0.28, 0.012))
+    static func greatCircleCoordinates(from start: CLLocationCoordinate2D, to end: CLLocationCoordinate2D,
+                                       maximumPointCount: Int = 72) -> [CLLocationCoordinate2D] {
+        func vector(_ c: CLLocationCoordinate2D) -> SIMD3<Double> {
+            let lat = c.latitude * .pi / 180, lon = c.longitude * .pi / 180
+            return SIMD3(cos(lat) * cos(lon), cos(lat) * sin(lon), sin(lat))
         }
-
-        controlLatitude = min(max(controlLatitude, -85), 85)
-
-        let control = CLLocationCoordinate2D(
-            latitude: controlLatitude,
-            longitude: controlLongitude
-        )
-
-        let pointCount = max(min(Int(span * 14), 84), 28)
-        return (0...pointCount).map { index in
-            let t = Double(index) / Double(pointCount)
-            let inverseT = 1 - t
-
-            let latitude =
-                (inverseT * inverseT * start.latitude) +
-                (2 * inverseT * t * control.latitude) +
-                (t * t * end.latitude)
-
-            let longitude =
-                (inverseT * inverseT * start.longitude) +
-                (2 * inverseT * t * control.longitude) +
-                (t * t * end.longitude)
-
-            return CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+        func dot(_ a: SIMD3<Double>, _ b: SIMD3<Double>) -> Double { a.x*b.x + a.y*b.y + a.z*b.z }
+        let a = vector(start), b = vector(end)
+        let cosine = min(1, max(-1, dot(a, b)))
+        let angle = acos(cosine)
+        guard angle > 0.000001 else { return [start, end] }
+        var tangent = b - a * cosine
+        var length = sqrt(dot(tangent, tangent))
+        if length < 1e-10 {
+            let axis = abs(a.z) < 0.9 ? SIMD3<Double>(0, 0, 1) : SIMD3<Double>(0, 1, 0)
+            tangent = axis - a * dot(axis, a)
+            length = sqrt(dot(tangent, tangent))
+        }
+        tangent /= length
+        let count = max(2, min(maximumPointCount, max(8, Int(angle * 180 / .pi / 3))))
+        return (0...count).map { index in
+            if index == 0 { return start }
+            if index == count { return end }
+            let t = angle * Double(index) / Double(count)
+            let v = a * cos(t) + tangent * sin(t)
+            return CLLocationCoordinate2D(latitude: atan2(v.z, hypot(v.x, v.y)) * 180 / .pi,
+                                          longitude: atan2(v.y, v.x) * 180 / .pi)
         }
     }
 }

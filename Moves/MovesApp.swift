@@ -42,60 +42,27 @@ final class AppUndoController: ObservableObject {
 @main
 struct MovesApp: App {
     @UIApplicationDelegateAdaptor(MovesAppDelegate.self) private var appDelegate
-    @Environment(\.scenePhase) private var scenePhase
     private static let cloudKitContainerIdentifier = MovesAppIdentity.cloudKitContainerIdentifier
-
-    private let sharedModelContainer: ModelContainer
     private static var processContainer: ModelContainer?
-    @State private var isUpgradingTimeline: Bool
-    @StateObject private var undoController = AppUndoController()
-    @StateObject private var captureManager: MovesLocationCaptureManager
-    @StateObject private var watchRouteInbox: WatchRouteInbox
-    @StateObject private var healthWorkoutRouteAutoImporter: HealthWorkoutRouteAutoImportManager
-    @StateObject private var cloudDataPresencePublisher: MovesCloudDataPresencePublisher
-    @StateObject private var locationServiceSyncManager: LocationServiceSyncManager
-    @StateObject private var photoLibraryController: PhotoLibraryController
-    @StateObject private var webhookSyncManager: WebhookSyncManager
-    @StateObject private var calendarSync: MovesCalendarSync
+    static private(set) var privateMirrorIsActive: Bool?
+    @State private var startup: Result<MovesRuntime, Error>
 
-    init() {
-        do {
-            let container = try Self.sharedContainer()
-            let captureManager = MovesLocationCaptureManager(modelContainer: container)
-            self.sharedModelContainer = container
-            _captureManager = StateObject(
-                wrappedValue: captureManager
-            )
-            _watchRouteInbox = StateObject(
-                wrappedValue: WatchRouteInbox(modelContainer: container)
-            )
-            _healthWorkoutRouteAutoImporter = StateObject(
-                wrappedValue: HealthWorkoutRouteAutoImportManager(modelContainer: container)
-            )
-            _cloudDataPresencePublisher = StateObject(
-                wrappedValue: MovesCloudDataPresencePublisher(modelContainer: container)
-            )
-            _locationServiceSyncManager = StateObject(
-                wrappedValue: LocationServiceSyncManager(modelContainer: container)
-            )
-            _photoLibraryController = StateObject(
-                wrappedValue: PhotoLibraryController(modelContainer: container)
-            )
-            _webhookSyncManager = StateObject(
-                wrappedValue: WebhookSyncManager(modelContainer: container)
-            )
-            _calendarSync = StateObject(wrappedValue: MovesCalendarSync(container: container))
-            MovesIntentRuntime.shared.configure(
-                modelContainer: container,
-                captureManager: captureManager
-            )
-            MovesAppShortcuts.updateAppShortcutParameters()
-            if !ProcessInfo.processInfo.isRunningUnitTests {
-                TimelineSchemaUpgrader.runIfNeeded(container: container)
+    init() { _startup = State(initialValue: Result { MovesRuntime(container: try Self.sharedContainer()) }) }
+
+    var body: some Scene {
+        WindowGroup {
+            switch startup {
+            case .success(let runtime):
+                MovesRunningContent(runtime: runtime)
+            case .failure:
+                ContentUnavailableView {
+                    Label("Timeline couldn’t be opened", systemImage: "externaldrive.badge.exclamationmark")
+                } description: {
+                    Text("Try again to reopen your saved history.")
+                } actions: {
+                    Button("Try again") { startup = Result { MovesRuntime(container: try Self.sharedContainer()) } }
+                }
             }
-            _isUpgradingTimeline = State(initialValue: TimelineSchemaUpgrader.isRunning)
-        } catch {
-            fatalError("Could not create ModelContainer: \(error)")
         }
     }
 
@@ -106,6 +73,7 @@ struct MovesApp: App {
     /// about the other's deletes.
     static func sharedContainer() throws -> ModelContainer {
         if let processContainer { return processContainer }
+        _ = MovesMirrorEventBuffer.shared
         let container = try makeModelContainer()
         processContainer = container
         return container
@@ -118,6 +86,7 @@ struct MovesApp: App {
 
         let cacheConfiguration: ModelConfiguration
         #if targetEnvironment(simulator)
+        privateMirrorIsActive = false
         // Opens a copy of a real store, to check a change against real history.
         if let path = ProcessInfo.processInfo.environment["MOVES_SIMULATOR_STORE"] {
             let storeURL = URL(fileURLWithPath: path)
@@ -153,17 +122,21 @@ struct MovesApp: App {
             schema: cacheSchema,
             cloudKitDatabase: .none
         )
+        let allowsMirror = allowsCloudKitContainer()
         let cloudKitDatabase: ModelConfiguration.CloudKitDatabase =
-            allowsCloudKitContainer() ? .private(Self.cloudKitContainerIdentifier) : .none
+            allowsMirror ? .private(Self.cloudKitContainerIdentifier) : .none
         do {
-            return try ModelContainer(
+            let container = try ModelContainer(
                 for: schema,
                 configurations: [
                     ModelConfiguration(schema: timelineSchema, cloudKitDatabase: cloudKitDatabase),
                     cacheConfiguration,
                 ]
             )
+            privateMirrorIsActive = allowsMirror
+            return container
         } catch {
+            privateMirrorIsActive = false
             // A local-only store still records today's timeline, which beats refusing
             // to launch.
             return try ModelContainer(
@@ -222,8 +195,72 @@ struct MovesApp: App {
         return Data(data[start.lowerBound..<end.upperBound])
     }
 
-    var body: some Scene {
-        WindowGroup {
+}
+
+/// Process-lifetime owners; rendering or rotating a view cannot create capture or upload workers.
+@MainActor
+private final class MovesRuntime: ObservableObject {
+    let container: ModelContainer
+    let undoController = AppUndoController()
+    let captureManager: MovesLocationCaptureManager
+    let watchRouteInbox: WatchRouteInbox
+    let healthWorkoutRouteAutoImporter: HealthWorkoutRouteAutoImportManager
+    let cloudDataPresencePublisher: MovesCloudDataPresencePublisher
+    let locationServiceSyncManager: LocationServiceSyncManager
+    let photoLibraryController: PhotoLibraryController
+    let webhookSyncManager: WebhookSyncManager
+    let calendarSync: MovesCalendarSync
+    let importQueue: DurableImportQueue
+    init(container: ModelContainer) {
+        self.container = container
+        captureManager = MovesLocationCaptureManager(modelContainer: container)
+        watchRouteInbox = WatchRouteInbox(modelContainer: container)
+        healthWorkoutRouteAutoImporter = HealthWorkoutRouteAutoImportManager(modelContainer: container)
+        cloudDataPresencePublisher = MovesCloudDataPresencePublisher(modelContainer: container)
+        locationServiceSyncManager = LocationServiceSyncManager(modelContainer: container)
+        photoLibraryController = PhotoLibraryController(modelContainer: container)
+        webhookSyncManager = WebhookSyncManager(modelContainer: container)
+        calendarSync = MovesCalendarSync(container: container)
+        importQueue = DurableImportQueue(container: container)
+        MovesIntentRuntime.shared.configure(modelContainer: container, captureManager: captureManager)
+        MovesAppShortcuts.updateAppShortcutParameters()
+        if !ProcessInfo.processInfo.isRunningUnitTests { TimelineSchemaUpgrader.runIfNeeded(container: container) }
+    }
+}
+
+/// Workers exist only after the authoritative store opens; a failed launch never creates a replacement history.
+private struct MovesRunningContent: View {
+    @Environment(\.scenePhase) private var scenePhase
+    private let sharedModelContainer: ModelContainer
+    @State private var isUpgradingTimeline: Bool
+    @ObservedObject private var undoController: AppUndoController
+    @ObservedObject private var captureManager: MovesLocationCaptureManager
+    @ObservedObject private var watchRouteInbox: WatchRouteInbox
+    @ObservedObject private var healthWorkoutRouteAutoImporter: HealthWorkoutRouteAutoImportManager
+    @ObservedObject private var cloudDataPresencePublisher: MovesCloudDataPresencePublisher
+    @ObservedObject private var locationServiceSyncManager: LocationServiceSyncManager
+    @ObservedObject private var photoLibraryController: PhotoLibraryController
+    @ObservedObject private var webhookSyncManager: WebhookSyncManager
+    @ObservedObject private var importQueue: DurableImportQueue
+    @ObservedObject private var calendarSync: MovesCalendarSync
+
+    init(runtime: MovesRuntime) {
+        sharedModelContainer = runtime.container
+        _captureManager = ObservedObject(wrappedValue: runtime.captureManager)
+        _watchRouteInbox = ObservedObject(wrappedValue: runtime.watchRouteInbox)
+        _healthWorkoutRouteAutoImporter = ObservedObject(wrappedValue: runtime.healthWorkoutRouteAutoImporter)
+        _cloudDataPresencePublisher = ObservedObject(wrappedValue: runtime.cloudDataPresencePublisher)
+        _locationServiceSyncManager = ObservedObject(wrappedValue: runtime.locationServiceSyncManager)
+        _photoLibraryController = ObservedObject(wrappedValue: runtime.photoLibraryController)
+        _webhookSyncManager = ObservedObject(wrappedValue: runtime.webhookSyncManager)
+        _calendarSync = ObservedObject(wrappedValue: runtime.calendarSync)
+        _importQueue = ObservedObject(wrappedValue: runtime.importQueue)
+        _undoController = ObservedObject(wrappedValue: runtime.undoController)
+        _isUpgradingTimeline = State(initialValue: TimelineSchemaUpgrader.isRunning)
+    }
+
+    var body: some View {
+        Group {
             if isUpgradingTimeline {
                 // The upgrade deletes duplicate rows, and a view reading a row deleted on
                 // another context aborts the process, so no timeline views exist until it ends.
@@ -242,10 +279,12 @@ struct MovesApp: App {
                     .environmentObject(photoLibraryController)
                     .environmentObject(webhookSyncManager)
                     .environmentObject(calendarSync)
+                    .environmentObject(importQueue)
             }
         }
         .modelContainer(sharedModelContainer)
         .onChange(of: scenePhase) { _, newPhase in
+            importQueue.sceneChanged(newPhase)
             if newPhase == .active {
                 DailyTimelineBackup.scheduleNextRun()
                 ShareMapAggregateBackgroundTask.scheduleNextRun()

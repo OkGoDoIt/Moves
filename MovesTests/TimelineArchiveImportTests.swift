@@ -407,3 +407,29 @@ private extension Data {
         appendZipUInt16(UInt16(value >> 16))
     }
 }
+
+extension TimelineArchiveImportTests {
+    func testResumingArchivePreservesEditedTimesAndRemovedVisits() throws {
+        let container = try makeInMemoryContainer()
+        let context = ModelContext(container)
+        let repository = SwiftDataTimelineRepository(modelContext: context)
+        let arrival = Date(timeIntervalSince1970: 1_700_000_000)
+        let originalEnd = arrival.addingTimeInterval(3600)
+        let record = TimelineArchivePlace(arrivalDate: arrival, departureDate: originalEnd,
+            latitude: 37.77, longitude: -122.42, userLabel: nil, autoLabel: "Cafe", title: nil,
+            comment: nil, dayKey: nil, source: .geoJSON)
+        let archive = TimelineArchive(places: [record], moves: [], formats: [.geoJSON])
+        _ = try repository.importTimelineArchive(archive)
+        let visit = try XCTUnwrap(context.fetch(FetchDescriptor<VisitPlace>()).first)
+        let editedEnd = arrival.addingTimeInterval(1800)
+        try repository.updateTimes(of: visit, arrival: arrival, departure: editedEnd)
+        _ = try repository.importTimelineArchive(archive)
+        XCTAssertEqual(visit.departureDate, editedEnd)
+        repository.recordRemoval(of: visit)
+        context.delete(visit)
+        try context.save()
+        _ = try repository.importTimelineArchive(archive)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<VisitPlace>()), 0)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<RemovedTimelineSpan>()), 1)
+    }
+}

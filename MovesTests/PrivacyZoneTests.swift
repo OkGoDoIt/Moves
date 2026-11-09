@@ -2,6 +2,7 @@ import CloudKit
 import CoreGraphics
 import CoreLocation
 import SwiftData
+import QuickLookThumbnailing
 import XCTest
 @testable import Moves
 
@@ -445,5 +446,209 @@ final class PrivacyZoneTests: XCTestCase {
         sync.apply(accountStatus: .available)
         XCTAssertNil(sync.problem)
         XCTAssertEqual(MovesICloudStatus.privateICloud(sync).detail(), "Waiting for the first sync.")
+    }
+}
+
+extension PrivacyZoneTests {
+    func testUploadFailureIsNotHiddenBySuccessfulDownload() {
+        var state = MovesICloudSyncState()
+        let failureTime = Date(timeIntervalSince1970: 100)
+        state.apply(eventID: UUID(), kind: .upload, endDate: failureTime, succeeded: false,
+                    error: CKError(.quotaExceeded))
+        state.apply(eventID: UUID(), kind: .download, endDate: failureTime.addingTimeInterval(1), succeeded: true, error: nil)
+        XCTAssertEqual(state.problem, .storageFull)
+        XCTAssertNil(state.lastUploadedAt)
+        XCTAssertNotNil(state.lastDownloadedAt)
+        state.apply(eventID: UUID(), kind: .upload, endDate: failureTime.addingTimeInterval(2), succeeded: true, error: nil)
+        XCTAssertNil(state.problem)
+        XCTAssertEqual(state.lastUploadedAt, failureTime.addingTimeInterval(2))
+    }
+
+    func testImportQueueRecoversWithoutDiscardingUnreadableManifest() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SavedImportStore(directory: root)
+        var interrupted = SavedImport(kind: .google, names: ["Timeline.json"])
+        interrupted.state = .running
+        var finished = SavedImport(kind: .routes, names: ["route.gpx"])
+        finished.state = .completed
+        try store.save([interrupted, finished])
+        let restored = try store.load()
+        XCTAssertEqual(restored.map(\.state), [.paused, .completed])
+        XCTAssertEqual(restored.first?.id, interrupted.id)
+        XCTAssertEqual(store.sources(for: interrupted).first?.lastPathComponent, "Timeline.json")
+        let corrupt = Data("not JSON".utf8)
+        try corrupt.write(to: store.manifest)
+        XCTAssertThrowsError(try store.load())
+        XCTAssertEqual(try Data(contentsOf: store.manifest), corrupt)
+    }
+
+    func testCancellingImportWaitCancelsItsDetachedWriter() async throws {
+        let task = Task {
+            try await importWorkerValue(Task.detached {
+                try await Task.sleep(for: .seconds(60))
+                return true
+            })
+        }
+        task.cancel()
+        do { _ = try await task.value; XCTFail("Cancelled worker must stop") }
+        catch is CancellationError { }
+    }
+
+    func testCalendarNavigationIncludesGapsAcrossDaylightSavingWithoutModels() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "America/Los_Angeles"))
+        let start = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 3, day: 7)))
+        let end = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 3, day: 10)))
+        let dates = TimelineBrowsingDay.days(from: start, through: end, calendar: calendar)
+        XCTAssertEqual(dates.count, 4)
+        XCTAssertEqual(dates.map { calendar.component(.day, from: $0.dayStart) }, [7, 8, 9, 10])
+        XCTAssertEqual(dates[2].dayStart.timeIntervalSince(dates[1].dayStart), 23 * 3600)
+    }
+}
+
+extension PrivacyZoneTests {
+    func testFineExplorationRasterWrapsLongitudeAndUsesLatitudeAwareArea() throws {
+        let west = try FogRasterV1.address(for: .init(latitude: 0, longitude: -180))
+        let east = try FogRasterV1.address(for: .init(latitude: 0, longitude: 180))
+        XCTAssertEqual(west.cell, east.cell)
+        let equator = try FogRasterV1.address(for: .init(latitude: 0, longitude: 10))
+        let north = try FogRasterV1.address(for: .init(latitude: 60, longitude: 10))
+        XCTAssertGreaterThan(try FogRasterV1.areaSquareMeters(for: equator.cell), try FogRasterV1.areaSquareMeters(for: north.cell))
+        let bounds = try FogRasterV1.geographicBounds(for: equator.cell)
+        XCTAssertLessThan(bounds.east - bounds.west, 0.0001)
+        XCTAssertThrowsError(try FogRasterV1.address(for: .init(latitude: .nan, longitude: 0)))
+    }
+}
+
+extension PrivacyZoneTests {
+    func testOfflineCountryLookupUsesVisitsAndDoesNotGuessOcean() {
+        XCTAssertEqual(OfflineVisitGeography.country(latitude: 37.77, longitude: -122.42), "US")
+        XCTAssertEqual(OfflineVisitGeography.country(latitude: -33.86, longitude: 151.21), "AU")
+        XCTAssertNil(OfflineVisitGeography.country(latitude: 0, longitude: -140))
+        XCTAssertNil(OfflineVisitGeography.country(latitude: nil, longitude: nil))
+    }
+}
+
+extension PrivacyZoneTests {
+    func testFogExportOmitsPrivacyZoneCellsAndFlightObservations() throws {
+        let schema = Schema(MovesTimelineSchema.models)
+        let container = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)])
+        let context = ModelContext(container)
+        let now = Date()
+        let coordinates = [CLLocationCoordinate2D(latitude: 37.77, longitude: -122.42),
+                           .init(latitude: 37.79, longitude: -122.42), .init(latitude: 37.82, longitude: -122.42)]
+        let flight = MoveSegment(dedupeKey: "flight", startDate: now, endDate: now.addingTimeInterval(60), transportMode: .plane, distanceMeters: 1000, stepCount: nil)
+        context.insert(flight)
+        for (i, coordinate) in coordinates.enumerated() {
+            let fix = LocationSample(location: CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude), source: .routeTracking, dedupeKey: "fix-\(i)")
+            context.insert(fix)
+            if i == 2 { fix.moveSegment = flight }
+        }
+        try context.save()
+        let zone = PrivacyZone(id: UUID(), name: "Home", category: .home, latitude: 37.77, longitude: -122.42, radiusMeters: 200)
+        let blocks = try FogCoverageArchive.exportBlocks(container: container,
+            importedURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString), privacyZones: [zone])
+        func included(_ coordinate: CLLocationCoordinate2D) throws -> Bool {
+            let a = try FogRasterV1.address(for: coordinate)
+            return blocks.contains {
+                $0.tileID == Int(a.baseTile.y) * 512 + Int(a.baseTile.x)
+                    && $0.localX == Int(a.block.localBlockX) && $0.localY == Int(a.block.localBlockY)
+                    && $0.bitmap.contains(x: Int(a.localCellX), y: Int(a.localCellY))
+            }
+        }
+        XCTAssertFalse(try included(coordinates[0]))
+        XCTAssertTrue(try included(coordinates[1]))
+        XCTAssertFalse(try included(coordinates[2]))
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<LocationSample>()), 3)
+    }
+}
+
+
+extension PrivacyZoneTests {
+    @MainActor
+    func testStagedImportSurvivesRelaunchAndDoesNotNeedOriginalFile() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let source = root.appendingPathComponent("walk.gpx")
+        try Data("""
+        <gpx version="1.1"><trk><trkseg>
+        <trkpt lat="37.77" lon="-122.42"><time>2026-10-01T10:00:00Z</time></trkpt>
+        <trkpt lat="37.78" lon="-122.42"><time>2026-10-01T10:10:00Z</time></trkpt>
+        </trkseg></trk></gpx>
+        """.utf8).write(to: source)
+        let schema = Schema(MovesTimelineSchema.models)
+        let container = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)])
+        let directory = root.appendingPathComponent("queue")
+        let original = DurableImportQueue(container: container, directory: directory)
+        original.sceneChanged(.inactive)
+        try await original.enqueue([source], kind: .routes)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: source.path))
+        XCTAssertEqual(original.jobs.first?.state, .queued)
+        try FileManager.default.removeItem(at: source)
+        let restored = DurableImportQueue(container: container, directory: directory)
+        let id = try XCTUnwrap(restored.jobs.first?.id)
+        XCTAssertEqual(restored.jobs.first?.state, .paused)
+        restored.resume(id)
+        for _ in 0..<200 {
+            if restored.jobs.first?.state == .completed || restored.jobs.first?.state == .failed { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        XCTAssertEqual(restored.jobs.first?.state, .completed, restored.jobs.first?.message ?? "")
+        let count = try ModelContext(container).fetchCount(FetchDescriptor<LocationSample>())
+        XCTAssertGreaterThan(count, 0)
+        restored.resume(id)
+        XCTAssertEqual(restored.jobs.first?.state, .completed)
+        XCTAssertEqual(try ModelContext(container).fetchCount(FetchDescriptor<LocationSample>()), count)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: SavedImportStore(directory: directory).folder(for: id).path))
+    }
+
+    func testCorruptCoverageAddressFailsWithoutTrappingOrReplacingData() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let data = try JSONEncoder().encode([FogCoverageArchive.Record(tileID: -1, x: 0, y: 0, bytes: Data(repeating: 0, count: 512))])
+        try data.write(to: url)
+        XCTAssertThrowsError(try FogCoverageArchive.load(from: url))
+        XCTAssertThrowsError(try FogCoverageArchive.merge([], at: url))
+        XCTAssertEqual(try Data(contentsOf: url), data)
+    }
+
+    func testAccountChangeCannotHideQuotaFailure() {
+        var state = MovesICloudSyncState()
+        state.apply(eventID: UUID(), kind: .upload, endDate: Date(), succeeded: false, error: CKError(.quotaExceeded))
+        state.apply(accountStatus: .noAccount)
+        XCTAssertEqual(state.problem, .signedOut)
+        state.apply(eventID: UUID(), kind: .download, endDate: Date(), succeeded: true, error: nil)
+        XCTAssertEqual(state.problem, .signedOut)
+        state.apply(accountStatus: .available)
+        XCTAssertEqual(state.problem, .storageFull)
+    }
+}
+
+
+extension PrivacyZoneTests {
+    @MainActor
+    func testInstalledRouteThumbnailExtensionRendersGPX() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("Preview-\(UUID().uuidString).gpx")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try Data("""
+        <gpx version="1.1"><trk><trkseg><trkpt lat="37.77" lon="-122.42"/><trkpt lat="37.78" lon="-122.41"/><trkpt lat="37.79" lon="-122.42"/></trkseg></trk></gpx>
+        """.utf8).write(to: url)
+        let request = QLThumbnailGenerator.Request(fileAt: url, size: CGSize(width: 320, height: 240), scale: 1, representationTypes: .thumbnail)
+        let finished = expectation(description: "Quick Look route thumbnail")
+        QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { representation, error in
+            XCTAssertNil(error)
+            XCTAssertEqual(representation?.type, .thumbnail)
+            if let image = representation?.uiImage {
+                let attachment = XCTAttachment(image: image)
+                attachment.name = "GPX route thumbnail"
+                attachment.lifetime = .keepAlways
+                self.add(attachment)
+            }
+            finished.fulfill()
+        }
+        await fulfillment(of: [finished], timeout: 60)
+        QLThumbnailGenerator.shared.cancel(request)
     }
 }

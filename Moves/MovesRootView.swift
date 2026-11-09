@@ -91,18 +91,17 @@ struct MovesRootView: View {
     @State private var isShowingHealthImport = false
     @State private var isShowingFileImport = false
 
-    @Query(sort: \DayTimeline.dayStart, order: .forward)
-    private var dayTimelines: [DayTimeline]
-
+    @Query(Self.earliestDayQuery) private var earliestDays: [DayTimeline]
+    private static var earliestDayQuery: FetchDescriptor<DayTimeline> {
+        var query = FetchDescriptor<DayTimeline>(sortBy: [SortDescriptor(\.dayStart)])
+        query.fetchLimit = 1
+        return query
+    }
     @Query(filter: #Predicate<VisitPlace> { $0.reviewStateRaw == "pending" })
     private var pendingReviewVisits: [VisitPlace]
 
     @Query(filter: #Predicate<MoveSegment> { $0.reviewStateRaw == "pending" })
     private var pendingReviewMoves: [MoveSegment]
-
-    private var selectedDay: DayTimeline? {
-        dayTimelines.first { $0.dayKey == controller.selectedDayKey } ?? dayTimelines.last
-    }
 
     var body: some View {
         @Bindable var editor = editController
@@ -144,7 +143,7 @@ struct MovesRootView: View {
             applyLaunchJumpIfNeeded()
             presentOnboardingIfNeeded()
         }
-        .onChange(of: dayTimelines.isEmpty) { _, isEmpty in
+        .onChange(of: earliestDays.isEmpty) { _, isEmpty in
             if isEmpty {
                 presentOnboardingIfNeeded()
             } else if !hasSeenOnboarding {
@@ -152,24 +151,23 @@ struct MovesRootView: View {
             }
         }
         .sheet(isPresented: $controller.isShowingSettings) {
-            MovesSettingsView(
-                dayTimelines: dayTimelines,
-                selectedDayKey: controller.selectedDayKey,
-                captureManager: captureManager
-            )
+            TimelineHistorySheet { days in
+                MovesSettingsView(dayTimelines: days, selectedDayKey: controller.selectedDayKey, captureManager: captureManager)
+            }
         }
         .sheet(isPresented: $controller.isShowingStatisticsSearch) {
-            NavigationStack {
-                MovesSearchView(dayTimelines: dayTimelines)
+            TimelineHistorySheet { days in
+                NavigationStack { MovesSearchView(dayTimelines: days) }
             }
         }
         .sheet(isPresented: $controller.isShowingRouteTrackingSettings) {
             RouteTrackingSettingsSheet(captureManager: captureManager)
         }
         .sheet(isPresented: $controller.isShowingDatePicker) {
+            TimelineHistorySheet { days in
             MovesJumpToDateView(
-                dayTimelines: dayTimelines,
-                selectedDate: selectedDay?.dayStart ?? controller.requestedJumpMoment ?? .now,
+                dayTimelines: days,
+                selectedDate: days.first(where: { $0.dayKey == controller.selectedDayKey })?.dayStart ?? controller.requestedJumpMoment ?? .now,
                 onSelectDate: { date in
                     controller.requestedJumpDate = date
                 },
@@ -180,6 +178,7 @@ struct MovesRootView: View {
                 includesTime: true,
                 onDismiss: { controller.isShowingDatePicker = false }
             )
+            }
         }
         .onOpenURL(perform: handleDeepLink)
         .sheet(isPresented: $controller.isShowingReviewInbox) {
@@ -239,7 +238,7 @@ struct MovesRootView: View {
             }
         }
         .sheet(isPresented: $isShowingPhotoImport) {
-            PhotoHistoryImportSheet(firstRecordedDayStart: dayTimelines.first?.dayStart)
+            PhotoHistoryImportSheet(firstRecordedDayStart: earliestDays.first?.dayStart)
         }
         .sheet(isPresented: $isShowingHealthImport) {
             NavigationStack {
@@ -287,7 +286,7 @@ struct MovesRootView: View {
             || env["MOVES_OPEN_REVIEW"] == "1" {
             return false
         }
-        return dayTimelines.isEmpty && !hasSeenOnboarding
+        return earliestDays.isEmpty && !hasSeenOnboarding
     }
 
     private func presentOnboardingIfNeeded() {
@@ -457,4 +456,12 @@ struct MovesRootView: View {
         undoToast.dismiss()
         editController.undoLastChange()
     }
+}
+
+
+/// Full history is observed only while a destination that needs it is presented.
+private struct TimelineHistorySheet<Content: View>: View {
+    @Query(sort: \DayTimeline.dayStart) private var days: [DayTimeline]
+    @ViewBuilder var content: ([DayTimeline]) -> Content
+    var body: some View { content(days) }
 }

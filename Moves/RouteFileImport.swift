@@ -71,17 +71,14 @@ final class RouteFileImporter: ObservableObject {
         }
 
         do {
-            var payloads: [(name: String, data: Data)] = []
-            for (index, url) in securityScopedURLs.enumerated() {
-                importProgressText = "Reading \(index + 1) of \(securityScopedURLs.count): \(url.lastPathComponent)"
-                payloads.append((url.lastPathComponent, try Self.readSecurityScopedData(from: url)))
-            }
-
-            importProgressText = "Finding stays and trips…"
-            importProgress = nil
-            let parsed = try await Task.detached(priority: .userInitiated) {
-                try Self.parse(payloads)
-            }.value
+            let parsed = try await importWorkerValue(Task.detached(priority: .userInitiated) {
+                var payloads: [(name: String, data: Data)] = []
+                for url in securityScopedURLs {
+                    try Task.checkCancellation()
+                    payloads.append((url.lastPathComponent, try Self.readSecurityScopedData(from: url)))
+                }
+                return try Self.parse(payloads)
+            })
 
             guard !parsed.timedGroups.isEmpty || !parsed.untimedTracks.isEmpty else {
                 throw LocationLogImportError.noTimelineData
@@ -94,7 +91,7 @@ final class RouteFileImporter: ObservableObject {
             }
             let skipNaming = ProcessInfo.processInfo.isRunningUnitTests
 
-            var report = try await Task.detached(priority: .userInitiated) { () throws -> RouteFileImportReport in
+            var report = try await importWorkerValue(Task.detached(priority: .userInitiated) { () throws -> RouteFileImportReport in
                 let repository = SwiftDataTimelineRepository(modelContainer: container)
                 var report = RouteFileImportReport(
                     fileCount: securityScopedURLs.count,
@@ -105,6 +102,7 @@ final class RouteFileImporter: ObservableObject {
 
                 let groupCount = Double(max(parsed.timedGroups.count, 1))
                 for (groupIndex, group) in parsed.timedGroups.enumerated() {
+                    try Task.checkCancellation()
                     let timeline = LocationLogSegmenter().segment(group.points)
                     guard !timeline.isEmpty else { continue }
                     let base = Double(groupIndex) / groupCount
@@ -119,6 +117,7 @@ final class RouteFileImporter: ObservableObject {
                 }
 
                 for track in parsed.untimedTracks where track.locations.count >= 2 {
+                    try Task.checkCancellation()
                     _ = try repository.importRouteTrack(
                         locations: track.locations,
                         source: .fileRouteImport,
@@ -151,7 +150,7 @@ final class RouteFileImporter: ObservableObject {
                 }
 
                 return report
-            }.value
+            })
 
             report.fileCount = securityScopedURLs.count
             report.incompleteFileNames = parsed.incompleteFileNames
@@ -186,6 +185,7 @@ final class RouteFileImporter: ObservableObject {
         var incomplete: [String] = []
 
         for payload in payloads {
+            try Task.checkCancellation()
             let fileMode = inferTransportMode(from: payload.name)
             if payload.name.lowercased().hasSuffix(".gpx") {
                 let result = try LocationLogGPXParser.parse(data: payload.data)
@@ -290,18 +290,20 @@ extension LocationLogImportReport {
 
 struct RouteFileImportSettingsView: View {
     @Environment(\.dismiss) private var dismiss
-    @StateObject private var importer: RouteFileImporter
+    @EnvironmentObject private var importQueue: DurableImportQueue
+    private var importer: RouteFileImporter { importQueue.routes }
     @State private var isShowingFileImporter = false
     @State private var importMessage = ""
     @State private var isShowingImportMessage = false
 
     init(modelContext: ModelContext) {
-        _importer = StateObject(wrappedValue: RouteFileImporter(modelContext: modelContext))
+        // The app owns the queue and writers independently of this screen.
     }
 
     var body: some View {
         ScrollView {
             LazyVStack(spacing: 14) {
+                ImportQueueCard()
                 RouteImportCard(title: "Route Files") {
                     RouteImportActionRow(
                         title: importer.isImporting ? "Importing route files..." : "Import route files",
@@ -311,21 +313,6 @@ struct RouteFileImportSettingsView: View {
                         isShowingFileImporter = true
                     }
 
-                    if importer.isImporting {
-                        if let progress = importer.importProgress {
-                            ProgressView(value: progress)
-                                .tint(MovesPalette.routeTracking)
-                        } else {
-                            ProgressView()
-                                .tint(MovesPalette.routeTracking)
-                        }
-
-                        if !importer.importProgressText.isEmpty {
-                            Text(importer.importProgressText)
-                                .font(.system(size: 12, weight: .medium, design: .rounded))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
 
                     Text("Supports GPX, TCX, KML, and GeoJSON. Select one or several files at once. Timestamped logs from other tracking apps are split into places and trips, transport modes are inferred from speed, and new places are named from the map. Points you already have are skipped, so re-importing is safe.")
                         .font(.system(size: 12, weight: .medium, design: .rounded))
@@ -359,13 +346,8 @@ struct RouteFileImportSettingsView: View {
             switch result {
             case .success(let urls):
                 Task { @MainActor in
-                    await importer.importFiles(urls: urls)
-                    if let report = importer.lastReport {
-                        importMessage = report.summary
-                    } else {
-                        importMessage = importer.lastErrorMessage ?? "No route data was imported."
-                    }
-                    isShowingImportMessage = true
+                    do { try await importQueue.enqueue(urls, kind: .routes) }
+                    catch { importMessage = error.localizedDescription; isShowingImportMessage = true }
                 }
             case .failure(let error):
                 importMessage = "File import failed: \(error.localizedDescription)"

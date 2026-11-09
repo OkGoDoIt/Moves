@@ -773,10 +773,10 @@ final class TimelineArchiveImporter: ObservableObject {
     @Published private(set) var lastReport: TimelineArchiveImportReport?
     @Published private(set) var lastErrorMessage: String?
 
-    private let modelContext: ModelContext
+    private let modelContainer: ModelContainer
 
     init(modelContext: ModelContext) {
-        self.modelContext = modelContext
+        self.modelContainer = modelContext.container
     }
 
     func importFiles(urls: [URL]) async {
@@ -798,31 +798,24 @@ final class TimelineArchiveImporter: ObservableObject {
         }
 
         do {
-            var files: [(name: String, data: Data)] = []
-            for (index, url) in uniqueURLs.enumerated() {
-                importProgressText = "Reading \(index + 1) of \(uniqueURLs.count): \(url.lastPathComponent)"
-                importProgress = Double(index) / Double(max(uniqueURLs.count + 1, 1))
-                files.append((url.lastPathComponent, try readSecurityScopedData(from: url)))
-            }
-
-            importProgressText = "Combining GPX, GeoJSON, and CSV…"
-            let parsed = await Task.detached(priority: .userInitiated) {
-                TimelineArchiveFileParser.parseAll(files: files)
-            }.value
-
-            guard !parsed.archive.isEmpty else {
-                if let reason = parsed.warnings.first {
-                    throw TimelineArchiveImportError.unreadableFile(reason)
+            let container = modelContainer
+            let outcome = try await importWorkerValue(Task.detached(priority: .userInitiated) {
+                var files: [(name: String, data: Data)] = []
+                for url in uniqueURLs {
+                    try Task.checkCancellation()
+                    files.append((url.lastPathComponent, try Self.readSecurityScopedData(from: url)))
                 }
-                throw TimelineArchiveImportError.noTimelineData
-            }
-
-            let repository = SwiftDataTimelineRepository(modelContext: modelContext)
-            let persisted = try repository.importTimelineArchive(parsed.archive) { [weak self] fraction, text in
-                self?.importProgress = fraction
-                self?.importProgressText = text
-            }
-
+                let parsed = TimelineArchiveFileParser.parseAll(files: files)
+                try Task.checkCancellation()
+                guard !parsed.archive.isEmpty else {
+                    if let reason = parsed.warnings.first { throw TimelineArchiveImportError.unreadableFile(reason) }
+                    throw TimelineArchiveImportError.noTimelineData
+                }
+                let repository = SwiftDataTimelineRepository(modelContainer: container)
+                let persisted = try repository.importTimelineArchive(parsed.archive)
+                return (parsed, persisted)
+            })
+            let (parsed, persisted) = outcome
             var report = persisted
             report.fileCount = uniqueURLs.count
             report.parsedFileCount = parsed.parsedFileCount
@@ -837,7 +830,7 @@ final class TimelineArchiveImporter: ObservableObject {
         }
     }
 
-    private func readSecurityScopedData(from url: URL) throws -> Data {
+    nonisolated private static func readSecurityScopedData(from url: URL) throws -> Data {
         let didAccess = url.startAccessingSecurityScopedResource()
         defer {
             if didAccess {
@@ -850,18 +843,20 @@ final class TimelineArchiveImporter: ObservableObject {
 
 struct TimelineArchiveImportSettingsView: View {
     @Environment(\.dismiss) private var dismiss
-    @StateObject private var importer: TimelineArchiveImporter
+    @EnvironmentObject private var importQueue: DurableImportQueue
+    private var importer: TimelineArchiveImporter { importQueue.archive }
     @State private var isShowingFileImporter = false
     @State private var importMessage = ""
     @State private var isShowingImportMessage = false
 
     init(modelContext: ModelContext) {
-        _importer = StateObject(wrappedValue: TimelineArchiveImporter(modelContext: modelContext))
+        // The app owns the queue and writers independently of this screen.
     }
 
     var body: some View {
         ScrollView {
             LazyVStack(spacing: 14) {
+                ImportQueueCard()
                 TimelineArchiveImportCard(title: "Moves Export") {
                     Button {
                         isShowingFileImporter = true
@@ -880,23 +875,8 @@ struct TimelineArchiveImportSettingsView: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .disabled(importer.isImporting)
+                    .disabled(importer.isImporting || importQueue.isStaging)
 
-                    if importer.isImporting {
-                        if let progress = importer.importProgress {
-                            ProgressView(value: progress)
-                                .tint(MovesPalette.routeTracking)
-                        } else {
-                            ProgressView()
-                                .tint(MovesPalette.routeTracking)
-                        }
-
-                        if !importer.importProgressText.isEmpty {
-                            Text(importer.importProgressText)
-                                .font(.system(size: 12, weight: .medium, design: .rounded))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
 
                     Text("In the other Moves app, export All Days as GPX, GeoJSON, and CSV — or the Everything zip — then select those files here. GeoJSON and CSV restore names, notes, and transport modes. GPX restores the original GPS times and elevation. Nightly iCloud Drive backups of those same formats work too.")
                         .font(.system(size: 12, weight: .medium, design: .rounded))
@@ -930,11 +910,8 @@ struct TimelineArchiveImportSettingsView: View {
             switch result {
             case .success(let urls):
                 Task { @MainActor in
-                    await importer.importFiles(urls: urls)
-                    importMessage = importer.lastReport?.summary
-                        ?? importer.lastErrorMessage
-                        ?? "No timeline data was imported."
-                    isShowingImportMessage = true
+                    do { try await importQueue.enqueue(urls, kind: .archive) }
+                    catch { importMessage = error.localizedDescription; isShowingImportMessage = true }
                 }
             case .failure(let error):
                 importMessage = "File import failed: \(error.localizedDescription)"

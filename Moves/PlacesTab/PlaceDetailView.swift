@@ -12,8 +12,8 @@ struct PlaceDetailView: View {
     @Environment(\.undoToastPresenter) private var undoToast
 
     @Query private var knownPlaces: [KnownPlace]
-    @Query(sort: \VisitPlace.arrivalDate, order: .reverse)
-    private var allVisits: [VisitPlace]
+    @Query private var allVisits: [VisitPlace]
+    @State private var visibleVisitCount = 100
 
     @State private var camera: MapCameraPosition
     @State private var isRenaming = false
@@ -25,13 +25,14 @@ struct PlaceDetailView: View {
         self.placeID = placeID
         let identifier = placeID
         _knownPlaces = Query(filter: #Predicate<KnownPlace> { $0.id == identifier })
+        _allVisits = Query(filter: #Predicate<VisitPlace> { $0.knownPlace?.id == identifier }, sort: \.arrivalDate, order: .reverse)
         _camera = State(initialValue: .automatic)
     }
 
     private var place: KnownPlace? { knownPlaces.first }
 
     private var visits: [VisitPlace] {
-        allVisits.filter { $0.knownPlace?.id == placeID }
+        allVisits
     }
 
     private var summary: PlacesPlaceSummary? {
@@ -161,12 +162,15 @@ struct PlaceDetailView: View {
 
             if !visits.isEmpty {
                 Section {
-                    ForEach(visits) { visit in
+                    ForEach(visits.prefix(visibleVisitCount)) { visit in
                         Button {
                             openVisit(visit)
                         } label: {
                             PlaceVisitRow(visit: visit)
                         }
+                    }
+                    if visibleVisitCount < visits.count {
+                        Button("Show more visits") { visibleVisitCount += 100 }
                     }
                 } header: {
                     Text(String(localized: "Recent visits"))

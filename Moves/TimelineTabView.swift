@@ -446,3 +446,20 @@ struct TimelineMapCallout: View {
         .shadow(color: .black.opacity(0.08), radius: 8, y: 2)
     }
 }
+
+/// Lightweight navigation over every calendar day, including gaps with no stored timeline.
+struct TimelineBrowsingDay: Equatable, Sendable {
+    let dayStart: Date
+    var dayKey: String { DayTimeline.makeDayKey(for: dayStart) }
+    static func days(from start: Date, through end: Date, calendar: Calendar = .current) -> [Self] {
+        var result: [Self] = []
+        var date = calendar.startOfDay(for: start)
+        let last = calendar.startOfDay(for: end)
+        while date <= last {
+            result.append(Self(dayStart: date))
+            guard let next = calendar.date(byAdding: .day, value: 1, to: date), next > date else { break }
+            date = next
+        }
+        return result
+    }
+}

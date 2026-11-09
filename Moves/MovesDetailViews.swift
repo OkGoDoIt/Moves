@@ -295,6 +295,7 @@ struct MoveMapDetailView: View {
     @State private var deleteErrorMessage = ""
     @State private var isShowingDeleteError = false
     @State private var isShowingHealthOpenError = false
+    @State private var isShowingRecordedLocations = false
 
     private var activeRenderedRoute: RenderedRoute {
         RenderedRoute.make(from: segment, coordinates: routeCoordinates)
@@ -327,9 +328,6 @@ struct MoveMapDetailView: View {
 
         _camera = State(initialValue: .region(MapRegionFactory.region(for: initialRoute)))
         _routeCoordinates = State(initialValue: initialRoute)
-        _moveGPXShareFile = State(
-            initialValue: Self.makeGPXShareFile(for: segment, coordinates: initialRoute)
-        )
         _draftComment = State(initialValue: segment.comment ?? "")
     }
 
@@ -397,6 +395,11 @@ struct MoveMapDetailView: View {
                         .help("Open in Apple Health")
                     }
 
+                    Button {
+                        isShowingRecordedLocations = true
+                    } label: {
+                        Label("Recorded locations", systemImage: "list.bullet.rectangle")
+                    }
                     moveShareButton
 
                     Button {
@@ -433,12 +436,28 @@ struct MoveMapDetailView: View {
         } message: {
             Text(deleteErrorMessage)
         }
+        .sheet(isPresented: $isShowingRecordedLocations) {
+            NavigationStack {
+                RecordedLocationsView(moveID: segment.id)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { isShowingRecordedLocations = false }
+                        }
+                    }
+            }
+        }
         .alert("Could Not Open Apple Health", isPresented: $isShowingHealthOpenError) {
             Button("OK", role: .cancel) {}
         } message: {
             Text("Apple Health could not be opened from this device.")
         }
         .task(id: routeRefreshKey) {
+            refreshMoveGPXShareFile()
+            #if DEBUG
+            if ProcessInfo.processInfo.environment["MOVES_OPEN_RECORDED_LOCATIONS"] == "1" {
+                isShowingRecordedLocations = true
+            }
+            #endif
             await refreshRouteCoordinates()
         }
     }
@@ -458,8 +477,10 @@ struct MoveMapDetailView: View {
                 }
 
                 if activeRenderedRoute.shadowCoordinates.count > 1 {
-                    MapPolyline(coordinates: activeRenderedRoute.shadowCoordinates)
-                        .stroke(activeRenderedRoute.shadowTint, lineWidth: activeRenderedRoute.shadowLineWidth)
+                    ForEach(Array(RouteCoordinateOps.mapPolylineSegments(activeRenderedRoute.shadowCoordinates).enumerated()), id: \.offset) { _, coordinates in
+                        MapPolyline(coordinates: coordinates)
+                            .stroke(activeRenderedRoute.shadowTint, lineWidth: activeRenderedRoute.shadowLineWidth)
+                    }
                 }
 
                 ForEach(rawFixDotItems) { item in
@@ -472,20 +493,24 @@ struct MoveMapDetailView: View {
                 }
 
                 if activeRenderedRoute.coordinates.count > 1 {
-                    MapPolyline(coordinates: activeRenderedRoute.coordinates)
-                        .stroke(
-                            activeRenderedRoute.strokeGradient(shadeBySpeed: shadeRoutesBySpeed),
-                            style: RouteStrokeStyle.make(for: activeRenderedRoute)
-                        )
-                    if let overlayTint = activeRenderedRoute.recordedOverlayTint {
-                        MapPolyline(coordinates: activeRenderedRoute.coordinates)
+                    ForEach(Array(RouteCoordinateOps.mapPolylineSegments(activeRenderedRoute.coordinates).enumerated()), id: \.offset) { _, coordinates in
+                        MapPolyline(coordinates: coordinates)
                             .stroke(
-                                overlayTint,
-                                style: RouteStrokeStyle.make(
-                                    for: activeRenderedRoute,
-                                    lineWidth: activeRenderedRoute.overlayLineWidth
-                                )
+                                activeRenderedRoute.strokeGradient(shadeBySpeed: shadeRoutesBySpeed),
+                                style: RouteStrokeStyle.make(for: activeRenderedRoute)
                             )
+                    }
+                    if let overlayTint = activeRenderedRoute.recordedOverlayTint {
+                        ForEach(Array(RouteCoordinateOps.mapPolylineSegments(activeRenderedRoute.coordinates).enumerated()), id: \.offset) { _, coordinates in
+                            MapPolyline(coordinates: coordinates)
+                                .stroke(
+                                    overlayTint,
+                                    style: RouteStrokeStyle.make(
+                                        for: activeRenderedRoute,
+                                        lineWidth: activeRenderedRoute.overlayLineWidth
+                                    )
+                                )
+                        }
                     }
                 }
 
@@ -1124,5 +1149,126 @@ private extension View {
         return padding(.horizontal, 12)
             .padding(.top, 8)
             .padding(.bottom, 8 + tabBarLift)
+    }
+}
+
+/// Immutable inspection values: never retain a sample another context can delete.
+struct RecordedLocationFix: Identifiable, Sendable {
+    let id: String
+    let timestamp: Date
+    let latitude: Double
+    let longitude: Double
+    let accuracy: Double
+    let speed: Double
+    let source: String
+    var coordinate: CLLocationCoordinate2D { .init(latitude: latitude, longitude: longitude) }
+    init(_ sample: LocationSample) {
+        id = sample.dedupeKey; timestamp = sample.timestamp
+        latitude = sample.latitude; longitude = sample.longitude
+        accuracy = sample.horizontalAccuracy; speed = sample.speed
+        source = sample.sourceRawValue
+    }
+    var sourceTitle: String {
+        switch LocationSampleSource(rawValue: source) {
+        case .visit: String(localized: "Visit")
+        case .significantChange: String(localized: "Location change")
+        case .routeTracking: String(localized: "iPhone route")
+        case .watchRouteTracking: String(localized: "Watch route")
+        case .fileRouteImport: String(localized: "Imported file")
+        case .watchSignificantChange: String(localized: "Watch location")
+        case .healthWorkoutRoute: String(localized: "Health workout")
+        case .launchBackfill: String(localized: "App launch")
+        case .authorizationGrant: String(localized: "Location permission")
+        case .lastMile: String(localized: "Arrival or departure")
+        case .photoLibrary: String(localized: "Photo")
+        case .googleTimelineImport: String(localized: "Google Timeline")
+        case .arcImport: String(localized: "Arc import")
+        case nil: String(localized: "Other source")
+        }
+    }
+}
+
+/// Read-only, paginated original fixes, separate from matched or manually drawn paths.
+struct RecordedLocationsView: View {
+    let moveID: UUID
+    @Environment(\.modelContext) private var context
+    @State private var fixes: [RecordedLocationFix] = []
+    @State private var offset = 0
+    @State private var hasNext = false
+    @State private var selected: String?
+    @State private var camera: MapCameraPosition = .automatic
+    @State private var error: String?
+    private let pageSize = 200
+
+    private var fixesMap: some View {
+            Map(position: $camera, selection: $selected) {
+                ForEach(fixes) { fix in
+                    Marker(fix.timestamp.formatted(date: .omitted, time: .standard), coordinate: fix.coordinate).tag(fix.id)
+                }
+            }
+    }
+    private var fixesList: some View {
+            List {
+                if let error { Text(error).foregroundStyle(.secondary) }
+                if fixes.isEmpty, error == nil { Text("No recorded locations for this move.").foregroundStyle(.secondary) }
+                ForEach(fixes) { fix in
+                    Button {
+                        selected = fix.id
+                        camera = .region(MKCoordinateRegion(center: fix.coordinate, span: .init(latitudeDelta: 0.003, longitudeDelta: 0.003)))
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text(fix.timestamp, format: .dateTime.hour().minute().second())
+                                Spacer()
+                                Text(fix.sourceTitle).foregroundStyle(.secondary)
+                            }
+                            Text(String(format: "%.6f, %.6f", fix.latitude, fix.longitude)).font(.caption.monospacedDigit())
+                            HStack {
+                                if fix.accuracy >= 0 {
+                                    Text("Accuracy: \(Measurement(value: fix.accuracy, unit: UnitLength.meters).formatted(.measurement(width: .abbreviated)))")
+                                }
+                                if fix.speed >= 0 {
+                                    Text(Measurement(value: fix.speed, unit: UnitSpeed.metersPerSecond).formatted(.measurement(width: .abbreviated)))
+                                }
+                            }.font(.caption).foregroundStyle(.secondary)
+                        }.foregroundStyle(.primary)
+                    }.listRowBackground(fix.id == selected ? MovesPalette.routeTracking.opacity(0.12) : Color.clear)
+                }
+                HStack {
+                    Button("Previous") { offset = max(0, offset - pageSize) }.disabled(offset == 0)
+                    Spacer()
+                    Button("Next") { offset += pageSize }.disabled(!hasNext)
+                }
+            }
+    }
+    var body: some View {
+        GeometryReader { geometry in
+            let wide = geometry.size.width > 600 && geometry.size.width > geometry.size.height
+            let layout = wide ? AnyLayout(HStackLayout(spacing: 0)) : AnyLayout(VStackLayout(spacing: 0))
+            layout {
+                fixesMap.frame(width: wide ? geometry.size.width * 0.48 : nil,
+                               height: wide ? nil : min(240, geometry.size.height * 0.35))
+                fixesList
+            }
+        }
+        .navigationTitle("Recorded locations")
+        .navigationBarTitleDisplayMode(.inline)
+        .task(id: offset) {
+            let container = context.container
+            let id = moveID
+            let pageOffset = offset
+            do {
+                let page = try await importWorkerValue(Task.detached(priority: .userInitiated) {
+                    let reader = ModelContext(container)
+                    var query = FetchDescriptor<LocationSample>(predicate: #Predicate { $0.moveSegment?.id == id }, sortBy: [SortDescriptor(\.timestamp), SortDescriptor(\.dedupeKey)])
+                    query.fetchLimit = 201; query.fetchOffset = pageOffset
+                    return try reader.fetch(query).map(RecordedLocationFix.init)
+                })
+                try Task.checkCancellation()
+                fixes = Array(page.prefix(pageSize)); hasNext = page.count > pageSize; error = nil
+                selected = nil; camera = .automatic
+            } catch is CancellationError { }
+            catch { self.error = String(localized: "Locations couldn’t be loaded.") }
+        }
     }
 }

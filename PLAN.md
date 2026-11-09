@@ -631,3 +631,17 @@ Recorded 2026‑09‑20. Agents must not re-litigate these.
 | Named trips | M3 with Photos (WS9b). Lens over a date range; does not copy points. Replay deferred. |
 | Webhook | Both OwnTracks `_type: location` and Moves-native visits/moves; both on by default, user-togglable. |
 | Arc import | Skip until a real export is in `import-staging/`. Do not guess the schema. |
+
+
+## November 9 upstream integration addendum
+
+Workstreams WS4, WS6, WS8, and WS12 now compose upstream-derived import recovery,
+file previews, finer Fog coverage/compatibility, offline visit-country lookup,
+bounded timeline browsing, original-fix inspection, geodesic flights, and sync/startup
+recovery into the existing design. `UPSTREAM.md` records source provenance, adaptations,
+verification, and deferred choices. Mac browsing and multiple recording devices are
+explicitly deferred. The recording accuracy, background schedules, raw upload contract,
+read-only Photos policy, full-fidelity history storage, and singleton store remain.
+The older 100 m Fog decision describes the original implementation; Fog now draws
+fine observed cells at street zoom, with bounded aggregation at wide zoom. Heat
+continues using the existing visit-cell counts.

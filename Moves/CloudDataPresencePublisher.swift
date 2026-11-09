@@ -6,6 +6,47 @@ import Foundation
 import SwiftData
 import SwiftUI
 
+/// Captures mirror events before SwiftData opens the store. Only bounded plain event values
+/// are retained; no timer, extra CloudKit operation, or second container is created.
+final class MovesMirrorEventBuffer: @unchecked Sendable {
+    static let shared = MovesMirrorEventBuffer()
+    static let didReceive = Notification.Name("Moves.mirrorEventBuffered")
+    struct Entry {
+        let id: UUID
+        let kind: MovesICloudSyncState.EventKind
+        let endDate: Date?
+        let succeeded: Bool
+        let error: Error?
+    }
+    private let lock = NSLock()
+    private var entries: [Entry] = []
+    private var observer: NSObjectProtocol?
+    private init() {
+        observer = NotificationCenter.default.addObserver(
+            forName: NSPersistentCloudKitContainer.eventChangedNotification, object: nil, queue: nil
+        ) { [weak self] notification in
+            guard let event = notification.userInfo?[NSPersistentCloudKitContainer.eventNotificationUserInfoKey]
+                    as? NSPersistentCloudKitContainer.Event else { return }
+            let kind: MovesICloudSyncState.EventKind
+            switch event.type { case .setup: kind = .setup; case .import: kind = .download; case .export: kind = .upload; @unknown default: kind = .transfer }
+            self?.append(Entry(id: event.identifier, kind: kind, endDate: event.endDate, succeeded: event.succeeded, error: event.error))
+        }
+    }
+    private func append(_ entry: Entry) {
+        lock.lock()
+        entries.append(entry)
+        if entries.count > 128 { entries.removeFirst(entries.count - 128) }
+        lock.unlock()
+        NotificationCenter.default.post(name: Self.didReceive, object: nil)
+    }
+    func drain() -> [Entry] {
+        lock.lock(); defer { lock.unlock() }
+        let result = entries
+        entries.removeAll(keepingCapacity: true)
+        return result
+    }
+}
+
 /// Whether this install may mirror the timeline into the user’s private iCloud.
 enum MovesCloudKitAvailability {
     /// Simulator builds always use an in-memory store, so they never mirror.
@@ -21,7 +62,7 @@ enum MovesCloudKitAvailability {
     /// the container stay local-only.
     static var allowsPrivateMirror: Bool {
         if isSimulator { return false }
-        return MovesApp.allowsCloudKitContainer()
+        return MovesApp.privateMirrorIsActive ?? MovesApp.allowsCloudKitContainer()
     }
 }
 
@@ -81,12 +122,15 @@ struct MovesICloudSyncState: Equatable {
         }
     }
 
-    enum EventKind {
-        case setup
-        case transfer
+    enum EventKind: Hashable {
+        case setup, transfer, download, upload
     }
 
     var lastSyncedAt: Date?
+    var lastUploadedAt: Date?
+    var lastDownloadedAt: Date?
+    private var stageProblems: [EventKind: Problem] = [:]
+    private var accountProblem: Problem?
     var problem: Problem?
     private var activeEventIDs: Set<UUID> = []
 
@@ -105,24 +149,35 @@ struct MovesICloudSyncState: Equatable {
         }
         activeEventIDs.remove(eventID)
         if !succeeded {
-            problem = Problem(error: error)
-        } else if kind == .transfer {
-            lastSyncedAt = endDate
-            problem = nil
+            stageProblems[kind] = Problem(error: error)
+        } else {
+            stageProblems[kind] = nil
+            if kind != .setup { lastSyncedAt = max(lastSyncedAt ?? endDate, endDate) }
+            if kind == .upload { lastUploadedAt = max(lastUploadedAt ?? endDate, endDate) }
+            if kind == .download { lastDownloadedAt = max(lastDownloadedAt ?? endDate, endDate) }
         }
+        refreshProblem()
+    }
+
+    private mutating func refreshProblem() {
+        var problems = Set(stageProblems.values)
+        if let accountProblem { problems.insert(accountProblem) }
+        problem = problems.contains(.signedOut) ? .signedOut : problems.contains(.storageFull) ? .storageFull
+            : problems.contains(.offline) ? .offline : problems.contains(.other) ? .other : nil
     }
 
     mutating func apply(accountStatus: CKAccountStatus) {
         switch accountStatus {
         case .noAccount, .restricted:
-            problem = .signedOut
+            accountProblem = .signedOut
         case .available:
-            if problem == .signedOut { problem = nil }
+            accountProblem = nil
         case .couldNotDetermine, .temporarilyUnavailable:
             break
         @unknown default:
             break
         }
+        refreshProblem()
     }
 }
 
@@ -227,6 +282,8 @@ final class MovesCloudDataPresencePublisher: ObservableObject {
     }
 
     private static let lastSyncedAtKey = "moves.iCloud.lastSyncedAt"
+    private static let uploadKey = "moves.iCloud.lastUploadedAt"
+    private static let downloadKey = "moves.iCloud.lastDownloadedAt"
 
     private let modelContainer: ModelContainer
     private var pendingPublishTask: Task<Void, Never>?
@@ -237,9 +294,11 @@ final class MovesCloudDataPresencePublisher: ObservableObject {
 
     init(modelContainer: ModelContainer) {
         self.modelContainer = modelContainer
-        let sync = MovesICloudSyncState(
+        var sync = MovesICloudSyncState(
             lastSyncedAt: UserDefaults.standard.object(forKey: Self.lastSyncedAtKey) as? Date
         )
+        sync.lastUploadedAt = UserDefaults.standard.object(forKey: Self.uploadKey) as? Date
+        sync.lastDownloadedAt = UserDefaults.standard.object(forKey: Self.downloadKey) as? Date
         self.syncState = sync
         self.status = MovesICloudStatus.resolve(
             allowsPrivateMirror: MovesCloudKitAvailability.allowsPrivateMirror,
@@ -248,18 +307,16 @@ final class MovesCloudDataPresencePublisher: ObservableObject {
         )
         guard MovesCloudKitAvailability.allowsPrivateMirror else { return }
         observeMirror()
+        drainMirrorEvents()
         refreshSyncStatus()
     }
 
     /// The mirror behind SwiftData reports through `NSPersistentCloudKitContainer`.
     private func observeMirror() {
         NotificationCenter.default
-            .publisher(for: NSPersistentCloudKitContainer.eventChangedNotification)
-            .compactMap { $0.userInfo?[NSPersistentCloudKitContainer.eventNotificationUserInfoKey] as? NSPersistentCloudKitContainer.Event }
+            .publisher(for: MovesMirrorEventBuffer.didReceive)
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] event in
-                self?.apply(event)
-            }
+            .sink { [weak self] _ in self?.drainMirrorEvents() }
             .store(in: &observers)
 
         NotificationCenter.default
@@ -271,18 +328,14 @@ final class MovesCloudDataPresencePublisher: ObservableObject {
             .store(in: &observers)
     }
 
-    private func apply(_ event: NSPersistentCloudKitContainer.Event) {
-        let previousLastSync = syncState.lastSyncedAt
-        syncState.apply(
-            eventID: event.identifier,
-            kind: event.type == .setup ? .setup : .transfer,
-            endDate: event.endDate,
-            succeeded: event.succeeded,
-            error: event.error
-        )
-        if syncState.lastSyncedAt != previousLastSync {
-            UserDefaults.standard.set(syncState.lastSyncedAt, forKey: Self.lastSyncedAtKey)
+    private func drainMirrorEvents() {
+        for event in MovesMirrorEventBuffer.shared.drain() {
+            syncState.apply(eventID: event.id, kind: event.kind, endDate: event.endDate,
+                            succeeded: event.succeeded, error: event.error)
         }
+        UserDefaults.standard.set(syncState.lastSyncedAt, forKey: Self.lastSyncedAtKey)
+        UserDefaults.standard.set(syncState.lastUploadedAt, forKey: Self.uploadKey)
+        UserDefaults.standard.set(syncState.lastDownloadedAt, forKey: Self.downloadKey)
         publishStatus()
     }
 
@@ -366,6 +419,15 @@ struct ICloudSettingsCard: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 8)
+            }
+
+            if case .privateICloud(let sync) = publisher.status {
+                if let uploaded = sync.lastUploadedAt {
+                    LabeledContent(String(localized: "Last upload")) { Text(uploaded, style: .relative).font(.caption) }
+                }
+                if let downloaded = sync.lastDownloadedAt {
+                    LabeledContent(String(localized: "Last download")) { Text(downloaded, style: .relative).font(.caption) }
+                }
             }
 
             Button(action: onOpenDailyBackup) {

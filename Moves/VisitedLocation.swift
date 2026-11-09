@@ -1693,6 +1693,9 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             return nil
         }
 
+        if source.isHistoryImport,
+           wasRemoved(tripFrom: firstLocation.timestamp, to: lastLocation.timestamp,
+                      spans: try modelContext.fetch(FetchDescriptor<RemovedTimelineSpan>())) { return nil }
         let samples = try appendSamples(from: orderedLocations, source: source)
         let distance = Self.totalDistance(for: orderedLocations)
 
@@ -1752,6 +1755,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             newRowOrigin = .sensor
         }
 
+        let removed = try modelContext.fetch(FetchDescriptor<RemovedTimelineSpan>())
         let places = archive.places.sorted(by: { $0.arrivalDate < $1.arrivalDate })
         let moves = archive.moves.sorted(by: { $0.startDate < $1.startDate })
         let total = max(places.count + moves.count, 1)
@@ -1760,6 +1764,8 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         var importedSampleCount = 0
 
         for (index, record) in places.enumerated() {
+            if Task.isCancelled { modelContext.rollback(); throw CancellationError() }
+            if importStopWasRemoved(start: record.arrivalDate, end: record.departureDate ?? record.arrivalDate.addingTimeInterval(1), coordinate: record.coordinate, spans: removed) { continue }
             progress?(Double(index) / Double(total), "Restoring places…")
             _ = try upsertImportedPlace(record)
             importedPlaceCount += 1
@@ -1767,6 +1773,8 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         try saveIfNeeded()
 
         for (index, record) in moves.enumerated() {
+            if Task.isCancelled { modelContext.rollback(); throw CancellationError() }
+            if wasRemoved(tripFrom: record.startDate, to: record.endDate, spans: removed) { continue }
             progress?(Double(places.count + index) / Double(total), "Restoring moves…")
             importedSampleCount += try importArchiveMove(record)
             importedMoveCount += 1
@@ -1821,16 +1829,21 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         try beginBulkImport()
         defer { endBulkImport() }
 
+        let removed = try modelContext.fetch(FetchDescriptor<RemovedTimelineSpan>())
         var report = LocationLogImportReport()
         var previousPlace: VisitPlace?
         var pendingMove: LocationLogMove?
         let total = Double(max(log.segments.count, 1))
 
         for (index, segment) in log.segments.enumerated() {
+            if Task.isCancelled { modelContext.rollback(); throw CancellationError() }
             progress?(Double(index) / total, "Rebuilding timeline…")
 
             switch segment {
             case .stay(let stay):
+                if importStopWasRemoved(start: stay.arrivalDate, end: stay.departureDate, coordinate: stay.coordinate, spans: removed) {
+                    previousPlace = nil; pendingMove = nil; continue
+                }
                 let (place, isNew) = try upsertLogStay(stay, source: source, report: &report)
                 if isNew {
                     report.placeCount += 1
@@ -1863,6 +1876,9 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                 previousPlace = place
 
             case .move(let move):
+                if wasRemoved(tripFrom: move.startDate, to: move.endDate, spans: removed) {
+                    previousPlace = nil; pendingMove = nil; continue
+                }
                 if let orphan = pendingMove {
                     // Two moves in a row only happen at the log edges; give the
                     // first one a point-shaped destination so it still renders.
@@ -1986,6 +2002,11 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             .0
 
         if let match {
+            // Resuming a staged import may revisit already committed segments. Never
+            // stretch a corrected/reviewed/imported stay back to the source file's times.
+            if match.origin != .sensor || match.reviewState == .confirmed || match.reviewState == .dismissed {
+                return (match, false)
+            }
             // Grow the visit toward the stay's bounds, but never across a
             // neighbouring visit at the same spot (CLVisit often splits one
             // evening at home into several fragments).
@@ -2604,14 +2625,18 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         }
     }
 
-    /// What the person has removed recently. Older entries can no longer match a
-    /// reconstruction, so they are dropped rather than kept forever.
+    /// Removal is user intent, including when an old staged import is resumed later.
+    /// Keep tombstones; filtering a repair window must not erase older decisions.
     private func removedSpans(since start: Date) throws -> [RemovedTimelineSpan] {
-        let spans = try modelContext.fetch(FetchDescriptor<RemovedTimelineSpan>())
-        for span in spans where span.endDate < start {
-            modelContext.delete(span)
+        try modelContext.fetch(FetchDescriptor<RemovedTimelineSpan>(predicate: #Predicate { $0.endDate >= start }))
+    }
+
+    private func importStopWasRemoved(start: Date, end: Date, coordinate: CLLocationCoordinate2D,
+                                      spans: [RemovedTimelineSpan]) -> Bool {
+        spans.contains { span in
+            span.kind == .stop && span.startDate < end && span.endDate > start
+                && Self.distanceMeters(from: coordinate, to: .init(latitude: span.latitude, longitude: span.longitude)) <= Self.removedStopMatchDistance
         }
-        return spans.filter { $0.endDate >= start }
     }
 
     private func wasRemoved(_ stay: SampleStay, spans: [RemovedTimelineSpan]) -> Bool {
@@ -3046,6 +3071,9 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                 distanceMeters: distanceMeters,
                 transportMode: transportMode
             ) {
+            if newRowOrigin == .imported, isUserCurated(existing) {
+                return existing
+            }
             move = existing
             move.dedupeKey = dedupeKey
             if move.transportModeSource == .auto {
@@ -3749,6 +3777,9 @@ final class SwiftDataTimelineRepository: TimelineRepository {
 
     private func upsertImportedPlace(_ record: TimelineArchivePlace) throws -> VisitPlace {
         if let existing = try existingPlace(at: record.coordinate, covering: record.arrivalDate) {
+            if existing.origin != .sensor || existing.reviewState == .confirmed || existing.reviewState == .dismissed {
+                return existing
+            }
             applyArchiveMetadata(record, to: existing)
             existing.dayTimeline = try timeline(for: record.arrivalDate, exportedDayKey: record.dayKey)
             return try collapseDuplicatePlaces(around: existing)
@@ -3851,6 +3882,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             stepCount: stepCount,
             samples: samples
         )
+        if let existing, isUserCurated(existing) { return samples.count }
         move.dayTimeline = try timeline(for: record.startDate, exportedDayKey: record.dayKey)
         if let comment = record.comment, !comment.isEmpty, move.comment?.isEmpty ?? true {
             move.comment = comment

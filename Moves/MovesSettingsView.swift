@@ -309,7 +309,15 @@ struct MovesSettingsView: View {
 
                     dailyICloudBackupSettings
 
+                    ImportQueueCard()
+
                     SettingsCard(title: "Import") {
+                        NavigationLink {
+                            FogCoverageSettingsView()
+                        } label: {
+                            Label("Fog of World", systemImage: "map")
+                        }
+
                         NavigationLink {
                             GoogleTimelineImportSettingsView(modelContext: modelContext)
                         } label: {

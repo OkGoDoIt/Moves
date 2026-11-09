@@ -445,12 +445,11 @@ enum RouteSnapshotStroke {
             path.setLineDash(dash, count: dash.count, phase: 0)
         }
 
-        for (index, coordinate) in coordinates.enumerated() {
-            let point = snapshot.point(for: coordinate)
-            if index == 0 {
-                path.move(to: point)
-            } else {
-                path.addLine(to: point)
+        for segment in RouteCoordinateOps.mapPolylineSegments(coordinates) {
+            for (index, coordinate) in segment.enumerated() {
+                let point = snapshot.point(for: coordinate)
+                if index == 0 { path.move(to: point) }
+                else { path.addLine(to: point) }
             }
         }
 

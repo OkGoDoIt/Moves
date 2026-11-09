@@ -9,9 +9,9 @@ that ancestor. This review compares the actual implementation with fork `e88f9d2
 not just commit subjects or textual conflicts. The concurrently active agent owns
 calendar sync, Duo layout, route-edit race fixes, main, and device deployment.
 
-Roger explicitly chose **Mac browsing and multiple recording devices** during
-this review. These are desired integration scope, not reasons to reject upstream.
-This document distinguishes that direction from code already integrated.
+Roger authorized the broader integration, then explicitly **deferred Mac browsing
+and multiple recording devices**. Those remain future direction. Shared cross-device
+job leases are deferred with them; the local import queue is independent of that work.
 
 The initial safety patch is only a subset of the review. Larger features below
 are not implemented by that patch. Upstream's remaining changes must remain
@@ -94,29 +94,49 @@ but start from explicit per-device recording and destination ownership. Use
 leases only for truly shared side effects whose work identity and recovery are
 defined. Keep deterministic inference idempotent and local caches device-local.
 
-## Consolidation and implementation order
+## Implemented broader integration
 
-1. Land the independently tested safety adaptations. They change no stored
-   schema, UI layout, upload protocol, location accuracy/filter, or capture timer.
-2. Extract/reuse a platform-neutral core with **our complete schema**, current
-   signing identity, singleton-container behavior, and provenance/correction
-   rules. Establish native Mac browsing and inspect its rendered designs before
-   shipping a new surface. Mac browsing must not start phone capture workers.
-3. Add source-device provenance and per-device recording roles. Test co-travel,
-   a device left at home, switching devices mid-day, old blank IDs, independent
-   journeys, Watch transfer, and all correction/import/reconciliation paths.
-4. Integrate bounded navigation/snapshots and the durable import queue around
-   existing fork engines. Then share parsing with Quick Look. Coordinate edits
-   to ContentView and timeline layout with the current Duo owner.
-5. Add richer sync diagnostics and safe shared-side-effect ownership; verify
-   offline recording and delayed two-device CloudKit sync on actual hardware.
-6. Integrate detailed exploration, compatibility, flight editing, and additional
-   Insights as separately reviewable features composed from our existing tabs.
-   Keep optional photo writing and decorative features out until selected.
+Workstream: WS4 (maps/routes), WS6 (files), WS8 (Places/Insights), and WS12
+(reliability), composed into the existing iOS app. Source baseline is the reviewed
+upstream tip above. This is an adaptation, not a wholesale merge of its schema or UI.
 
-This is an implementation order, not a staged rollout or alternate production
-mode. Data-format migration and new UI need their own substantive verification;
-passing the initial safety suite does not validate those unimplemented features.
+| Area | Implementation and deliberate differences |
+| --- | --- |
+| Durable file imports | `DurableImportQueue` owns one sequential queue for route files, Google Timeline, and Moves archives. Sources are copied while security access is held; atomic local state survives relaunch. Interrupted jobs reopen paused with Resume/Retry. Detached parsing/writing receives cancellation. iOS background time only finishes an active user import; it never schedules a recurring wake. Resume replays with deduplication; there is no destructive range replacement. Edited/imported/reviewed visits and curated moves are preserved, as are removal tombstones. Source files are never deleted. |
+| Startup and iCloud | Event buffering starts before opening the one process-wide container. Upload and download times/errors are tracked separately, account errors retain priority, and actual local-only fallback is reported honestly. A store-open failure offers Retry rather than terminating or replacing history. Capture, uploads, and import workers have process-lifetime owners, independent of view identity. |
+| Timeline and Places browsing | Navigation reads first/last dates with bounded queries and builds plain calendar dates, without inserting blank history. Only the current and adjacent timeline pages are mounted. Spotlight copies paged visit values and skips unchanged donations. A learned place queries only its matching visits and progressively shows additional rows. Existing map aggregates and fork corrections remain authoritative. |
+| Map snapshots | Bounded memory cache and shared in-flight base-map snapshots; cancellation stops unused work. Route overlays are redrawn from current data, so edits do not reuse a stale route image. No new disk cache or background scheduler. |
+| File previews | Upstream `RouteFileKit` / `RoutePreviewKit`, iOS Quick Look preview and thumbnail extensions. Identity comes from xcconfig. Thumbnails use local geometry; full previews fall back to geometry if map tiles fail. Parsers are isolated from the timeline store and bounded. The fork's richer semantic import parsers remain authoritative; replacing them would discard import behavior that the preview parser does not provide. |
+| Recorded-location inspection | A read-only, paged view from a move's detail toolbar: timestamp, original coordinate, accuracy, speed, and source, with map selection. It never starts GPS or overwrites a reconstructed route. |
+| Exploration and Fog of World | Upstream fine raster and archive package adapted to the existing Fog layer. Queries page original ground observations for the visible region and are cancelled on navigation; coarse display cells bound drawing at wide zoom. Photo/flight observations do not count as ground exploration. Explicit Fog import keeps undated coverage separately; it never invents dates or enters automatic uploads. Explicit export combines ground observations with imported coverage and redacts Home/Work privacy cells. Archive decoding is pull-based and cancellable. |
+| Country insight | Bundled upstream Natural Earth country boundaries fill missing country codes for visit statistics offline, without changing stored visits or counting flight lines as visits. Existing city/country analytics and dates remain. No new network geocoding or administrative-region guesses. |
+| Flight geometry | True spherical interpolation replaces the fork's decorative Bezier arc. Antipodes and date-line crossings are handled, including split map/snapshot strokes. Original recorded geometry and explicit route edits remain intact. No airline lookup service or invented flight metadata. |
+
+### Deliberately retained or deferred
+
+- **Mac browsing, multiple recording devices, and shared CloudKit work leases:**
+  deferred at Roger's explicit request. No device provenance migration or shared
+  upload/backup ownership is enabled in this change.
+- **Compact imported-route storage:** still a separate data-format migration.
+  Every existing sample, timestamp, speed, accuracy, export, and old-store reader
+  is retained. No destructive compaction is required for the features above.
+- **Photos:** retain the existing read-only importer and attachment model. GPS
+  writing into the library remains a separate product decision.
+- **Exploration:** adapt the fine raster and compatibility format, not upstream's
+  entire DEBUG-only source-shard/tile/work-queue architecture. Visible-region work
+  is simpler at this fork's scale and adds no always-running history scanner.
+- **Flight fragments/manual evidence/passport/achievements:** retain the fork's
+  current split/merge/undo tools. New flight metadata models, manual country claims,
+  decorative artifacts, and a live airline provider are not prerequisites for the
+  integrated geometry and offline visit statistics.
+- **Watch and uploads:** retain the previously integrated delivery safeguards,
+  fork day-rollover behavior, original-point upload contract, and complete backups.
+  Do not adopt upstream's synthesized automatic upload geometry or point-count-only
+  Watch snapshot replacement policy.
+
+The assessment table above is the original option review. This implementation
+ledger supersedes its proposed ordering and any “remain to integrate” wording for
+features completed here. Deferred features remain discoverable for future work.
 
 ## Initial safety adaptations and provenance
 
@@ -165,12 +185,12 @@ Result bundle:
 The icon generator passed an isolated check for existing/missing icon sections,
 preprocessor preservation, XML escaping, identity placeholders, and idempotence.
 Upstream's standalone `RouteFileKit` (5 tests) and `FogOfWorldKit` (6 tests)
-also passed on this Mac; these packages are assessed for reuse, not yet integrated.
+also passed on this Mac. Both packages are now vendored in the broader integration.
 
 Physical battery behavior, actual Watch transfer/relaunch, and two-device CloudKit
 delivery were not verified by these simulator/package tests. Device deployment
 belongs to the concurrent main owner.
-No upstream feature listed as planned above is represented as deployed or tested.
+The original safety run does not validate the broader integration; its separate verification record follows.
 
 ## Reviewed commit range
 

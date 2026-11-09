@@ -78,6 +78,8 @@ struct InsightsMoveRecord: Equatable, Sendable {
 struct InsightsVisitRecord: Equatable, Sendable {
     var countryCode: String?
     var locality: String?
+    var latitude: Double? = nil
+    var longitude: Double? = nil
 
     init(countryCode: String? = nil, locality: String? = nil) {
         self.countryCode = countryCode
@@ -87,6 +89,8 @@ struct InsightsVisitRecord: Equatable, Sendable {
     init(_ visit: VisitPlace) {
         countryCode = Self.firstNonEmpty(visit.knownPlace?.countryCode, visit.countryCode)
         locality = Self.firstNonEmpty(visit.knownPlace?.locality, visit.locality)
+        latitude = visit.latitude
+        longitude = visit.longitude
     }
 
     private static func firstNonEmpty(_ values: String?...) -> String? {
@@ -379,11 +383,14 @@ enum InsightsSnapshotBuilder {
 
         for day in days {
             for visit in day.visits {
-                if let country = normalized(visit.countryCode)?.uppercased() {
+                // Use stored names first. Offline boundary lookup fills only missing country
+                // labels and only from visits, never from a line flown over a country.
+                let resolvedCode = normalized(visit.countryCode)?.uppercased() ?? OfflineVisitGeography.country(latitude: visit.latitude, longitude: visit.longitude)
+                if let country = resolvedCode {
                     countryVisits[country, default: 0] += 1
                 }
                 if let city = normalized(visit.locality) {
-                    let country = normalized(visit.countryCode)?.uppercased()
+                    let country = resolvedCode
                     let key = "\(country ?? "")|\(city.lowercased())"
                     var entry = cityVisits[key] ?? (city, country, 0)
                     entry.count += 1
@@ -650,5 +657,15 @@ enum InsightsComputeCache {
         let built = compute()
         storage[key] = built
         return built
+    }
+}
+
+/// Immutable bundled lookup, initialized on the Insights aggregation worker only when needed.
+enum OfflineVisitGeography {
+    private static let resolver = try? ExplorationCountryResolver.bundled()
+    static func country(latitude: Double?, longitude: Double?) -> String? {
+        guard let latitude, let longitude,
+              CLLocationCoordinate2DIsValid(.init(latitude: latitude, longitude: longitude)) else { return nil }
+        return resolver?.country(at: .init(latitude: latitude, longitude: longitude))?.id
     }
 }

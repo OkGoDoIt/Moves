@@ -1,3 +1,5 @@
+import Combine
+import CoreData
 import CoreLocation
 import CoreTransferable
 import Foundation
@@ -388,20 +390,27 @@ struct ContentView: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
 
-    @Query(sort: \DayTimeline.dayStart, order: .forward)
-    private var dayTimelines: [DayTimeline]
+    @State private var dayTimelines: [TimelineBrowsingDay] = []
+    @State private var spotlightRefreshTask: Task<Void, Never>?
+    @State private var lastSpotlightSignature: [String] = []
+    @State private var didOpenScreenshotMove = false
 
     @State private var selectedDayKey = ""
     @State private var selectedPageIndex = 0
 
-    private var selectedDay: DayTimeline? {
-        guard dayTimelines.indices.contains(selectedPageIndex) else { return nil }
-        return dayTimelines[selectedPageIndex]
+    @State private var selectedDay: DayTimeline?
+    @State private var todayTimeline: DayTimeline?
+
+    private var visiblePageIndices: [Int] {
+        guard !dayTimelines.isEmpty else { return [] }
+        return Array(max(0, selectedPageIndex - 1)...min(dayTimelines.count - 1, selectedPageIndex + 1))
     }
 
-    private var todayTimeline: DayTimeline? {
-        let todayKey = DayTimeline.makeDayKey(for: .now)
-        return dayTimelines.last { $0.dayKey == todayKey }
+    private func refreshVisibleDays() {
+        todayTimeline = fetchDay(DayTimeline.makeDayKey(for: .now))
+        guard dayTimelines.indices.contains(selectedPageIndex) else { selectedDay = nil; return }
+        let entry = dayTimelines[selectedPageIndex]
+        selectedDay = fetchDay(entry.dayKey) ?? DayTimeline(dayStart: entry.dayStart)
     }
 
     private var canGoOlder: Bool {
@@ -412,27 +421,26 @@ struct ContentView: View {
         dayTimelines.indices.contains(selectedPageIndex) && selectedPageIndex < dayTimelines.count - 1
     }
 
-    private var cloudDataPresenceCountSignature: String {
-        let placeCount = dayTimelines.reduce(0) { $0 + $1.places.count }
-        let moveCount = dayTimelines.reduce(0) { $0 + $1.moves.count }
-        return "\(placeCount)|\(moveCount)"
+    private func fetchDay(_ key: String) -> DayTimeline? {
+        var query = FetchDescriptor<DayTimeline>(predicate: #Predicate { $0.dayKey == key })
+        query.fetchLimit = 1
+        return try? modelContext.fetch(query).first
     }
 
-    private var spotlightPlaceSignature: [String] {
-        dayTimelines
-            .flatMap(\.places)
-            .map { place in
-                [
-                    place.id.uuidString,
-                    place.userLabel ?? "",
-                    place.autoLabel ?? "",
-                    String(place.arrivalDate.timeIntervalSinceReferenceDate),
-                ].joined(separator: "|")
-            }
-            .sorted()
+    /// Bounded database reads; missing calendar days are navigation values, not new records.
+    private func refreshDayIndex() {
+        var firstQuery = FetchDescriptor<DayTimeline>(sortBy: [SortDescriptor(\.dayStart)])
+        firstQuery.fetchLimit = 1
+        var lastQuery = FetchDescriptor<DayTimeline>(sortBy: [SortDescriptor(\.dayStart, order: .reverse)])
+        lastQuery.fetchLimit = 1
+        guard let first = try? modelContext.fetch(firstQuery).first else { dayTimelines = []; return }
+        let last = (try? modelContext.fetch(lastQuery).first)?.dayStart ?? first.dayStart
+        dayTimelines = TimelineBrowsingDay.days(from: first.dayStart, through: max(last, .now))
+        syncSelectedDayIfNeeded()
+        refreshVisibleDays()
     }
 
-    var body: some View {
+    private var timelineNavigation: some View {
         NavigationStack {
             ZStack {
                 background
@@ -467,9 +475,9 @@ struct ContentView: View {
 
                     if !dayTimelines.isEmpty {
                         TabView(selection: $selectedPageIndex) {
-                            ForEach(Array(dayTimelines.enumerated()), id: \.element.dayKey) { index, day in
+                            ForEach(visiblePageIndices, id: \.self) { index in
                                 DayTimelinePage(
-                                    dayKey: day.dayKey,
+                                    dayKey: dayTimelines[index].dayKey,
                                     isActive: index == selectedPageIndex
                                 )
                                     .tag(index)
@@ -488,9 +496,8 @@ struct ContentView: View {
                 get: { rootController.requestedMoveDetailID != nil },
                 set: { if !$0 { rootController.requestedMoveDetailID = nil } }
             )) {
-                if let id = rootController.requestedMoveDetailID,
-                   let move = dayTimelines.lazy.flatMap(\.moves).first(where: { $0.id == id }) {
-                    MoveMapDetailView(segment: move)
+                if let id = rootController.requestedMoveDetailID {
+                    RequestedMoveDetailView(id: id)
                 }
             }
             .toolbar {
@@ -537,6 +544,18 @@ struct ContentView: View {
                
             }
         }
+    }
+
+    private var historyChanges: AnyPublisher<Notification, Never> {
+        NotificationCenter.default.publisher(for: ModelContext.didSave)
+            .merge(with: NotificationCenter.default.publisher(for: .NSPersistentStoreRemoteChange))
+            .merge(with: NotificationCenter.default.publisher(for: .movesLocationSamplesDidChange))
+            .debounce(for: .milliseconds(350), scheduler: DispatchQueue.main)
+            .eraseToAnyPublisher()
+    }
+
+    private var observedTimeline: some View {
+        timelineNavigation
         .task {
             guard !ProcessInfo.processInfo.isRunningForPreviews else { return }
             await captureManager.start()
@@ -559,12 +578,17 @@ struct ContentView: View {
         .onChange(of: todayTimeline?.places.count ?? 0) { _, _ in
             publishWidgetSnapshot()
         }
-        .onChange(of: cloudDataPresenceCountSignature) { _, _ in
-            cloudDataPresencePublisher.publishSoon()
-        }
-        .onChange(of: spotlightPlaceSignature) { _, _ in
-            refreshSpotlightIndex()
-        }
+        .onReceive(historyChanges) { _ in
+                refreshDayIndex()
+                publishWidgetSnapshot()
+                refreshSpotlightIndex()
+                cloudDataPresencePublisher.publishSoon()
+            }
+    }
+
+    var body: some View {
+        observedTimeline
+        .task(id: selectedDay?.id) { await openScreenshotMoveIfNeeded() }
         .onChange(of: scenePhase) { _, newPhase in
             guard newPhase == .active else { return }
             openCurrentDay()
@@ -574,6 +598,7 @@ struct ContentView: View {
         }
         .onChange(of: selectedPageIndex) { _, newIndex in
             guard dayTimelines.indices.contains(newIndex) else { return }
+            refreshVisibleDays()
             selectedDayKey = dayTimelines[newIndex].dayKey
         }
         .onChange(of: selectedDayKey) { _, newKey in
@@ -597,6 +622,16 @@ struct ContentView: View {
         .onChange(of: dayTimelines.count) { _, _ in
             consumeRequestedJumpDateIfPossible()
         }
+    }
+
+    @MainActor private func openScreenshotMoveIfNeeded() async {
+        guard ProcessInfo.processInfo.environment["MOVES_OPEN_FIRST_MOVE"] == "1", !didOpenScreenshotMove,
+              let move = selectedDay?.moves.min(by: { $0.timelineStartDate < $1.timelineStartDate }) else { return }
+        didOpenScreenshotMove = true
+        let id = move.id
+        await Task.yield()
+        guard !Task.isCancelled else { return }
+        rootController.requestedMoveDetailID = id
     }
 
     private var background: some View {
@@ -730,54 +765,7 @@ struct ContentView: View {
         let todayStart = calendar.startOfDay(for: .now)
         let todayKey = DayTimeline.makeDayKey(for: todayStart)
 
-        // Demo seeding is async. Inserting an empty "today" here races it and can
-        // make the seeder think data already exists, leaving the Timeline blank.
-        if captureManager.isDemoMode {
-            selectedDayKey = todayKey
-            if let todayIndex = dayTimelines.firstIndex(where: { $0.dayKey == todayKey }),
-               !dayTimelines[todayIndex].places.isEmpty || !dayTimelines[todayIndex].moves.isEmpty {
-                selectedPageIndex = todayIndex
-            } else if let recordedIndex = dayTimelines.lastIndex(where: { !$0.places.isEmpty || !$0.moves.isEmpty }) {
-                selectedPageIndex = recordedIndex
-                selectedDayKey = dayTimelines[recordedIndex].dayKey
-            }
-            return
-        }
-
-        var existingKeys = Set(dayTimelines.map(\.dayKey))
-        var didInsertDay = false
-
-        if !existingKeys.contains(todayKey) {
-            modelContext.insert(DayTimeline(dayStart: todayStart))
-            existingKeys.insert(todayKey)
-            didInsertDay = true
-        }
-
-        // Days without any recorded location have no timeline of their own, which made paging
-        // skip them entirely. Fill the gaps so every day since the first recording is reachable.
-        if let earliestDayStart = dayTimelines.first?.dayStart {
-            var dayStart = calendar.startOfDay(for: earliestDayStart)
-
-            while dayStart < todayStart {
-                let dayKey = DayTimeline.makeDayKey(for: dayStart)
-                if !existingKeys.contains(dayKey) {
-                    modelContext.insert(DayTimeline(dayStart: dayStart))
-                    existingKeys.insert(dayKey)
-                    didInsertDay = true
-                }
-
-                guard let nextDayStart = calendar.date(byAdding: .day, value: 1, to: dayStart) else { break }
-                dayStart = nextDayStart
-            }
-        }
-
-        if didInsertDay {
-            do {
-                try modelContext.save()
-            } catch {
-                print("Failed to create day timelines: \(error.localizedDescription)")
-            }
-        }
+        refreshDayIndex()
 
         selectedDayKey = todayKey
         if let todayIndex = dayTimelines.firstIndex(where: { $0.dayKey == todayKey }) {
@@ -792,20 +780,46 @@ struct ContentView: View {
     }
 
     private func refreshSpotlightIndex() {
-        let entities = dayTimelines.flatMap { day in
-            day.places.map(VisitedPlaceEntity.init)
-        }
-        Task(priority: .utility) {
-            try? await VisitedPlaceSpotlightIndexer.replaceIndex(with: entities)
+        spotlightRefreshTask?.cancel()
+        let container = modelContext.container
+        spotlightRefreshTask = Task {
+            do {
+                try await Task.sleep(for: .seconds(1))
+                let entities = try await importWorkerValue(Task.detached(priority: .utility) {
+                    let context = ModelContext(container)
+                    var entities: [VisitedPlaceEntity] = []
+                    var query = FetchDescriptor<VisitPlace>(sortBy: [SortDescriptor(\.arrivalDate)])
+                    query.fetchLimit = 500
+                    query.propertiesToFetch = [\.id, \.arrivalDate, \.userLabel, \.autoLabel]
+                    query.relationshipKeyPathsForPrefetching = [\.knownPlace, \.dayTimeline]
+                    var offset = 0
+                    while true {
+                        try Task.checkCancellation()
+                        query.fetchOffset = offset
+                        let count = try autoreleasepool {
+                            let page = try context.fetch(query)
+                            entities.append(contentsOf: page.map(VisitedPlaceEntity.init))
+                            return page.count
+                        }
+                        if count < 500 { break }
+                        offset += count
+                    }
+                    return entities
+                })
+                try Task.checkCancellation()
+                let signature = entities.map { "\($0.id)|\($0.name)|\($0.visitedAt)" }
+                guard signature != lastSpotlightSignature else { return }
+                try await VisitedPlaceSpotlightIndexer.replaceIndex(with: entities)
+                lastSpotlightSignature = signature
+            } catch { /* A later save retries; indexing never affects recording. */ }
         }
     }
 
     private func selectPlace(_ placeID: UUID) {
-        guard let dayIndex = dayTimelines.firstIndex(where: { day in
-            day.places.contains(where: { $0.id == placeID })
-        }) else { return }
-        selectedPageIndex = dayIndex
-        selectedDayKey = dayTimelines[dayIndex].dayKey
+        var query = FetchDescriptor<VisitPlace>(predicate: #Predicate { $0.id == placeID })
+        query.fetchLimit = 1
+        guard let date = (try? modelContext.fetch(query).first)?.arrivalDate else { return }
+        jumpToDate(date)
     }
 
     private func syncSelectedDayIfNeeded() {
@@ -1819,5 +1833,29 @@ struct ContentView_Previews: PreviewProvider {
             .environmentObject(AppUndoController())
             .environmentObject(MovesCloudDataPresencePublisher(modelContainer: container))
             .environmentObject(MovesRootController())
+    }
+}
+
+
+/// The destination owns bounded observation and refreshes if this move changes.
+/// Database fetches are not performed as side effects of rendering the parent.
+private struct RequestedMoveDetailView: View {
+    @Environment(\.modelContext) private var modelContext
+    let id: UUID
+    @State private var move: MoveSegment?
+    @State private var didLoad = false
+    var body: some View {
+        Group {
+            if let move { MoveMapDetailView(segment: move) }
+            else if didLoad { ContentUnavailableView("Move unavailable", systemImage: "point.topleft.down.to.point.bottomright.curvepath") }
+            else { ProgressView() }
+        }
+        .task(id: id) {
+            let requestedID = id
+            var query = FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.id == requestedID })
+            query.fetchLimit = 1
+            move = try? modelContext.fetch(query).first
+            didLoad = true
+        }
     }
 }

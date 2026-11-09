@@ -1,3 +1,5 @@
+import Combine
+import CoreData
 import MapKit
 import SwiftData
 import SwiftUI
@@ -31,9 +33,18 @@ struct MapTabView: View {
     @State private var isShowingTrips = false
     @State private var presentedTripID: UUID?
     @State private var knownModes: Set<TransportMode> = []
+    @State private var detailedCells: [ExplorationDisplayCell] = []
+    @State private var coverageRevision = 0
+    @State private var coverageError: String?
     @State private var coverageRefresh: Task<Void, Never>?
 
     private var calendar: Calendar { .autoupdatingCurrent }
+    private var coverageChanges: AnyPublisher<Notification, Never> {
+        Publishers.Merge3(NotificationCenter.default.publisher(for: .movesLocationSamplesDidChange),
+                          NotificationCenter.default.publisher(for: ModelContext.didSave),
+                          NotificationCenter.default.publisher(for: .NSPersistentStoreRemoteChange))
+            .debounce(for: .milliseconds(500), scheduler: RunLoop.main).eraseToAnyPublisher()
+    }
 
     /// Where All Time starts.
     private var firstRecordedDate: Date? {
@@ -65,6 +76,9 @@ struct MapTabView: View {
                 .ignoresSafeArea(edges: .top)
 
             VStack(spacing: 0) {
+                if let coverageError, layer == .fog {
+                    Text(coverageError).font(.caption).padding(8).background(.regularMaterial, in: Capsule())
+                }
                 topBar
                     .padding(.horizontal, 14)
                     .padding(.top, 8)
@@ -101,6 +115,20 @@ struct MapTabView: View {
             )
             syncEnabledModes()
         }
+        .task(id: detailedCoverageKey) {
+            guard layer == .fog else { return }
+            do {
+                try await Task.sleep(for: .milliseconds(250))
+                let cells = try await DetailedExploration.displayCells(container: modelContext.container,
+                    interval: selection.focus, region: visibleRegion, includeUndated: selection.granularity == .allTime)
+                try Task.checkCancellation()
+                detailedCells = cells
+                coverageError = nil
+            } catch is CancellationError { }
+            catch { coverageError = String(localized: "Coverage couldn’t be loaded.") }
+        }
+        .onReceive(coverageChanges) { _ in coverageRevision += 1 }
+        .onAppear { coverageRevision += 1 }
         .onChange(of: loader.cameraFitKey) { _, _ in
             fitCamera()
         }
@@ -239,6 +267,10 @@ struct MapTabView: View {
         }
     }
 
+    private var detailedCoverageKey: String {
+        "\(layer)|\(selection.focus.start)|\(selection.focus.end)|\(visibleRegion.center.latitude)|\(visibleRegion.center.longitude)|\(visibleRegion.span.latitudeDelta)|\(visibleRegion.span.longitudeDelta)|\(coverageRevision)"
+    }
+
     private var map: some View {
         MapReader { proxy in
             Map(position: $camera, interactionModes: [.pan, .zoom]) {
@@ -249,7 +281,9 @@ struct MapTabView: View {
             }
             .mapStyle(.standard(elevation: .flat, emphasis: .muted))
             .overlay {
-                if layer != .routes {
+                if layer == .fog {
+                    DetailedFogCanvas(cells: detailedCells, region: visibleRegion)
+                } else if layer == .heat {
                     MapCoverageCanvas(
                         cells: loader.coverageCells,
                         region: visibleRegion,
@@ -303,22 +337,28 @@ struct MapTabView: View {
             let width = isSelected ? route.lineWidth + 3.5 : route.lineWidth
 
             if route.shadowCoordinates.count > 1 {
-                MapPolyline(coordinates: route.shadowCoordinates)
-                    .stroke(route.shadowTint, lineWidth: route.shadowLineWidth)
+                ForEach(Array(RouteCoordinateOps.mapPolylineSegments(route.shadowCoordinates).enumerated()), id: \.offset) { _, coordinates in
+                    MapPolyline(coordinates: coordinates)
+                        .stroke(route.shadowTint, lineWidth: route.shadowLineWidth)
+                }
             }
 
             if route.coordinates.count > 1 {
-                MapPolyline(coordinates: route.coordinates)
-                    .stroke(
-                        route.strokeGradient(shadeBySpeed: shadeRoutesBySpeed, emphasis: emphasis),
-                        style: RouteStrokeStyle.make(for: route, lineWidth: width)
-                    )
-                if let overlayTint = route.recordedOverlayTint {
-                    MapPolyline(coordinates: route.coordinates)
+                ForEach(Array(RouteCoordinateOps.mapPolylineSegments(route.coordinates).enumerated()), id: \.offset) { _, coordinates in
+                    MapPolyline(coordinates: coordinates)
                         .stroke(
-                            MovesPalette.opaqueRouteColor(overlayTint, opacity: emphasis),
-                            style: RouteStrokeStyle.make(for: route, lineWidth: max(width - 2.25, 1.25))
+                            route.strokeGradient(shadeBySpeed: shadeRoutesBySpeed, emphasis: emphasis),
+                            style: RouteStrokeStyle.make(for: route, lineWidth: width)
                         )
+                }
+                if let overlayTint = route.recordedOverlayTint {
+                    ForEach(Array(RouteCoordinateOps.mapPolylineSegments(route.coordinates).enumerated()), id: \.offset) { _, coordinates in
+                        MapPolyline(coordinates: coordinates)
+                            .stroke(
+                                MovesPalette.opaqueRouteColor(overlayTint, opacity: emphasis),
+                                style: RouteStrokeStyle.make(for: route, lineWidth: max(width - 2.25, 1.25))
+                            )
+                    }
                 }
             }
         }

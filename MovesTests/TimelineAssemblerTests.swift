@@ -1927,3 +1927,18 @@ private extension Array {
         return self[index]
     }
 }
+
+extension TimelineAssemblerTests {
+    func testFlightGeometryTakesShortDatelinePathAndHandlesAntipodes() {
+        let start = CLLocationCoordinate2D(latitude: 40, longitude: 170)
+        let end = CLLocationCoordinate2D(latitude: 40, longitude: -170)
+        let route = PlaneRouteGeometry.arcCoordinates(from: [start, end])
+        XCTAssertTrue(route.allSatisfy { abs($0.longitude) >= 170 })
+        XCTAssertGreaterThan(route[route.count / 2].latitude, 40)
+        let antipodal = PlaneRouteGeometry.greatCircleCoordinates(
+            from: .init(latitude: 0, longitude: 0), to: .init(latitude: 0, longitude: 180))
+        XCTAssertTrue(antipodal.allSatisfy { CLLocationCoordinate2DIsValid($0) })
+        XCTAssertEqual(antipodal.last?.longitude, 180)
+        XCTAssertLessThanOrEqual(antipodal.count, 73)
+    }
+}
