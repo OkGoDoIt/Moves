@@ -3052,7 +3052,8 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                 move.transportMode = transportMode
             }
             move.distanceMeters = distanceMeters
-            move.stepCount = stepCount
+            // A later source without pedometer data must not erase recorded steps.
+            move.stepCount = stepCount ?? move.stepCount
             move.startDate = startDate
             move.endDate = endDate
         } else {

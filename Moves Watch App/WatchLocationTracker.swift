@@ -134,6 +134,7 @@ final class WatchLocationTracker: NSObject, ObservableObject {
     private var syncedRouteCoordinates: [CLLocationCoordinate2D] = []
     private var syncedRoutePoints: [WatchTimelineRoutePoint] = []
     private var summaryDayKey = ""
+    private var transferQueue = WatchRouteTransferQueue()
 
     override init() {
         super.init()
@@ -168,11 +169,12 @@ final class WatchLocationTracker: NSObject, ObservableObject {
     func flushStoredRoutes() {
         guard WCSession.isSupported() else { return }
         let session = WCSession.default
-        guard session.activationState == .activated else { return }
-
-        for fileURL in storedRouteFileURLs() {
-            session.transferFile(fileURL, metadata: nil)
-        }
+        guard session.activationState == .activated, session.isCompanionAppInstalled else { return }
+        guard let fileURL = transferQueue.nextFile(
+            storedFiles: storedRouteFileURLs(),
+            outstandingFiles: session.outstandingFileTransfers.map { $0.file.fileURL }
+        ) else { return }
+        session.transferFile(fileURL, metadata: nil)
     }
 
     private func startHighAccuracyTracking() {
@@ -401,8 +403,24 @@ extension WatchLocationTracker: WCSessionDelegate {
     }
 
     nonisolated func session(_ session: WCSession, didFinish fileTransfer: WCSessionFileTransfer, error: Error?) {
-        guard error == nil else { return }
-        try? FileManager.default.removeItem(at: fileTransfer.file.fileURL)
+        let fileURL = fileTransfer.file.fileURL
+        Task { @MainActor in
+            guard error == nil else {
+                self.transferQueue.finished(fileURL, succeeded: false)
+                return
+            }
+            do {
+                // Delete only after successful delivery. A duplicate completion
+                // from an older build may refer to an already-removed file.
+                if FileManager.default.fileExists(atPath: fileURL.path) {
+                    try FileManager.default.removeItem(at: fileURL)
+                }
+                self.transferQueue.finished(fileURL, succeeded: true)
+                self.flushStoredRoutes()
+            } catch {
+                self.transferQueue.finished(fileURL, succeeded: false)
+            }
+        }
     }
 
     nonisolated func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) {

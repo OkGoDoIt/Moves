@@ -98,6 +98,31 @@ enum TemporaryRouteTrackingStopNotificationPermissionResult: Equatable {
     case needsSettings
 }
 
+/// Coalesces launch/authorization fixes without starting a timer or GPS session.
+/// A missing callback expires on the next event; failures retain the cooldown.
+/// Upstream uses a 45-second foreground throttle and a 20-second request window.
+struct OneShotLocationRequestGate {
+    private var lastRequestedAt: Date?
+    private var pending: (source: LocationSampleSource, expiresAt: Date)?
+
+    mutating func begin(source: LocationSampleSource, at date: Date) -> Bool {
+        if let lastRequestedAt, date.timeIntervalSince(lastRequestedAt) < 45 { return false }
+        lastRequestedAt = date
+        pending = (source, date.addingTimeInterval(20))
+        return true
+    }
+
+    mutating func takeSource(at date: Date) -> LocationSampleSource? {
+        defer { pending = nil }
+        guard let pending, date < pending.expiresAt else { return nil }
+        return pending.source
+    }
+
+    mutating func cancel() {
+        pending = nil
+    }
+}
+
 protocol MotionClassifier {
     func classifyTransport(start: Date, end: Date, locations: [CLLocation]) async -> (mode: TransportMode, confidence: Double)
     func stepCount(start: Date, end: Date) async -> Int?
@@ -137,16 +162,13 @@ final class CoreMotionTransportClassifier: MotionClassifier {
         if CMMotionActivityManager.isActivityAvailable(),
            let activities = await queryActivities(from: start, to: end),
            !activities.isEmpty {
-            var scores: [TransportMode: Int] = [:]
-
-            for activity in activities {
-                let weight = confidenceWeight(for: activity.confidence)
-                if activity.automotive { scores[.automotive, default: 0] += weight }
-                if activity.cycling { scores[.cycling, default: 0] += weight }
-                if activity.running { scores[.running, default: 0] += weight }
-                if activity.walking { scores[.walking, default: 0] += weight }
-                if activity.stationary { scores[.stationary, default: 0] += weight }
-            }
+            let scores = Self.durationWeightedActivityScores(
+                activities.map {
+                    (start: $0.startDate, confidence: confidenceWeight(for: $0.confidence), mode: Self.mode(for: $0))
+                },
+                from: start,
+                to: end
+            )
 
             if let best = scores.max(by: { $0.value < $1.value }) {
                 let corrected = correctedModeIfNeeded(best.key, fallback: fallback, locations: locations)
@@ -280,6 +302,39 @@ final class CoreMotionTransportClassifier: MotionClassifier {
                 continuation.resume(returning: activities)
             }
         }
+    }
+
+    /// Core Motion reports state transitions, not equally spaced votes. Adapted
+    /// from upstream's duration weighting while retaining the fork's confidence
+    /// and implausible-trip checks. Unknown intervals end the previous activity
+    /// but do not override the location-based fallback.
+    static func durationWeightedActivityScores(
+        _ activities: [(start: Date, confidence: Int, mode: TransportMode)],
+        from start: Date,
+        to end: Date
+    ) -> [TransportMode: TimeInterval] {
+        guard end > start else { return [:] }
+        let ordered = activities.sorted { $0.start < $1.start }
+        var scores: [TransportMode: TimeInterval] = [:]
+        for index in ordered.indices {
+            let intervalStart = max(start, ordered[index].start)
+            let intervalEnd = index + 1 < ordered.count
+                ? min(end, ordered[index + 1].start)
+                : end
+            let duration = intervalEnd.timeIntervalSince(intervalStart)
+            guard duration > 0, ordered[index].mode != .unknown else { continue }
+            scores[ordered[index].mode, default: 0] += duration * Double(max(ordered[index].confidence, 1))
+        }
+        return scores
+    }
+
+    private static func mode(for activity: CMMotionActivity) -> TransportMode {
+        if activity.automotive { return .automotive }
+        if activity.cycling { return .cycling }
+        if activity.running { return .running }
+        if activity.walking { return .walking }
+        if activity.stationary { return .stationary }
+        return .unknown
     }
 
     private func confidenceWeight(for confidence: CMMotionActivityConfidence) -> Int {
@@ -752,7 +807,7 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
     #endif
     private let assembler: TimelineAssembler
     private let routeTrackingLiveActivity = RouteTrackingLiveActivityCoordinator()
-    private var pendingOneShotLocationSource: LocationSampleSource?
+    private var oneShotRequestGate = OneShotLocationRequestGate()
     private var pendingTemporaryRouteTrackingDuration: TemporaryRouteTrackingDuration?
     private var shouldChainToAlwaysAfterWhenInUse = false
     private var isHighAccuracyMonitoring = false
@@ -914,7 +969,7 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         manager.stopUpdatingLocation()
         manager.allowsBackgroundLocationUpdates = false
         manager.showsBackgroundLocationIndicator = false
-        pendingOneShotLocationSource = nil
+        oneShotRequestGate.cancel()
         isMonitoring = false
         isHighAccuracyMonitoring = false
     }
@@ -1228,9 +1283,10 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
     }
 
     private func requestOneShotLocation(source: LocationSampleSource) {
-        guard isAuthorizedForTracking else { return }
-
-        pendingOneShotLocationSource = source
+        guard isAuthorizedForTracking,
+              isBackgroundLocationListeningEnabled || isTemporaryRouteTrackingActive || isLastMileActive,
+              !isHighAccuracyMonitoring,
+              oneShotRequestGate.begin(source: source, at: .now) else { return }
         manager.requestLocation()
     }
 
@@ -1574,6 +1630,7 @@ extension MovesLocationCaptureManager: @preconcurrency CLLocationManagerDelegate
 
         refreshTemporaryRouteTrackingStateIfNeeded()
 
+        let pendingOneShotLocationSource = oneShotRequestGate.takeSource(at: .now)
         guard pendingOneShotLocationSource != nil
             || isTemporaryRouteTrackingActive
             || isLastMileActive
@@ -1592,7 +1649,7 @@ extension MovesLocationCaptureManager: @preconcurrency CLLocationManagerDelegate
         } else {
             source = .significantChange
         }
-        pendingOneShotLocationSource = nil
+        oneShotRequestGate.cancel()
 
         Task {
             if source == .routeTracking {
@@ -1617,6 +1674,8 @@ extension MovesLocationCaptureManager: @preconcurrency CLLocationManagerDelegate
     }
 
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        // A failed request must not leave future callbacks tagged as its result.
+        oneShotRequestGate.cancel()
         let nsError = error as NSError
 
         if nsError.domain == kCLErrorDomain,

@@ -8,6 +8,8 @@
 
 /* Begin PBXBuildFile section */
 		AB0911000000000000000002 /* CalendarSync.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB0911000000000000000001 /* CalendarSync.swift */; };
+        F910000130F0000100000001 /* WatchRouteTransferQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = F910000130F0000100000000 /* WatchRouteTransferQueue.swift */; };
+        F910000130F0000100000002 /* WatchRouteTransferQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = F910000130F0000100000000 /* WatchRouteTransferQueue.swift */; };
 		C0F16000000000000000005A /* MovesAppIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0F16000000000000000004A /* MovesAppIdentity.swift */; };
 		C0F16000000000000000006A /* MovesAppIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0F16000000000000000004A /* MovesAppIdentity.swift */; };
 		C0F16000000000000000007A /* MovesAppIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0F16000000000000000004A /* MovesAppIdentity.swift */; };
@@ -263,6 +265,7 @@
 
 /* Begin PBXFileReference section */
 		AB0911000000000000000001 /* CalendarSync.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CalendarSync.swift; sourceTree = "<group>"; };
+        F910000130F0000100000000 /* WatchRouteTransferQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchRouteTransferQueue.swift; sourceTree = "<group>"; };
 		C0F16000000000000000001A /* Moves.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Moves.xcconfig; sourceTree = "<group>"; };
 		C0F16000000000000000004A /* MovesAppIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesAppIdentity.swift; sourceTree = "<group>"; };
 		C0F16000000000000000003A /* Moves.local.xcconfig.example */ = {isa = PBXFileReference; lastKnownFileType = text; path = Moves.local.xcconfig.example; sourceTree = "<group>"; };
@@ -581,6 +584,7 @@
 				F10000013030000100000004 /* LocationLogImport.swift */,
 				F10000013040000100000004 /* SampleStayInference.swift */,
 				A20000012FA0000100000002 /* WatchRouteInbox.swift */,
+                F910000130F0000100000000 /* WatchRouteTransferQueue.swift */,
 				A30000012FB0000100000000 /* TimelineWidgetSnapshot.swift */,
 				489A76442C4FC70D00F43B69 /* LocationChange.swift */,
 				489A76482C4FDE1E00F43B69 /* VisitedLocation.swift */,
@@ -1080,6 +1084,7 @@
 				FB00000130B0000100000007 /* GoogleTimelineZipReader.swift in Sources */,
 				FB00000130B0000100000009 /* OnboardingFlow.swift in Sources */,
 				A20000012FA0000100000003 /* WatchRouteInbox.swift in Sources */,
+                F910000130F0000100000001 /* WatchRouteTransferQueue.swift in Sources */,
 				A30000012FB0000100000001 /* TimelineWidgetSnapshot.swift in Sources */,
 				A30000012FB000010000001C /* TimelineWidgetSnapshotShared.swift in Sources */,
 				C120000130C0000100000001 /* PrivacyZones.swift in Sources */,
@@ -1192,6 +1197,7 @@
 				A20000012FA0000100000011 /* WatchMovesApp.swift in Sources */,
 				A20000012FA0000100000013 /* WatchMovesContentView.swift in Sources */,
 				A20000012FA0000100000015 /* WatchLocationTracker.swift in Sources */,
+                F910000130F0000100000002 /* WatchRouteTransferQueue.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

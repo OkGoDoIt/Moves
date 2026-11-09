@@ -411,6 +411,28 @@ final class PrivacyZoneTests: XCTestCase {
         XCTAssertEqual(Problem(error: partial), .storageFull)
     }
 
+    func testICloudMultipleErrorsPreferActionableCauseOverNetworkFailure() {
+        typealias Problem = MovesICloudSyncState.Problem
+        let network = NSError(domain: NSURLErrorDomain, code: URLError.notConnectedToInternet.rawValue)
+        let partial = CKError(.partialFailure, userInfo: [CKPartialErrorsByItemIDKey: [
+            "network": network, "storage": CKError(.quotaExceeded),
+        ]])
+        let multiple = NSError(domain: NSCocoaErrorDomain, code: 134407, userInfo: [
+            "NSMultipleUnderlyingErrors": [partial as NSError],
+        ])
+        XCTAssertEqual(Problem(error: multiple), .storageFull)
+        XCTAssertEqual(Problem(error: network), .offline)
+        let signedOut = NSError(domain: NSCocoaErrorDomain, code: 134407, userInfo: [
+            "NSMultipleUnderlyingErrors": [multiple, CKError(.notAuthenticated) as NSError],
+        ])
+        XCTAssertEqual(Problem(error: signedOut), .signedOut)
+        // Deferral is not proof of sign-out or a reason to reset the store.
+        XCTAssertEqual(Problem(error: NSError(domain: NSCocoaErrorDomain, code: 134419)), .other)
+        var nested = network
+        for _ in 0..<8 { nested = NSError(domain: "Wrapper", code: 1, userInfo: [NSUnderlyingErrorKey: nested]) }
+        XCTAssertEqual(Problem(error: nested), .offline)
+    }
+
     func testICloudAccountChangesShowAndClearSignedOut() {
         var sync = MovesICloudSyncState()
         sync.apply(accountStatus: .noAccount)

@@ -29,7 +29,7 @@ enum MovesCloudKitAvailability {
 /// without a real container.
 struct MovesICloudSyncState: Equatable {
     /// What is standing in the way of syncing, in the person's terms.
-    enum Problem: Equatable {
+    enum Problem: Hashable {
         case signedOut
         case storageFull
         case offline
@@ -37,33 +37,47 @@ struct MovesICloudSyncState: Equatable {
 
         /// Reads a mirroring failure, which may wrap the CloudKit error that caused it.
         init(error: Error?) {
-            self = Self.problem(in: error as NSError?, depth: 0) ?? .other
-        }
-
-        private static func problem(in error: NSError?, depth: Int) -> Problem? {
-            guard let error, depth < 4 else { return nil }
-            if error.domain == CKError.errorDomain {
-                switch CKError.Code(rawValue: error.code) {
-                case .notAuthenticated:
-                    return .signedOut
-                case .quotaExceeded:
-                    return .storageFull
-                case .networkUnavailable, .networkFailure:
-                    return .offline
-                default:
-                    break
+            guard let error else { self = .other; return }
+            // Core Data can wrap several errors, each with CloudKit partial
+            // failures of its own. Inspect the tree without depending on dictionary
+            // order, and prefer an actionable account/quota issue over connectivity.
+            var queue = [error as NSError]
+            var seen = Set<ObjectIdentifier>()
+            var problems: Set<Problem> = []
+            var index = 0
+            while index < queue.count, index < 64 {
+                let current = queue[index]
+                index += 1
+                guard seen.insert(ObjectIdentifier(current)).inserted else { continue }
+                if current.domain == CKError.errorDomain {
+                    switch CKError.Code(rawValue: current.code) {
+                    case .notAuthenticated: problems.insert(.signedOut)
+                    case .quotaExceeded: problems.insert(.storageFull)
+                    case .networkUnavailable, .networkFailure: problems.insert(.offline)
+                    default: break
+                    }
+                } else if current.domain == NSCocoaErrorDomain, current.code == 134400 {
+                    problems.insert(.signedOut)
+                } else if current.domain == NSURLErrorDomain,
+                          [URLError.notConnectedToInternet, .networkConnectionLost, .cannotConnectToHost,
+                           .timedOut, .dnsLookupFailed].contains(URLError.Code(rawValue: current.code)) {
+                    problems.insert(.offline)
                 }
+                var children: [NSError] = []
+                if let underlying = current.userInfo[NSUnderlyingErrorKey] as? NSError {
+                    children.append(underlying)
+                }
+                if let multiple = current.userInfo["NSMultipleUnderlyingErrors"] as? [NSError] {
+                    children.append(contentsOf: multiple)
+                }
+                if let partial = current.userInfo[CKPartialErrorsByItemIDKey] as? NSDictionary {
+                    children.append(contentsOf: partial.allValues.compactMap { $0 as? NSError })
+                }
+                queue.append(contentsOf: children.prefix(max(64 - queue.count, 0)))
             }
-            // Core Data's "no iCloud account" setup failure.
-            if error.domain == NSCocoaErrorDomain, error.code == 134400 {
-                return .signedOut
-            }
-            let partial = (error.userInfo[CKPartialErrorsByItemIDKey] as? [AnyHashable: Error])?.values
-                .compactMap { problem(in: $0 as NSError, depth: depth + 1) }
-            return partial?.first ?? problem(
-                in: error.userInfo[NSUnderlyingErrorKey] as? NSError,
-                depth: depth + 1
-            )
+            self = problems.contains(.signedOut) ? .signedOut
+                : problems.contains(.storageFull) ? .storageFull
+                : problems.contains(.offline) ? .offline : .other
         }
     }
 

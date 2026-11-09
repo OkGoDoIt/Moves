@@ -604,6 +604,98 @@ final class TimelineAssemblerTests: XCTestCase {
         XCTAssertEqual(moves.count, 1)
     }
 
+    func testMotionTransitionsAreWeightedByTimeRatherThanCallbackCount() {
+        let start = Date(timeIntervalSince1970: 1_710_000_000)
+        // A brief drive emits several transitions before a twenty-minute walk.
+        let scores = CoreMotionTransportClassifier.durationWeightedActivityScores([
+            (start, 3, .automotive),
+            (start.addingTimeInterval(10), 3, .automotive),
+            (start.addingTimeInterval(20), 3, .automotive),
+            (start.addingTimeInterval(30), 2, .walking),
+        ], from: start, to: start.addingTimeInterval(1_230))
+        XCTAssertEqual(scores[.automotive], 90)
+        XCTAssertEqual(scores[.walking], 2_400)
+        XCTAssertEqual(scores.max(by: { $0.value < $1.value })?.key, .walking)
+    }
+
+    func testMotionWindowClipsTransitionsAndUnknownEndsPreviousActivity() {
+        let start = Date(timeIntervalSince1970: 1_710_000_000)
+        let scores = CoreMotionTransportClassifier.durationWeightedActivityScores([
+            (start.addingTimeInterval(60), 3, .unknown),
+            (start.addingTimeInterval(-60), 2, .walking),
+            (start.addingTimeInterval(500), 3, .automotive),
+        ], from: start, to: start.addingTimeInterval(120))
+        XCTAssertEqual(scores[.walking], 120)
+        XCTAssertNil(scores[.automotive])
+        XCTAssertNil(scores[.unknown])
+        XCTAssertTrue(CoreMotionTransportClassifier.durationWeightedActivityScores(
+            [(start, 3, .walking)], from: start, to: start
+        ).isEmpty)
+    }
+
+    func testMoveUpsertPreservesStepsAndUserModeWhenNewSourceLacksSteps() throws {
+        let container = try makeInMemoryContainer()
+        let repository = SwiftDataTimelineRepository(modelContainer: container)
+        let start = Date(timeIntervalSince1970: 1_710_000_000)
+        let end = start.addingTimeInterval(1_200)
+        let startPlace = VisitPlace(arrivalDate: start, departureDate: start,
+                                   latitude: 52.52, longitude: 13.405, horizontalAccuracy: 20)
+        let endPlace = VisitPlace(arrivalDate: end, departureDate: nil,
+                                 latitude: 52.532, longitude: 13.417, horizontalAccuracy: 20)
+        func upsert(steps: Int?) throws -> MoveSegment {
+            try repository.upsertMove(startPlace: startPlace, endPlace: endPlace,
+                startDate: start, endDate: end, transportMode: .automotive,
+                distanceMeters: 1_800, stepCount: steps, samples: [])
+        }
+        let first = try upsert(steps: 2_400)
+        first.transportMode = .walking
+        first.transportModeSource = .user
+        try repository.saveIfNeeded()
+        let second = try upsert(steps: nil)
+        XCTAssertEqual(first.id, second.id)
+        XCTAssertEqual(second.stepCount, 2_400)
+        XCTAssertEqual(second.transportMode, .walking)
+        XCTAssertEqual(second.transportModeSource, .user)
+        XCTAssertEqual(try upsert(steps: 0).stepCount, 0, "A measured zero is not missing data")
+    }
+
+    func testForegroundFixesCoalesceAndRecoverAfterMissingOrFailedCallbacks() {
+        let start = Date(timeIntervalSince1970: 1_710_000_000)
+        var gate = OneShotLocationRequestGate()
+        XCTAssertTrue(gate.begin(source: .authorizationGrant, at: start))
+        XCTAssertFalse(gate.begin(source: .launchBackfill, at: start.addingTimeInterval(1)))
+        XCTAssertEqual(gate.takeSource(at: start.addingTimeInterval(5)), .authorizationGrant)
+        XCTAssertNil(gate.takeSource(at: start.addingTimeInterval(6)))
+        XCTAssertFalse(gate.begin(source: .launchBackfill, at: start.addingTimeInterval(30)))
+        XCTAssertTrue(gate.begin(source: .launchBackfill, at: start.addingTimeInterval(45)))
+        XCTAssertNil(gate.takeSource(at: start.addingTimeInterval(66)), "Late unrelated fixes keep their real source")
+        XCTAssertTrue(gate.begin(source: .launchBackfill, at: start.addingTimeInterval(90)))
+        gate.cancel()
+        XCTAssertNil(gate.takeSource(at: start.addingTimeInterval(91)))
+        XCTAssertFalse(gate.begin(source: .launchBackfill, at: start.addingTimeInterval(92)))
+        XCTAssertTrue(gate.begin(source: .launchBackfill, at: start.addingTimeInterval(135)))
+    }
+
+    func testWatchBacklogIsSerializedAcrossFlushesFailuresAndRelaunch() {
+        let start = Date(timeIntervalSince1970: 1_710_000_000)
+        let a = URL(fileURLWithPath: "/routes/a.json")
+        let b = URL(fileURLWithPath: "/routes/b.json")
+        let files = [b, URL(fileURLWithPath: "/routes/manifest.json"),
+                     URL(fileURLWithPath: "/routes/notes.txt"), a]
+        var queue = WatchRouteTransferQueue()
+        XCTAssertEqual(queue.nextFile(storedFiles: files, outstandingFiles: [], now: start), a)
+        XCTAssertNil(queue.nextFile(storedFiles: files, outstandingFiles: [], now: start))
+        queue.finished(a, succeeded: false, now: start)
+        XCTAssertNil(queue.nextFile(storedFiles: files, outstandingFiles: [], now: start.addingTimeInterval(59)))
+        XCTAssertEqual(queue.nextFile(storedFiles: files, outstandingFiles: [], now: start.addingTimeInterval(60)), a)
+        queue.finished(a, succeeded: true, now: start.addingTimeInterval(61))
+        XCTAssertEqual(queue.nextFile(storedFiles: [b], outstandingFiles: [], now: start.addingTimeInterval(61)), b)
+        var relaunched = WatchRouteTransferQueue()
+        XCTAssertNil(relaunched.nextFile(storedFiles: [b], outstandingFiles: [b], now: start))
+        relaunched.finished(b, succeeded: true, now: start)
+        XCTAssertNil(relaunched.nextFile(storedFiles: [], outstandingFiles: [], now: start))
+    }
+
     func testClassifierFallsBackToSpeedWhenMotionDataIsUnavailable() async {
         let classifier = CoreMotionTransportClassifier()
 
