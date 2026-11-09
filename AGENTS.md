@@ -4,6 +4,8 @@ This file is shared by Cursor and Claude Code (`CLAUDE.md` is a symlink to it). 
 
 Product direction, workstreams, and per-agent task briefs live in **`PLAN.md`**. Pick a workstream there before starting feature work.
 
+Upstream review, selected adaptations, and pending Mac/multi-device integration decisions live in **`UPSTREAM.md`**. A reviewed upstream tip is not necessarily integrated. Preserve the fork’s schema and safety fixes when bringing in upstream work.
+
 ## What this repo is
 
 Moves is a **private on-device timeline app** (SwiftUI + SwiftData). It records visits and movement, infers transport mode, and optionally uploads new points to Dawarich, Reitti, GeoPulse, OwnTracks Recorder, or Traccar.
@@ -109,7 +111,7 @@ Optional: `DEVICE_UDID=... ./Scripts/install-iphone.sh`.
 | Timeline assembly / transport inference | `DefaultTimelineAssembler` in the location/timeline sources; tests in `MovesTests/TimelineAssemblerTests.swift` |
 | App Intents / Siri / Action button | `Moves/MovesAppIntents.swift` |
 | Widgets + Live Activity | `Moves Widgets/` (route Canvas from `TimelineWidgetSnapshot.routePoints`; Live Activity uses the mode palette) |
-| Watch companion GPS | `Moves Watch App/` (today’s route uses mode color assets) |
+| Watch companion GPS | `Moves Watch App/` (today’s route uses mode color assets); `Moves/WatchRouteTransferQueue.swift` serializes durable transfers |
 | Adaptive / iPhone Duo layouts | `ContentView.swift` (`LandscapeSplitView`, `MovesDetailArrangement`), `MovesDetailViews.swift`, `MovesTimelineViews.swift`; design and verification in `duo.md` |
 | Optional calendar sync | `Moves/CalendarSync.swift`; Settings → Calendar. Dedicated Moves calendar, names and times only, explicit account/start-date selection, off by default. |
 
