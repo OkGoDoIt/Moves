@@ -398,7 +398,8 @@ struct DayTimelinePageContent: View {
     }
 
     private func portraitContent(pageSize: CGSize) -> some View {
-        let heroHeight = max(240, pageSize.height * 0.36)
+        // A short, wide outer display still needs room to browse the storyline.
+        let heroHeight = min(max(240, pageSize.height * 0.36), pageSize.height * 0.45)
 
         return ZStack {
             VStack(spacing: 8) {

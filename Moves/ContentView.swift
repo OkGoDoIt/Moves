@@ -107,19 +107,21 @@ struct MovesDetailArrangement<MapPane: View, Controls: View>: View {
 
 @available(iOS 27.1, *)
 private struct MovesArrangementControls<Content: View>: View {
-    @Environment(\.overlayArrangementZIndex) private var zIndex
     @ViewBuilder var content: () -> Content
 
     var body: some View {
-        ScrollView {
-            content()
-                .padding(12)
+        GeometryReader { proxy in
+            ScrollView {
+                content()
+                    .padding(12)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+            .frame(maxWidth: 460)
+            .frame(height: min(320, max(proxy.size.height - 24, 0)))
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
+            .padding(12)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         }
-        .scrollBounceBehavior(.basedOnSize)
-        .frame(maxHeight: zIndex > 0 ? 320 : .infinity)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
-        .safeAreaPadding(12)
-        .frame(maxHeight: .infinity, alignment: .bottom)
     }
 }
 
