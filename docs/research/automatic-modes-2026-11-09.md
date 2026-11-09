@@ -119,9 +119,25 @@ and review states; all 572 moves, 774 visits, and 7,415 points remained. Tests a
 cover durable undo, later edits/deletions, protected imported/reviewed/manual
 records, and failure to write the recovery file.
 
-The initial native screen was rendered on an iPhone 17e with synthetic history.
-Toggling cycling updated the eligible count, and the cleanup action produced a
-result and exposed Undo. Remaining final UI checks are pending.
+Native screen inspection used an iPhone 17e with synthetic history. All eight
+switches and the past-trips card were inspected at normal text size. Turning off
+Cycling updated the eligible count to 20; Recheck updated all 20, showed the result
+and Undo, and Undo visibly restored all 20 while Cycling stayed off. The largest
+accessibility text size kept the mode labels and switches readable. Screenshots:
+`docs/qa/2026-11-09/automatic-modes/compact-settings.png` and `compact-undo.png`.
+
+The approved HTML and native source share 14-point card corners, 12-point card
+padding, 14-point card spacing, 49-point minimum rows, 11-point mode dots, and
+16-point default mode labels. Native controls retain platform behavior and use
+the existing mode palette and SettingsCard directly.
+
+**Remaining visual checks:** landscape, scrolling/interacting with the history
+actions at the largest text size, and large-phone/tablet layouts. Device Hub
+reported that the Mac was locked and automatic unlock paused by physical input;
+these checks could not be completed. The tested source is ready for integration,
+but this is not a final visual sign-off or a phone installation. The native launch
+console contains simulator NSMapTable and duplicate accessibility-class warnings;
+no application error was observed in that captured console.
 
 ## API references
 
