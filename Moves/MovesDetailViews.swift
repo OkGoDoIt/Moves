@@ -61,6 +61,7 @@ struct PlaceMapDetailView: View {
                         .padding(12)
                     }
                     .scrollIndicators(.hidden)
+                    .contentMargins(.bottom, MovesChromeMetrics.detailOverlayTabBarClearance, for: .scrollContent)
                 }
                 .safeAreaPadding(.horizontal, 12)
                 .safeAreaPadding(.bottom, 8)
@@ -354,6 +355,7 @@ struct MoveMapDetailView: View {
                         .padding(12)
                     }
                     .scrollIndicators(.hidden)
+                    .contentMargins(.bottom, MovesChromeMetrics.detailOverlayTabBarClearance, for: .scrollContent)
                 }
                 .safeAreaPadding(.horizontal, 12)
                 .safeAreaPadding(.bottom, 8)

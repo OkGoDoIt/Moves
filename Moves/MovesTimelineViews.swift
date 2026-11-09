@@ -342,7 +342,7 @@ struct DayTimelinePageContent: View {
     var body: some View {
         GeometryReader { proxy in
             if usesSplitTimeline(proxy) {
-                landscapeContent
+                landscapeContent(isShort: proxy.size.height < 300)
             } else {
                 portraitContent(pageSize: proxy.size)
             }
@@ -451,7 +451,7 @@ struct DayTimelinePageContent: View {
         .safeAreaPadding(.bottom)
     }
 
-    private var landscapeContent: some View {
+    private func landscapeContent(isShort: Bool) -> some View {
         LandscapeSplitView {
             DayMapStrip(
                 dayTimeline: dayTimeline,
@@ -463,25 +463,31 @@ struct DayTimelinePageContent: View {
             )
         } controlPane: {
             VStack(spacing: 8) {
-                HStack {
-                    Text("Places & Moves")
-                        .font(.system(size: 17, weight: .semibold, design: .rounded))
-
-                    Spacer()
-
-                    LandscapePaneSideButton()
+                if !isShort {
+                    HStack {
+                        Text("Places & Moves")
+                            .font(.system(size: 17, weight: .semibold, design: .rounded))
+                        Spacer()
+                        LandscapePaneSideButton()
+                    }
+                    .padding(.horizontal, 4)
                 }
-                .padding(.horizontal, 4)
 
                 storylineList(usesSelection: true)
 
-                if !activityBubbleMetrics.isEmpty {
-                    ActivityBubblesView(
-                        metrics: activityBubbleMetrics,
-                        filteredModes: $filteredModes
-                    )
-                    .padding(.horizontal, 4)
+                HStack(spacing: 4) {
+                    if !activityBubbleMetrics.isEmpty {
+                        ActivityBubblesView(
+                            metrics: activityBubbleMetrics,
+                            filteredModes: $filteredModes
+                        )
+                    }
+                    if isShort {
+                        Spacer(minLength: 0)
+                        LandscapePaneSideButton()
+                    }
                 }
+                .padding(.horizontal, 4)
             }
         }
         .safeAreaPadding(.horizontal, 14)
