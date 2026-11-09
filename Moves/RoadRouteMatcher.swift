@@ -297,6 +297,50 @@ enum RoadRouteMatcher {
         return result.coordinates
     }
 
+    /// How a background match ended.
+    enum DeferredMatchOutcome: Sendable {
+        case finished
+        /// The directions budget ran out, so nothing was learned about this move.
+        case throttled
+        /// The row was deleted, or is no longer one to match.
+        case skipped
+    }
+
+    /// Matches a move in the background. The row is read before the directions requests and
+    /// fetched again after them, never held across them: a delete on another context while
+    /// one was held would abort the process.
+    static func matchDeferred(moveID: UUID, in container: ModelContainer) async -> DeferredMatchOutcome {
+        let readContext = ModelContext(container)
+        guard let move = fetchMove(id: moveID, in: readContext),
+              move.routeMatchPolicy == .auto,
+              move.manualRouteCoordinates == nil
+        else { return .skipped }
+
+        let fallback = MoveRouteGeometry.rawCoordinates(for: move)
+        let cacheKey = matchCacheKey(for: move, fallback: fallback)
+        let cacheSignature = matchCacheSignature(for: move, fallback: fallback)
+        let input = RouteMatchInput(move: move, fallback: fallback, snappingLevel: currentSnappingLevel)
+
+        let result = await resolveCoordinates(input: input, provider: directionsProvider)
+
+        if !result.cacheable, !result.rejected, await DirectionsRequestLimiter.shared.isThrottled() {
+            return .throttled
+        }
+        let writeContext = ModelContext(container)
+        guard let current = fetchMove(id: moveID, in: writeContext) else { return .skipped }
+        await persist(result, on: current, cacheKey: cacheKey, cacheSignature: cacheSignature)
+        if writeContext.hasChanges {
+            try? writeContext.save()
+        }
+        return .finished
+    }
+
+    private static func fetchMove(id: UUID, in context: ModelContext) -> MoveSegment? {
+        var descriptor = FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.id == id })
+        descriptor.fetchLimit = 1
+        return try? context.fetch(descriptor).first
+    }
+
     static func matchedManualCoordinates(
         for anchors: [CLLocationCoordinate2D],
         transportMode: TransportMode
@@ -1508,6 +1552,18 @@ actor DirectionsRequestLimiter {
         return true
     }
 
+    /// Whether `reserveSlot` would refuse right now, without using a slot.
+    func isThrottled(now: Date = .now) -> Bool {
+        prune(now)
+        if let cooldownUntil, now < cooldownUntil {
+            return true
+        }
+        if Self.dayKey(now) == dayStamp, requestsToday >= Self.maxRequestsPerDay {
+            return true
+        }
+        return requestDates.count >= Self.maxRequestsPerWindow
+    }
+
     func registerFailure(_ error: Error, now: Date = .now) -> Bool {
         let nsError = error as NSError
         guard nsError.domain == "GEOErrorDomain" else {
@@ -1564,11 +1620,29 @@ actor DirectionsRequestLimiter {
     }
 }
 
-// MARK: - Background retry for imports
+// MARK: - Background matching for imports
 
+/// Matches paths while nobody is waiting. An import can bring thousands of moves, more than a
+/// day's directions budget, so they are matched here over several runs rather than up front.
+/// Viewing a day still matches its moves straight away.
 enum RouteMatchBackgroundTask {
     /// Must stay in sync with `BGTaskSchedulerPermittedIdentifiers` in `Info.plist`.
     static let taskIdentifier = "\(MovesAppIdentity.bundleIdentifier).routeMatching"
+
+    /// Start date of the last move a walk through history reached.
+    static let cursorKey = "routing.deferredMatch.cursor"
+    private static let movesPerRun = 200
+    /// Long enough for `DirectionsRequestLimiter`'s per-minute window to clear.
+    private static let throttleWait: Duration = .seconds(61)
+
+    enum RunResult: Equatable {
+        /// Every waiting move has had its turn.
+        case finished
+        /// More moves are waiting beyond this run's share.
+        case more
+        case throttled
+        case interrupted
+    }
 
     static func register() {
         guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else {
@@ -1579,7 +1653,19 @@ enum RouteMatchBackgroundTask {
         }
     }
 
+    /// Retries after the directions budget ran out, once it has reset.
     static func scheduleNextRun(now: Date = .now) {
+        submit(earliestBeginDate: Calendar.current.startOfDay(for: now).addingTimeInterval(26 * 60 * 60))
+    }
+
+    /// Starts a fresh walk from the newest move, since an import can add moves on either side
+    /// of wherever the last walk got to.
+    static func scheduleAfterImport(defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: cursorKey)
+        submit(earliestBeginDate: nil)
+    }
+
+    private static func submit(earliestBeginDate: Date?) {
         guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else {
             return
         }
@@ -1587,19 +1673,27 @@ enum RouteMatchBackgroundTask {
         let request = BGProcessingTaskRequest(identifier: taskIdentifier)
         request.requiresNetworkConnectivity = true
         request.requiresExternalPower = false
-        let tomorrow = Calendar.current.startOfDay(for: now).addingTimeInterval(26 * 60 * 60)
-        request.earliestBeginDate = tomorrow
+        request.earliestBeginDate = earliestBeginDate
         try? BGTaskScheduler.shared.submit(request)
     }
 
     private static func handle(_ task: BGProcessingTask) {
+        // Covers being killed before this run can say what comes next.
         scheduleNextRun()
-        let work = Task {
+        let work = Task { @MainActor in
             do {
-                let container = try await MainActor.run { try MovesApp.sharedContainer() }
+                let container = try MovesApp.sharedContainer()
                 await TimelineSchemaUpgrader.waitUntilFinished()
-                await rematchPendingMoves(in: container)
-                task.setTaskCompleted(success: !Task.isCancelled)
+                let result = await matchWaitingMoves(in: container)
+                switch result {
+                case .finished:
+                    BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: taskIdentifier)
+                case .more, .interrupted:
+                    submit(earliestBeginDate: nil)
+                case .throttled:
+                    break
+                }
+                task.setTaskCompleted(success: result != .interrupted)
             } catch {
                 task.setTaskCompleted(success: false)
             }
@@ -1607,22 +1701,46 @@ enum RouteMatchBackgroundTask {
         task.expirationHandler = { work.cancel() }
     }
 
+    /// Takes the next share of moves that have no path yet, newest first. The cursor moves past
+    /// each one once it has had its turn, so a move whose match was rejected can't hold up the
+    /// rest of the walk.
     @MainActor
-    private static func rematchPendingMoves(in container: ModelContainer) async {
-        let context = ModelContext(container)
+    static func matchWaitingMoves(
+        in container: ModelContainer,
+        limit: Int = movesPerRun,
+        throttleWait: Duration = throttleWait,
+        defaults: UserDefaults = .standard
+    ) async -> RunResult {
+        let cursor = defaults.object(forKey: cursorKey) as? Date ?? .distantFuture
         var descriptor = FetchDescriptor<MoveSegment>(
             predicate: #Predicate { move in
-                move.routeMatchPolicyRaw == "auto" && move.routeCacheCoordinatesData == nil
-            }
+                move.routeMatchPolicyRaw == "auto"
+                    && move.routeCacheCoordinatesData == nil
+                    && move.startDate < cursor
+            },
+            sortBy: [SortDescriptor(\.startDate, order: .reverse)]
         )
-        descriptor.fetchLimit = 40
-        guard let moves = try? context.fetch(descriptor) else { return }
+        descriptor.fetchLimit = limit
+        // Values only: these rows must not be held across the directions requests.
+        let waiting = ((try? ModelContext(container).fetch(descriptor)) ?? []).map { (id: $0.id, startDate: $0.startDate) }
 
-        for move in moves {
-            _ = await RoadRouteMatcher.matchedCoordinates(for: move)
-            if Task.isCancelled { break }
+        for move in waiting {
+            guard !Task.isCancelled else { return .interrupted }
+            var outcome = await RoadRouteMatcher.matchDeferred(moveID: move.id, in: container)
+            if case .throttled = outcome {
+                try? await Task.sleep(for: throttleWait)
+                guard !Task.isCancelled else { return .interrupted }
+                outcome = await RoadRouteMatcher.matchDeferred(moveID: move.id, in: container)
+                if case .throttled = outcome { return .throttled }
+            }
+            defaults.set(move.startDate, forKey: cursorKey)
         }
-        try? context.save()
+
+        if waiting.count < limit {
+            defaults.removeObject(forKey: cursorKey)
+            return .finished
+        }
+        return .more
     }
 }
 

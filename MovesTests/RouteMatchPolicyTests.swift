@@ -260,6 +260,112 @@ final class RouteMatchPolicyTests: XCTestCase {
         XCTAssertEqual(move.routeMatchSummary, RouteMatchSummaries.manual)
     }
 
+    func testDeferredMatchingFillsInImportedPathsOnce() async throws {
+        let move = makeMove(from: try loadFixture("sparse-car"), includePlaces: true)
+        move.origin = .imported
+        try context.save()
+        let moveID = move.id
+        let provider = FakeDirectionsProvider(style: .close)
+        RoadRouteMatcher.directionsProvider = provider
+        let defaults = try makeDefaults()
+
+        let result = await RouteMatchBackgroundTask.matchWaitingMoves(in: container, defaults: defaults)
+        let requestCount = await provider.requestCount
+
+        XCTAssertEqual(result, .finished)
+        XCTAssertGreaterThan(requestCount, 0)
+        XCTAssertNil(defaults.object(forKey: RouteMatchBackgroundTask.cursorKey))
+        let stored = try XCTUnwrap(try storedMove(moveID))
+        XCTAssertNotNil(stored.routeCacheCoordinatesData)
+        XCTAssertEqual(stored.routeMatchConfidence, .medium)
+
+        let second = await RouteMatchBackgroundTask.matchWaitingMoves(in: container, defaults: defaults)
+        let requestCountAfterSecond = await provider.requestCount
+        XCTAssertEqual(second, .finished)
+        XCTAssertEqual(requestCountAfterSecond, requestCount)
+    }
+
+    func testDeferredMatchingWalksPastAMoveItCannotMatch() async throws {
+        let fixture = try loadFixture("sparse-car")
+        let newer = makeMove(from: fixture, includePlaces: true)
+        let older = makeMove(from: fixture, includePlaces: true)
+        older.startDate = newer.startDate.addingTimeInterval(-86_400)
+        older.endDate = newer.endDate.addingTimeInterval(-86_400)
+        try context.save()
+        let newerStart = newer.startDate
+        let olderStart = older.startDate
+        RoadRouteMatcher.directionsProvider = FakeDirectionsProvider(style: .detour)
+        let defaults = try makeDefaults()
+        func run() async -> RouteMatchBackgroundTask.RunResult {
+            await RouteMatchBackgroundTask.matchWaitingMoves(in: container, limit: 1, defaults: defaults)
+        }
+        let cursor = { defaults.object(forKey: RouteMatchBackgroundTask.cursorKey) as? Date }
+
+        let first = await run()
+        XCTAssertEqual(first, .more)
+        XCTAssertEqual(cursor(), newerStart)
+
+        let second = await run()
+        XCTAssertEqual(second, .more)
+        XCTAssertEqual(cursor(), olderStart)
+
+        let third = await run()
+        XCTAssertEqual(third, .finished)
+        XCTAssertNil(cursor())
+        let waiting = try ModelContext(container).fetch(FetchDescriptor<MoveSegment>())
+        XCTAssertTrue(waiting.allSatisfy { $0.routeCacheCoordinatesData == nil })
+    }
+
+    func testDeferredMatchingSurvivesTheMoveBeingDeletedDuringARequest() async throws {
+        let move = makeMove(from: try loadFixture("sparse-car"), includePlaces: true)
+        try context.save()
+        let moveID = move.id
+        RoadRouteMatcher.directionsProvider = DeletingDirectionsProvider(container: container, moveID: moveID)
+
+        let result = await RouteMatchBackgroundTask.matchWaitingMoves(in: container, defaults: try makeDefaults())
+
+        XCTAssertEqual(result, .finished)
+        XCTAssertNil(try storedMove(moveID))
+    }
+
+    func testDeferredMatchingStopsAndKeepsItsPlaceWhenTheBudgetRunsOut() async throws {
+        let move = makeMove(from: try loadFixture("sparse-car"), includePlaces: true)
+        try context.save()
+        let moveID = move.id
+        RoadRouteMatcher.directionsProvider = FakeDirectionsProvider(style: .close)
+        let defaults = try makeDefaults()
+        for _ in 0..<DirectionsRequestLimiter.maxRequestsPerWindow {
+            _ = await DirectionsRequestLimiter.shared.reserveSlot()
+        }
+
+        let throttled = await RouteMatchBackgroundTask.matchWaitingMoves(
+            in: container,
+            throttleWait: .zero,
+            defaults: defaults
+        )
+        XCTAssertEqual(throttled, .throttled)
+        XCTAssertNil(defaults.object(forKey: RouteMatchBackgroundTask.cursorKey))
+        XCTAssertNil(try XCTUnwrap(try storedMove(moveID)).routeCacheCoordinatesData)
+
+        await DirectionsRequestLimiter.shared.reset()
+        let resumed = await RouteMatchBackgroundTask.matchWaitingMoves(in: container, defaults: defaults)
+        XCTAssertEqual(resumed, .finished)
+        XCTAssertNotNil(try XCTUnwrap(try storedMove(moveID)).routeCacheCoordinatesData)
+    }
+
+    private func storedMove(_ id: UUID) throws -> MoveSegment? {
+        var descriptor = FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.id == id })
+        descriptor.fetchLimit = 1
+        return try ModelContext(container).fetch(descriptor).first
+    }
+
+    private func makeDefaults() throws -> UserDefaults {
+        let suiteName = "RouteMatchPolicyTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        addTeardownBlock { defaults.removePersistentDomain(forName: suiteName) }
+        return defaults
+    }
+
     func testDailyDirectionsCap() async {
         let limiter = DirectionsRequestLimiter.shared
         await limiter.reset()
@@ -318,6 +424,37 @@ actor FakeDirectionsProvider: DirectionsProvider {
         case .baseline(let baselineStart, let baselineEnd):
             return [[baselineStart, baselineEnd]]
         }
+    }
+}
+
+/// Deletes a move on another context while its directions request is in flight, the way a
+/// person or the stay reconciler can while a background match runs.
+private actor DeletingDirectionsProvider: DirectionsProvider {
+    let container: ModelContainer
+    let moveID: UUID
+
+    init(container: ModelContainer, moveID: UUID) {
+        self.container = container
+        self.moveID = moveID
+    }
+
+    func routes(
+        from start: CLLocationCoordinate2D,
+        to end: CLLocationCoordinate2D,
+        transportType: MKDirectionsTransportType,
+        requestsAlternateRoutes: Bool
+    ) async throws -> [[CLLocationCoordinate2D]] {
+        let container = container
+        let moveID = moveID
+        await MainActor.run {
+            let context = ModelContext(container)
+            let moves = (try? context.fetch(FetchDescriptor<MoveSegment>())) ?? []
+            for move in moves where move.id == moveID {
+                context.delete(move)
+            }
+            try? context.save()
+        }
+        return [[start, end]]
     }
 }
 

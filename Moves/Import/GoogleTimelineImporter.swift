@@ -106,6 +106,7 @@ final class GoogleTimelineImporter: ObservableObject {
             }.value
 
             NotificationCenter.default.post(name: .movesLocationSamplesDidChange, object: nil)
+            RouteMatchBackgroundTask.scheduleAfterImport()
             lastReport = report
             lastErrorMessage = nil
         } catch {

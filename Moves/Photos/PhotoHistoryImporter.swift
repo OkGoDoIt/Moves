@@ -304,6 +304,7 @@ struct PhotoHistoryImporter {
         try repository.saveIfNeeded()
         NotificationCenter.default.post(name: .movesLocationSamplesDidChange, object: nil)
         NotificationCenter.default.post(name: .movesPhotoLibraryDidChange, object: nil)
+        RouteMatchBackgroundTask.scheduleAfterImport()
         progress?(1, "Done")
         return report
     }

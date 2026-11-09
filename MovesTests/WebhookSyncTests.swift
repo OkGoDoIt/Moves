@@ -202,6 +202,20 @@ final class WebhookSyncTests: XCTestCase {
         XCTAssertTrue(expanded.contains(where: { $0.name.hasSuffix(".gpx") }))
         XCTAssertFalse(expanded.contains(where: { $0.name == "places.json" }))
 
+        // Restoring the zip reads its three timeline files and reports nothing as skipped.
+        let parsed = TimelineArchiveFileParser.parseAll(files: [("moves-all-days.zip", zip.data)])
+        XCTAssertEqual(parsed.parsedFileCount, 3)
+        XCTAssertEqual(parsed.skipped, [])
+        XCTAssertEqual(parsed.warnings, [])
+        XCTAssertFalse(parsed.archive.isEmpty)
+
+        // A KML picked on its own still says it could not be restored.
+        let picked = TimelineArchiveFileParser.parseAll(
+            files: [("day.kml", Data("<kml></kml>".utf8))]
+        )
+        XCTAssertEqual(picked.parsedFileCount, 0)
+        XCTAssertEqual(picked.skipped, ["day.kml"])
+
         let kml = try XCTUnwrap(TimelineExporter.makePayload(days: [day], format: .kml, fileStem: "day"))
         let xml = try XCTUnwrap(String(data: kml.data, encoding: .utf8))
         XCTAssertTrue(xml.contains("<kml"))
@@ -267,6 +281,148 @@ final class WebhookSyncTests: XCTestCase {
             )
         )
         XCTAssertEqual(confirmed.count, LocationSampleSource.allCases.count + 1)
+    }
+
+    func testRecentRestoresAndGPSFilesStayOutOfAutomaticUploads() throws {
+        let start = Date.now.addingTimeInterval(-6 * 60 * 60)
+        let walkStart = start.addingTimeInterval(2 * 60 * 60)
+        let walk = SyntheticLog.leg(
+            from: SyntheticLog.home,
+            bearingNorthMeters: 1_400,
+            from: walkStart,
+            minutes: 20,
+            stepMinutes: 2
+        )
+        var points = SyntheticLog.stay(at: SyntheticLog.home, from: start, minutes: 120)
+        points += walk.dropFirst()
+        points += SyntheticLog.stay(at: SyntheticLog.cafe, from: walk.last!.timestamp, minutes: 60).dropFirst()
+
+        // GPS file with stays and moves.
+        let logContainer = try makeInMemoryContainer()
+        _ = try SwiftDataTimelineRepository(modelContainer: logContainer).importLocationLog(
+            LocationLogSegmenter().segment(points),
+            source: .fileRouteImport
+        )
+        try assertAllImportedAndNotUploaded(in: logContainer)
+
+        // GPS file with a bare track.
+        let trackContainer = try makeInMemoryContainer()
+        _ = try SwiftDataTimelineRepository(modelContainer: trackContainer).importRouteTrack(
+            locations: walk.map(\.location),
+            source: .fileRouteImport,
+            transportMode: .walking
+        )
+        try assertAllImportedAndNotUploaded(in: trackContainer)
+
+        // Moves export.
+        let archiveContainer = try makeInMemoryContainer()
+        let archive = TimelineArchive(
+            places: [
+                TimelineArchivePlace(
+                    arrivalDate: start,
+                    departureDate: walkStart,
+                    latitude: SyntheticLog.home.latitude,
+                    longitude: SyntheticLog.home.longitude,
+                    userLabel: "Home",
+                    source: .geoJSON
+                ),
+            ],
+            moves: [
+                TimelineArchiveMove(
+                    startDate: walkStart,
+                    endDate: walk.last!.timestamp,
+                    transportMode: .walking,
+                    points: walk.map {
+                        TimelineArchivePoint(
+                            latitude: $0.coordinate.latitude,
+                            longitude: $0.coordinate.longitude,
+                            timestamp: $0.timestamp
+                        )
+                    },
+                    source: .gpx
+                ),
+            ],
+            formats: [.gpx, .geoJSON]
+        )
+        _ = try SwiftDataTimelineRepository(modelContainer: archiveContainer).importTimelineArchive(archive)
+        try assertAllImportedAndNotUploaded(in: archiveContainer)
+    }
+
+    func testImportsLeaveARecordedVisitMarkedAsRecorded() throws {
+        let start = Date.now.addingTimeInterval(-6 * 60 * 60)
+        let end = start.addingTimeInterval(2 * 60 * 60)
+        let coordinate = SyntheticLog.home
+
+        func recordedVisit(in container: ModelContainer) throws -> ModelContext {
+            let context = ModelContext(container)
+            let visit = VisitPlace(
+                arrivalDate: start,
+                departureDate: end,
+                latitude: coordinate.latitude,
+                longitude: coordinate.longitude,
+                horizontalAccuracy: 20
+            )
+            context.insert(visit)
+            try context.save()
+            return context
+        }
+
+        let archiveContainer = try makeInMemoryContainer()
+        let archiveContext = try recordedVisit(in: archiveContainer)
+        _ = try SwiftDataTimelineRepository(modelContainer: archiveContainer).importTimelineArchive(
+            TimelineArchive(
+                places: [
+                    TimelineArchivePlace(
+                        arrivalDate: start,
+                        departureDate: end,
+                        latitude: coordinate.latitude,
+                        longitude: coordinate.longitude,
+                        userLabel: "Home",
+                        source: .geoJSON
+                    ),
+                ],
+                moves: [],
+                formats: [.geoJSON]
+            )
+        )
+        XCTAssertEqual(try archiveContext.fetch(FetchDescriptor<VisitPlace>()).map(\.origin), [.sensor])
+
+        let logContainer = try makeInMemoryContainer()
+        let logContext = try recordedVisit(in: logContainer)
+        let timeline = LocationLogSegmenter().segment(SyntheticLog.stay(at: coordinate, from: start, minutes: 120))
+        _ = try SwiftDataTimelineRepository(modelContainer: logContainer)
+            .importLocationLog(timeline, source: .fileRouteImport)
+        XCTAssertEqual(try logContext.fetch(FetchDescriptor<VisitPlace>()).map(\.origin), [.sensor])
+    }
+
+    private func assertAllImportedAndNotUploaded(
+        in container: ModelContainer,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws {
+        let context = ModelContext(container)
+        let visits = try context.fetch(FetchDescriptor<VisitPlace>())
+        let moves = try context.fetch(FetchDescriptor<MoveSegment>())
+        XCTAssertFalse(visits.isEmpty, file: file, line: line)
+        XCTAssertFalse(moves.isEmpty, file: file, line: line)
+        XCTAssertTrue(visits.allSatisfy { $0.origin == .imported }, file: file, line: line)
+        XCTAssertTrue(moves.allSatisfy { $0.origin == .imported }, file: file, line: line)
+
+        let uploadableVisits = try context.fetch(
+            FetchDescriptor<VisitPlace>(
+                predicate: LocationUploadFilter.visits(after: .distantPast, includingHistory: false)
+            )
+        )
+        let uploadableMoves = try context.fetch(
+            FetchDescriptor<MoveSegment>(
+                predicate: LocationUploadFilter.moves(after: .distantPast, includingHistory: false)
+            )
+        )
+        XCTAssertEqual(uploadableVisits.count, 0, file: file, line: line)
+        XCTAssertEqual(uploadableMoves.count, 0, file: file, line: line)
+
+        // Only Google Timeline's guesses go to the Review inbox.
+        XCTAssertEqual(ReviewInboxBuilder.items(visits: visits, moves: moves).count, 0, file: file, line: line)
     }
 
     func testAutomaticFilterLeavesOutImportedVisitsAndMoves() throws {

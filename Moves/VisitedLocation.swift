@@ -85,6 +85,18 @@ enum LocationSampleSource: String, Codable, CaseIterable {
 }
 
 extension LocationSampleSource {
+    /// History brought in from a file rather than recorded here. New visits and moves made
+    /// from it are marked `.imported`, which keeps them out of automatic uploads and repair.
+    var isHistoryImport: Bool {
+        switch self {
+        case .fileRouteImport, .googleTimelineImport, .arcImport:
+            return true
+        case .visit, .significantChange, .routeTracking, .watchRouteTracking, .watchSignificantChange,
+             .healthWorkoutRoute, .launchBackfill, .authorizationGrant, .lastMile, .photoLibrary:
+            return false
+        }
+    }
+
     var priority: Int {
         switch self {
         case .fileRouteImport, .googleTimelineImport, .arcImport: return 7
@@ -1141,6 +1153,8 @@ final class SwiftDataTimelineRepository: TimelineRepository {
     private var bulkKnownPlaces: [KnownPlace]?
     /// Visits inserted by the running bulk import; never merged into each other.
     private var bulkCreatedPlaceIDs: Set<UUID>?
+    /// What a visit or move created right now came from. A row an import matches keeps its own.
+    private var newRowOrigin: TimelineItemOrigin = .sensor
     private static let logPlaceMatchDistance: CLLocationDistance = 120
     private static let logPlaceMatchSlack: TimeInterval = 15 * 60
     private static let logPlaceExtendLimit: TimeInterval = 12 * 60 * 60
@@ -1682,6 +1696,9 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         let samples = try appendSamples(from: orderedLocations, source: source)
         let distance = Self.totalDistance(for: orderedLocations)
 
+        newRowOrigin = source.isHistoryImport ? .imported : .sensor
+        defer { newRowOrigin = .sensor }
+
         let startPlace = try routeEndpointPlace(
             at: firstLocation,
             arrivalDate: firstLocation.timestamp,
@@ -1729,7 +1746,11 @@ final class SwiftDataTimelineRepository: TimelineRepository {
 
         let existingSamples = try modelContext.fetch(FetchDescriptor<LocationSample>())
         archiveImportSampleKeys = Set(existingSamples.map(\.dedupeKey))
-        defer { archiveImportSampleKeys = nil }
+        newRowOrigin = .imported
+        defer {
+            archiveImportSampleKeys = nil
+            newRowOrigin = .sensor
+        }
 
         let places = archive.places.sorted(by: { $0.arrivalDate < $1.arrivalDate })
         let moves = archive.moves.sorted(by: { $0.startDate < $1.startDate })
@@ -2010,6 +2031,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         place.dayTimeline = try timeline(for: stay.arrivalDate)
         modelContext.insert(place)
         try applyPlaceLearning(to: place)
+        applyImportedOrigin(to: place, source: source)
         try applyGoogleStayMetadata(stay, to: place, source: source)
         bulkCreatedPlaceIDs?.insert(place.id)
         return (place, true)
@@ -2125,6 +2147,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         to place: VisitPlace,
         source: LocationSampleSource
     ) throws {
+        guard source == .googleTimelineImport else { return }
         applyImportedOrigin(to: place, source: source)
         guard let name = stay.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else {
             return
@@ -2139,21 +2162,23 @@ final class SwiftDataTimelineRepository: TimelineRepository {
     }
 
     private func applyImportedOrigin(to place: VisitPlace, source: LocationSampleSource) {
-        guard source == .googleTimelineImport else { return }
+        guard source.isHistoryImport else { return }
         if place.origin == .sensor {
             place.origin = .imported
         }
     }
 
-    /// Tags a Google Timeline move as imported and sets path honesty from density.
+    /// Tags a move from a file as imported. Google Timeline's mode and path are its own
+    /// guesses, so those moves also get `.imported` modes and path honesty from density.
     private func applyImportedMoveProvenance(
         to move: MoveSegment,
         source: LocationSampleSource,
         pointCount: Int,
         distanceMeters: Double
     ) {
-        guard source == .googleTimelineImport else { return }
+        guard source.isHistoryImport else { return }
         move.origin = .imported
+        guard source == .googleTimelineImport else { return }
         move.transportModeSource = .imported
         move.routeMatchConfidence = Self.importedRouteConfidence(
             pointCount: pointCount,
@@ -3039,6 +3064,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                 distanceMeters: distanceMeters,
                 stepCount: stepCount
             )
+            move.origin = newRowOrigin
             modelContext.insert(move)
         }
 
@@ -3737,6 +3763,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             autoLabel: record.autoLabel,
             comment: record.comment
         )
+        place.origin = newRowOrigin
         place.dayTimeline = try timeline(for: record.arrivalDate, exportedDayKey: record.dayKey)
         modelContext.insert(place)
         return try collapseDuplicatePlaces(around: place)
@@ -4030,6 +4057,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             longitude: location.coordinate.longitude,
             horizontalAccuracy: max(location.horizontalAccuracy, 20)
         )
+        place.origin = newRowOrigin
         place.dayTimeline = try timeline(for: arrivalDate)
         modelContext.insert(place)
         let canonical = try collapseDuplicatePlaces(around: place)

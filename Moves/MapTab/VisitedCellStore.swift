@@ -131,8 +131,9 @@ enum VisitedCellStore {
     }
 
     /// Makes the cells match `LocationSample`, reading a page of samples at a time. Used when the
-    /// cache is empty (demo seeder and imports insert samples without going through
-    /// `appendSamples`) and once for history recorded before cells existed.
+    /// cache is empty (the demo seeder inserts samples without going through `appendSamples`) and
+    /// once for history recorded before cells existed. Imports go through `appendSamples`, so they
+    /// keep the cells current without a rebuild.
     ///
     /// Updates cells in place and deletes only the ones with no samples behind them, so capture
     /// can keep writing to a cell on another context while this runs.

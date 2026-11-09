@@ -471,7 +471,7 @@ final class LocationLogImportTests: XCTestCase {
 
 // MARK: - Synthetic log builder
 
-private enum SyntheticLog {
+enum SyntheticLog {
     static let home = CLLocationCoordinate2D(latitude: 37.749247, longitude: -122.460294)
     static let cafe = home.offset(north: 1_400)
     static let sfo = CLLocationCoordinate2D(latitude: 37.6213, longitude: -122.3790)

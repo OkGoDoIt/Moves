@@ -252,8 +252,9 @@ enum LocationUploadFilter {
         TimelineItemOrigin.photoInferred.rawValue,
     ]
 
-    /// File and archive restores leave visits and moves marked as sensor data, so age is the
-    /// remaining signal. The sample stay reconciler can create a visit up to seven days back.
+    /// Restores made before file imports were marked `.imported` still read as sensor data, so
+    /// age is the remaining signal for them. The sample stay reconciler can create a visit up to
+    /// seven days back.
     static let recentTimelineItemWindow: TimeInterval = 8 * 24 * 60 * 60
 
     static func samples(

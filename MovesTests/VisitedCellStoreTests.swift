@@ -192,6 +192,75 @@ final class VisitedCellStoreTests: XCTestCase {
         XCTAssertEqual(cells[0].cellKey, VisitedCellStore.cellKey(latitude: 52.52, longitude: 13.405))
     }
 
+    func testEveryImporterKeepsTheCellsCurrent() throws {
+        let start = date(8, 0)
+        let walk = (0...10).map { step in
+            CLLocation(
+                coordinate: CLLocationCoordinate2D(latitude: 48.85 + Double(step) * 0.002, longitude: 2.35),
+                altitude: 0,
+                horizontalAccuracy: 8,
+                verticalAccuracy: -1,
+                course: -1,
+                speed: 1,
+                timestamp: start.addingTimeInterval(Double(step) * 300)
+            )
+        }
+
+        // GPS files and Google Timeline share `importLocationLog`.
+        let (logContext, logContainer) = try makeContext()
+        let log = LocationLogSegmenter().segment(SyntheticLog.dayWithWalkDriveAndFlight())
+        _ = try SwiftDataTimelineRepository(modelContainer: logContainer)
+            .importLocationLog(log, source: .googleTimelineImport)
+        try assertCellsMatchSamples(in: logContext)
+
+        // Moves export restores.
+        let (archiveContext, archiveContainer) = try makeContext()
+        let archive = TimelineArchive(
+            places: [],
+            moves: [
+                TimelineArchiveMove(
+                    startDate: start,
+                    endDate: walk.last!.timestamp,
+                    transportMode: .walking,
+                    points: walk.map {
+                        TimelineArchivePoint(
+                            latitude: $0.coordinate.latitude,
+                            longitude: $0.coordinate.longitude,
+                            timestamp: $0.timestamp
+                        )
+                    },
+                    source: .gpx
+                ),
+            ],
+            formats: [.gpx]
+        )
+        _ = try SwiftDataTimelineRepository(modelContainer: archiveContainer).importTimelineArchive(archive)
+        try assertCellsMatchSamples(in: archiveContext)
+
+        // Apple Health routes and untimed GPS tracks.
+        let (trackContext, trackContainer) = try makeContext()
+        _ = try SwiftDataTimelineRepository(modelContainer: trackContainer)
+            .importRouteTrack(locations: walk, source: .healthWorkoutRoute, transportMode: .walking)
+        try assertCellsMatchSamples(in: trackContext)
+    }
+
+    private func assertCellsMatchSamples(
+        in context: ModelContext,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws {
+        let samples = try context.fetch(FetchDescriptor<LocationSample>())
+        let cells = try context.fetch(FetchDescriptor<VisitedCell>())
+        XCTAssertFalse(samples.isEmpty, file: file, line: line)
+        XCTAssertEqual(cells.reduce(0) { $0 + $1.sampleCount }, samples.count, file: file, line: line)
+        XCTAssertEqual(
+            Set(cells.map(\.cellKey)),
+            Set(samples.map { VisitedCellStore.cellKey(latitude: $0.latitude, longitude: $0.longitude) }),
+            file: file,
+            line: line
+        )
+    }
+
     private func makeContext() throws -> (ModelContext, ModelContainer) {
         let schema = Schema(MovesTimelineSchema.models)
         let configuration = ModelConfiguration(

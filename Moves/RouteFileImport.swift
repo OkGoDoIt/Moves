@@ -156,6 +156,7 @@ final class RouteFileImporter: ObservableObject {
             report.fileCount = securityScopedURLs.count
             report.incompleteFileNames = parsed.incompleteFileNames
             NotificationCenter.default.post(name: .movesLocationSamplesDidChange, object: nil)
+            RouteMatchBackgroundTask.scheduleAfterImport()
             lastReport = report
             lastErrorMessage = nil
         } catch {

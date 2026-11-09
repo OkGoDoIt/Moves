@@ -1,3 +1,4 @@
+import CloudKit
 import CoreGraphics
 import CoreLocation
 import SwiftData
@@ -317,20 +318,110 @@ final class PrivacyZoneTests: XCTestCase {
         let local = MovesICloudStatus.resolve(
             allowsPrivateMirror: false,
             isSimulator: false,
-            lastUpdated: nil
+            sync: MovesICloudSyncState()
         )
         XCTAssertEqual(local, .localOnly)
-        XCTAssertFalse(local.detail.localizedCaseInsensitiveContains("CloudKit"))
-        XCTAssertTrue(local.detail.localizedCaseInsensitiveContains("iPhone"))
+        XCTAssertFalse(local.detail().localizedCaseInsensitiveContains("CloudKit"))
+        XCTAssertTrue(local.detail().localizedCaseInsensitiveContains("iPhone"))
 
         let privateICloud = MovesICloudStatus.resolve(
             allowsPrivateMirror: true,
             isSimulator: false,
-            lastUpdated: Date(timeIntervalSince1970: 1_700_000_000)
+            sync: MovesICloudSyncState(lastSyncedAt: Date(timeIntervalSince1970: 1_700_000_000))
         )
         guard case .privateICloud = privateICloud else {
             return XCTFail("Expected private iCloud")
         }
-        XCTAssertFalse(privateICloud.detail.localizedCaseInsensitiveContains("CloudKit"))
+        XCTAssertFalse(privateICloud.detail().localizedCaseInsensitiveContains("CloudKit"))
+    }
+
+    func testICloudSyncTimeComesFromFinishedTransfers() {
+        let end = Date(timeIntervalSince1970: 1_700_000_000)
+        var sync = MovesICloudSyncState()
+        let id = UUID()
+
+        sync.apply(eventID: id, kind: .transfer, endDate: nil, succeeded: false, error: nil)
+        XCTAssertTrue(sync.isSyncing)
+        XCTAssertEqual(MovesICloudStatus.privateICloud(sync).detail(), "Syncing now.")
+
+        sync.apply(eventID: id, kind: .transfer, endDate: end, succeeded: true, error: nil)
+        XCTAssertFalse(sync.isSyncing)
+        XCTAssertEqual(sync.lastSyncedAt, end)
+        XCTAssertEqual(
+            MovesICloudStatus.privateICloud(sync).detail(now: end.addingTimeInterval(30)),
+            "Synced just now."
+        )
+        XCTAssertTrue(
+            MovesICloudStatus.privateICloud(sync)
+                .detail(now: end.addingTimeInterval(2 * 60 * 60))
+                .hasPrefix("Last synced 2 hours ago")
+        )
+
+        // Setting up the mirror moves no data, so it says nothing about the last sync.
+        let setup = UUID()
+        sync.apply(eventID: setup, kind: .setup, endDate: end.addingTimeInterval(60), succeeded: true, error: nil)
+        XCTAssertEqual(sync.lastSyncedAt, end)
+    }
+
+    func testICloudSyncFailureKeepsTheLastSyncAndClearsOnSuccess() {
+        let lastSync = Date(timeIntervalSince1970: 1_700_000_000)
+        var sync = MovesICloudSyncState(lastSyncedAt: lastSync)
+
+        sync.apply(
+            eventID: UUID(),
+            kind: .transfer,
+            endDate: lastSync.addingTimeInterval(60),
+            succeeded: false,
+            error: CKError(.networkUnavailable)
+        )
+        XCTAssertEqual(sync.problem, .offline)
+        XCTAssertEqual(sync.lastSyncedAt, lastSync)
+        XCTAssertTrue(MovesICloudStatus.privateICloud(sync).needsAttention)
+        XCTAssertTrue(
+            MovesICloudStatus.privateICloud(sync)
+                .detail(now: lastSync.addingTimeInterval(2 * 60 * 60))
+                .hasPrefix("Waiting for a connection. Last synced 2 hours ago")
+        )
+
+        let recovered = lastSync.addingTimeInterval(120)
+        sync.apply(eventID: UUID(), kind: .transfer, endDate: recovered, succeeded: true, error: nil)
+        XCTAssertNil(sync.problem)
+        XCTAssertEqual(sync.lastSyncedAt, recovered)
+    }
+
+    func testICloudProblemsReadWrappedErrors() {
+        typealias Problem = MovesICloudSyncState.Problem
+        XCTAssertEqual(Problem(error: CKError(.quotaExceeded)), .storageFull)
+        XCTAssertEqual(Problem(error: CKError(.notAuthenticated)), .signedOut)
+        XCTAssertEqual(Problem(error: NSError(domain: NSCocoaErrorDomain, code: 134400)), .signedOut)
+        XCTAssertEqual(Problem(error: NSError(domain: "Other", code: 1)), .other)
+        XCTAssertEqual(Problem(error: nil), .other)
+
+        let wrapped = NSError(
+            domain: NSCocoaErrorDomain,
+            code: 134407,
+            userInfo: [NSUnderlyingErrorKey: CKError(.networkFailure) as NSError]
+        )
+        XCTAssertEqual(Problem(error: wrapped), .offline)
+
+        let partial = CKError(
+            .partialFailure,
+            userInfo: [CKPartialErrorsByItemIDKey: ["record": CKError(.quotaExceeded)]]
+        )
+        XCTAssertEqual(Problem(error: partial), .storageFull)
+    }
+
+    func testICloudAccountChangesShowAndClearSignedOut() {
+        var sync = MovesICloudSyncState()
+        sync.apply(accountStatus: .noAccount)
+        XCTAssertEqual(sync.problem, .signedOut)
+        XCTAssertEqual(MovesICloudStatus.privateICloud(sync).systemImage, "icloud.slash")
+
+        sync.apply(accountStatus: .couldNotDetermine)
+        XCTAssertEqual(sync.problem, .signedOut)
+
+        sync.apply(accountStatus: .available)
+        XCTAssertNil(sync.problem)
+        XCTAssertEqual(MovesICloudStatus.privateICloud(sync).detail(), "Waiting for the first sync.")
     }
 }
