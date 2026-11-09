@@ -464,6 +464,16 @@ extension PrivacyZoneTests {
         XCTAssertEqual(state.lastUploadedAt, failureTime.addingTimeInterval(2))
     }
 
+    func testSpotlightSkipsLocationOnlySavesButRetainsPlaceChanges() throws {
+        let sampleID = try PersistentIdentifier.identifier(for: "test", entityName: "LocationSample", primaryKey: "fix")
+        let visitID = try PersistentIdentifier.identifier(for: "test", entityName: "VisitPlace", primaryKey: "visit")
+        XCTAssertFalse(SpotlightRefreshPolicy.requiresRefresh(Notification(name: ModelContext.didSave,
+            userInfo: [ModelContext.NotificationKey.insertedIdentifiers: [sampleID]])))
+        XCTAssertTrue(SpotlightRefreshPolicy.requiresRefresh(Notification(name: ModelContext.didSave,
+            userInfo: [ModelContext.NotificationKey.deletedIdentifiers.rawValue: Set([visitID])])))
+        XCTAssertTrue(SpotlightRefreshPolicy.requiresRefresh(Notification(name: ModelContext.didSave)))
+    }
+
     func testImportQueueRecoversWithoutDiscardingUnreadableManifest() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

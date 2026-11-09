@@ -192,6 +192,48 @@ delivery were not verified by these simulator/package tests. Device deployment
 belongs to the concurrent main owner.
 The original safety run does not validate the broader integration; its separate verification record follows.
 
+## Broader integration validation — November 9
+
+The combined branch includes the separately reviewed automatic-mode controls
+(`ea6a976b`, `6affd953`) and compact-phone polish (`0b4ae17e`, `6734102`).
+The shared transport policy remains authoritative across capture, raw-log import,
+photo inference, repair, and explicit history cleanup. Curated trips remain protected.
+The primary working checkout and the walking phone's build 44 were left untouched.
+
+- Combined simulator suite: **433 tests executed, 4 skipped, zero failures**.
+  The skips are three opt-in Google Takeout checks and Calendar authorization.
+  Included the available large import fixtures and a copy of the November 9 phone
+  store; originals were not modified. Interrupted import replay, corrupt queue
+  preservation, cancellation propagation, edited/deleted-history protection,
+  privacy-filtered Fog export, sync error precedence, spherical/date-line geometry,
+  country lookup, and actual installed Quick Look thumbnail generation passed.
+- Final simulator result: `/tmp/Moves-features-derived/Logs/Test/Test-Moves-2026.11.09_15-09-26-+0700.xcresult`.
+- Generic physical-device build succeeded for the app, Watch, widgets, and both
+  Quick Look extensions (`CODE_SIGNING_ALLOWED=NO`; compilation, not provisioning
+  or hardware validation). Built bundle/App Group/iCloud identifiers and the same
+  four permitted background jobs were inspected.
+- Spotlight refresh now filters location-only saves and stops offscreen/in the
+  background; foreground activation still catches missed place changes.
+- Vendored packages: RouteFileKit **5 tests**, FogOfWorldKit **7 tests**, all passing.
+  Fork adaptations bound native decompression independently of untrusted ZIP sizes,
+  propagate cancellation, and make archive delivery pull-based. Preview rendering
+  cancels MapKit work and thumbnails use only local route geometry.
+- Visual checks before the Mac locked: ordinary timeline, queued-import resume,
+  completed route import, and Fog import/export action. Concurrent agents verified
+  compact automatic-mode toggle/cleanup/Undo and short-landscape note/Save scrolling.
+  See `docs/VISUAL-QA.md` and `docs/research/automatic-modes-2026-11-09.md`.
+- A navigation feedback loop found during review was resolved by loading the
+  requested move in its lifecycle task, keeping database/file work out of view
+  initialization. Move GPX sharing now waits for privacy-zone filtering instead of
+  exposing an initial unfiltered file. Subsequent phone/tablet launches opened
+  detail/recorded-location sheets without observation feedback warnings.
+- Remaining before phone release: hands-on recorded-fix selection/paging,
+  Fog-map zoom, full Quick Look preview, wide/tablet and enlarged-text interactions.
+  The locked Mac prevented these interactions; screenshots are not a substitute.
+  Physical energy use, Watch delivery/relaunch, and live CloudKit connection behavior
+  still need device verification. No claim of zero battery regression is inferred
+  from simulator tests. Mac browsing and multiple recorders remain deferred.
+
 ## Reviewed commit range
 
 The complete fetched range is retained here so later work can revisit a feature

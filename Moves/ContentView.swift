@@ -554,6 +554,14 @@ struct ContentView: View {
             .eraseToAnyPublisher()
     }
 
+    private var spotlightChanges: AnyPublisher<Notification, Never> {
+        NotificationCenter.default.publisher(for: ModelContext.didSave)
+            .filter(SpotlightRefreshPolicy.requiresRefresh)
+            .merge(with: NotificationCenter.default.publisher(for: .NSPersistentStoreRemoteChange))
+            .debounce(for: .milliseconds(350), scheduler: DispatchQueue.main)
+            .eraseToAnyPublisher()
+    }
+
     private var observedTimeline: some View {
         timelineNavigation
         .task {
@@ -581,16 +589,17 @@ struct ContentView: View {
         .onReceive(historyChanges) { _ in
                 refreshDayIndex()
                 publishWidgetSnapshot()
-                refreshSpotlightIndex()
                 cloudDataPresencePublisher.publishSoon()
             }
     }
 
     var body: some View {
         observedTimeline
+        .onReceive(spotlightChanges) { _ in refreshSpotlightIndex() }
+        .onDisappear { spotlightRefreshTask?.cancel() }
         .task(id: selectedDay?.id) { await openScreenshotMoveIfNeeded() }
         .onChange(of: scenePhase) { _, newPhase in
-            guard newPhase == .active else { return }
+            guard newPhase == .active else { spotlightRefreshTask?.cancel(); return }
             openCurrentDay()
             publishWidgetSnapshot()
             refreshSpotlightIndex()
@@ -780,6 +789,7 @@ struct ContentView: View {
     }
 
     private func refreshSpotlightIndex() {
+        guard scenePhase == .active else { return }
         spotlightRefreshTask?.cancel()
         let container = modelContext.container
         spotlightRefreshTask = Task {
@@ -1857,5 +1867,28 @@ private struct RequestedMoveDetailView: View {
             move = try? modelContext.fetch(query).first
             didLoad = true
         }
+    }
+}
+
+/// Location batches do not need a full place-index read. Unknown notification
+/// payloads fail open so older OS versions still refresh renamed/deleted places.
+enum SpotlightRefreshPolicy {
+    static func requiresRefresh(_ notification: Notification) -> Bool {
+        let keys: [ModelContext.NotificationKey] = [.insertedIdentifiers, .updatedIdentifiers, .deletedIdentifiers]
+        guard let info = notification.userInfo else { return true }
+        if let invalidated = info[ModelContext.NotificationKey.invalidatedAllIdentifiers]
+            ?? info[ModelContext.NotificationKey.invalidatedAllIdentifiers.rawValue],
+           (invalidated as? Bool) != false { return true }
+        var understood = false
+        for key in keys {
+            guard let payload = info[key] ?? info[key.rawValue] else { continue }
+            let identifiers: [PersistentIdentifier]
+            if let values = payload as? [PersistentIdentifier] { identifiers = values }
+            else if let values = payload as? Set<PersistentIdentifier> { identifiers = Array(values) }
+            else { return true }
+            understood = true
+            if identifiers.contains(where: { $0.entityName == "VisitPlace" || $0.entityName == "KnownPlace" }) { return true }
+        }
+        return !understood
     }
 }

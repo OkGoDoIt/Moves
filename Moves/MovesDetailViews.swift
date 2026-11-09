@@ -1234,7 +1234,9 @@ struct RecordedLocationsView: View {
                                 }
                             }.font(.caption).foregroundStyle(.secondary)
                         }.foregroundStyle(.primary)
-                    }.listRowBackground(fix.id == selected ? MovesPalette.routeTracking.opacity(0.12) : Color.clear)
+                    }
+                    .buttonStyle(.plain)
+                    .listRowBackground(fix.id == selected ? MovesPalette.routeTracking.opacity(0.12) : Color.clear)
                 }
                 HStack {
                     Button("Previous") { offset = max(0, offset - pageSize) }.disabled(offset == 0)
