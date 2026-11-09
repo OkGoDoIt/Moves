@@ -251,14 +251,10 @@ struct TransportModePickerSheet: View {
     let move: MoveSegment
     var editController: TimelineEditController
 
-    private let modes: [TransportMode] = [
-        .walking, .running, .cycling, .automotive, .train, .plane, .boat, .swimming, .unknown,
-    ]
-
     var body: some View {
         NavigationStack {
             List {
-                ForEach(modes, id: \.self) { mode in
+                ForEach(TransportMode.correctionChoices, id: \.self) { mode in
                     Button {
                         editController.setTransportMode(mode, for: move)
                         dismiss()

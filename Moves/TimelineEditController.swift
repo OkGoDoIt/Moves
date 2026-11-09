@@ -121,9 +121,13 @@ final class TimelineEditController: TimelineItemActions {
     }
 
     func setTransportMode(_ mode: TransportMode, for move: MoveSegment) {
-        performProperty(named: String(localized: "Changed mode")) { repo in
+        // Restored from a payload: the map rematches this move right away, and that cache
+        // write would otherwise leave SwiftData's own undo unable to bring the mode back.
+        let payload = TimelineModeChangePayload(move: move)
+        performStructural(named: String(localized: "Changed mode")) { repo, context in
             try repo.setTransportMode(mode, for: move, source: .user)
             move.reviewState = .confirmed
+            registerRestore(payload, on: context)
         }
     }
 
@@ -551,6 +555,28 @@ private enum LiveTimelineRows {
         guard !identifiers.isEmpty else { return [] }
         return ((try? context.fetch(FetchDescriptor<PhotoAttachment>())) ?? [])
             .filter { identifiers.contains($0.assetLocalIdentifier) }
+    }
+}
+
+private struct TimelineModeChangePayload: TimelineUndoRestoring {
+    let id: UUID
+    let mode: TransportMode
+    let source: TransportModeSource
+    let reviewState: ReviewState
+
+    init(move: MoveSegment) {
+        id = move.id
+        mode = move.transportMode
+        source = move.transportModeSource
+        reviewState = move.reviewState
+    }
+
+    func restore(in context: ModelContext) {
+        guard let move = LiveTimelineRows.move(id, in: context) else { return }
+        move.transportMode = mode
+        move.transportModeSource = source
+        move.reviewState = reviewState
+        move.clearCachedRouteCoordinates()
     }
 }
 

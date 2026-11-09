@@ -526,6 +526,33 @@ final class TimelineEditingTests: XCTestCase {
         XCTAssertEqual(move.transportMode, .automotive)
     }
 
+    /// The map rematches a corrected move right away, and that cache write must not
+    /// cost the person their Undo.
+    func testUndoRestoresModeAfterTheMapRematchesTheMove() throws {
+        let (_, context, _) = try makeRepository()
+        let start = insertPlace(in: context, arrival: date(8, 0), departure: date(8, 10), latitude: 52.5, longitude: 13.4)
+        let end = insertPlace(in: context, arrival: date(8, 40), departure: date(9, 0), latitude: 52.54, longitude: 13.44)
+        let move = insertMove(in: context, from: start, to: end, start: date(8, 10), end: date(8, 40), mode: .cycling, distance: 4_000)
+        try context.save()
+        let (controller, undoController) = makeEditController(for: context)
+
+        grouped(undoController) {
+            controller.setTransportMode(.automotive, for: move)
+        }
+        XCTAssertEqual(move.transportMode, .automotive)
+        XCTAssertEqual(move.transportModeSource, .user)
+        XCTAssertEqual(move.reviewState, .confirmed)
+
+        move.writeDerivedRouteData {
+            move.storeCachedRouteCoordinates([start.coordinate, end.coordinate], signature: "matched")
+        }
+        controller.undoLastChange()
+
+        XCTAssertEqual(move.transportMode, .cycling)
+        XCTAssertEqual(move.transportModeSource, .auto)
+        XCTAssertEqual(move.reviewState, ReviewState.none)
+    }
+
     func testSchemaUpgraderClustersLabeledVisitsIdempotently() throws {
         let (_, context, _) = try makeRepository()
         let first = insertPlace(

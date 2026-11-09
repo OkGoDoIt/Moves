@@ -357,6 +357,8 @@ struct DayTimelinePageContent: View {
         }
         .onChange(of: transportSummaryRefreshKey) { _, _ in
             presentationCache = Self.makePresentationCache(for: dayTimeline)
+            // A corrected move can remove the last of a mode, and its chip with it.
+            filteredModes.formIntersection(presentationCache.activityBubbleMetrics.map(\.mode))
         }
         .onChange(of: photoStripRefreshKey) { _, _ in
             presentationCache = Self.makePresentationCache(for: dayTimeline)
@@ -1126,6 +1128,17 @@ struct DayMapStrip: View {
             .onChange(of: dayTimeline.dayKey) { _, _ in
                 presentationCache = Self.makePresentationCache(for: dayTimeline)
             }
+            .onChange(of: moveModesKey) { _, _ in
+                presentationCache = Self.makePresentationCache(for: dayTimeline)
+            }
+    }
+
+    /// Changes when a move's mode is corrected, so the map redraws it in the new color.
+    private var moveModesKey: String {
+        dayTimeline.moves
+            .map { "\($0.id.uuidString)|\($0.transportModeRawValue)" }
+            .sorted()
+            .joined(separator: ",")
     }
 
     @ViewBuilder
@@ -1344,7 +1357,7 @@ struct DayMapStrip: View {
             let firstKey = first.map { "\(Int(($0.latitude * 10_000).rounded())):\(Int(($0.longitude * 10_000).rounded()))" } ?? "none"
             let lastKey = last.map { "\(Int(($0.latitude * 10_000).rounded())):\(Int(($0.longitude * 10_000).rounded()))" } ?? "none"
 
-            return "\(route.id)|\(route.coordinates.count)|\(route.shadowCoordinates.count)|\(firstKey)|\(lastKey)"
+            return "\(route.id)|\(route.transportMode.rawValue)|\(route.coordinates.count)|\(route.shadowCoordinates.count)|\(firstKey)|\(lastKey)"
         }
         .joined(separator: ",")
     }
@@ -2067,6 +2080,7 @@ private struct StorylineRail: View {
 
 private struct StorylineRowBody: View {
     let entry: TimelineEntry
+    @Environment(\.timelineItemActions) private var actions
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -2095,9 +2109,18 @@ private struct StorylineRowBody: View {
                 }
             }
 
-            Text(entry.subtitleText)
-                .font(.system(size: 12, weight: .medium, design: .rounded))
-                .foregroundStyle(Color.primary.opacity(0.68))
+            if case .move(let segment) = entry, let actions {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    TransportModeMenu(move: segment, actions: actions)
+                    Text(entry.moveDetailsText)
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .foregroundStyle(Color.primary.opacity(0.68))
+                }
+            } else {
+                Text(entry.subtitleText)
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(Color.primary.opacity(0.68))
+            }
 
             if let tertiary = entry.tertiaryText {
                 Text(tertiary)
@@ -2338,17 +2361,7 @@ enum TimelineEntry: Identifiable {
             return String(localized: "Stayed \(DurationFormatter.text(for: departure.timeIntervalSince(place.arrivalDate)))")
 
         case .move(let segment):
-            let duration = DurationFormatter.text(for: segment.timelineDuration)
-            let distance = Measurement(value: max(segment.distanceMeters, 0), unit: UnitLength.meters)
-                .formatted(.measurement(width: .abbreviated, usage: .road))
-            var details = [segment.transportMode.title, duration, distance]
-            if segment.usesHealthWorkoutRoute {
-                details.append(String(localized: "Apple Health"))
-            }
-            if segment.routeMatchConfidence == .estimated {
-                details.append(String(localized: "Estimated"))
-            }
-            return details.joined(separator: "   ")
+            return "\(segment.transportMode.title)   \(moveDetailsText)"
         case .liveRoute(let snapshot):
             let duration = DurationFormatter.text(for: snapshot.duration)
             let distance = Measurement(value: max(snapshot.distanceMeters, 0), unit: UnitLength.meters)
@@ -2364,6 +2377,22 @@ enum TimelineEntry: Identifiable {
         case .hiddenStops:
             return ""
         }
+    }
+
+    /// A move's time, distance, and route notes, without its mode.
+    var moveDetailsText: String {
+        guard case .move(let segment) = self else { return "" }
+        let duration = DurationFormatter.text(for: segment.timelineDuration)
+        let distance = Measurement(value: max(segment.distanceMeters, 0), unit: UnitLength.meters)
+            .formatted(.measurement(width: .abbreviated, usage: .road))
+        var details = [duration, distance]
+        if segment.usesHealthWorkoutRoute {
+            details.append(String(localized: "Apple Health"))
+        }
+        if segment.routeMatchConfidence == .estimated {
+            details.append(String(localized: "Estimated"))
+        }
+        return details.joined(separator: "   ")
     }
 
     var tertiaryText: String? {

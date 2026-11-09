@@ -265,6 +265,7 @@ struct ActivityBubblesView: View {
         let duration = DurationFormatter.text(for: metric.duration)
         let distance = Measurement(value: max(metric.distanceMeters, 0), unit: UnitLength.meters)
             .formatted(.measurement(width: .abbreviated, usage: .road))
+        let hasDistance = metric.distanceMeters >= 1
 
         return Button {
             withAnimation(.snappy(duration: 0.22)) {
@@ -275,22 +276,22 @@ struct ActivityBubblesView: View {
                 }
             }
         } label: {
-            HStack(spacing: 6) {
+            HStack(spacing: 7) {
                 Image(systemName: metric.symbolName)
-                    .font(.system(size: 12, weight: .semibold))
-                Text("\(metric.chipTitle) \(duration)")
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    .lineLimit(1)
-                if isSelected {
-                    Text(distance)
-                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .font(.system(size: 13, weight: .semibold))
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(hasDistance ? distance : duration)
+                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                    Text(hasDistance ? "\(metric.chipTitle) · \(duration)" : metric.chipTitle)
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
                         .opacity(0.85)
-                        .lineLimit(1)
                 }
+                .lineLimit(1)
             }
             .foregroundStyle(isSelected ? Color.white : metric.tint)
-            .padding(.horizontal, 11)
-            .padding(.vertical, 7)
+            .padding(.leading, 11)
+            .padding(.trailing, 14)
+            .frame(height: ActivityChipSizing.rowHeight - 2)
             .background {
                 Capsule()
                     .fill(isSelected ? metric.tint : metric.tint.opacity(0.12))

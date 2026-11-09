@@ -155,7 +155,7 @@ struct TimelineMoveContextMenu: View {
 
     var body: some View {
         Menu(String(localized: "Change mode"), systemImage: "figure.walk") {
-            ForEach(Self.selectableModes, id: \.self) { mode in
+            ForEach(TransportMode.correctionChoices, id: \.self) { mode in
                 Button {
                     actions.setTransportMode(mode, for: move)
                 } label: {
@@ -181,8 +181,58 @@ struct TimelineMoveContextMenu: View {
             actions.requestDeleteMove(move)
         }
     }
+}
 
-    private static let selectableModes: [TransportMode] = [
+extension TransportMode {
+    /// The modes a person can pick when correcting a move, in menu order.
+    static let correctionChoices: [TransportMode] = [
         .walking, .running, .cycling, .automotive, .train, .plane, .boat, .swimming, .unknown,
     ]
+}
+
+/// The mode shown on a move row. Tapping it opens the list of modes, so a wrong
+/// guess is fixed from the row itself.
+struct TransportModeMenu: View {
+    let move: MoveSegment
+    let actions: any TimelineItemActions
+
+    private var selection: Binding<TransportMode> {
+        Binding(
+            get: { move.transportMode },
+            set: { mode in
+                guard mode != move.transportMode else { return }
+                actions.setTransportMode(mode, for: move)
+            }
+        )
+    }
+
+    var body: some View {
+        let tint = MovesPalette.transport(move.transportMode)
+
+        Menu {
+            Picker(String(localized: "Mode"), selection: selection) {
+                ForEach(TransportMode.correctionChoices, id: \.self) { mode in
+                    Label(mode.title, systemImage: mode.symbolName)
+                        .tag(mode)
+                }
+            }
+        } label: {
+            HStack(spacing: 3) {
+                Text(move.transportMode.title)
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+            }
+            .foregroundStyle(tint)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(tint.opacity(0.14)))
+            // A taller touch target that doesn't change the row's height.
+            .padding(.vertical, 10)
+            .contentShape(Rectangle())
+            .padding(.vertical, -10)
+        }
+        .menuOrder(.fixed)
+        .buttonStyle(.plain)
+    }
 }
