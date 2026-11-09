@@ -153,11 +153,20 @@ protocol TimelineAssembler {
 final class CoreMotionTransportClassifier: MotionClassifier {
     private let activityManager = CMMotionActivityManager()
     private let pedometer = CMPedometer()
+    private let defaults: UserDefaults
     private static let minimumDistanceForNonStationaryOverride: CLLocationDistance = 450
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    private func restrict(_ mode: TransportMode, confidence: Double, locations: [CLLocation]) -> (mode: TransportMode, confidence: Double) {
+        AutomaticTransportModes.load(from: defaults).restrict(mode: mode, confidence: confidence, locations: locations)
+    }
 
     func classifyTransport(start: Date, end: Date, locations: [CLLocation]) async -> (mode: TransportMode, confidence: Double) {
         guard end > start else { return (.stationary, 0.25) }
-        let fallback = Self.inferredMode(from: locations)
+        let fallback = Self.inferredMode(from: locations, preferences: AutomaticTransportModes.load(from: defaults))
 
         if CMMotionActivityManager.isActivityAvailable(),
            let activities = await queryActivities(from: start, to: end),
@@ -171,8 +180,8 @@ final class CoreMotionTransportClassifier: MotionClassifier {
             )
 
             if let best = scores.max(by: { $0.value < $1.value }) {
-                let corrected = correctedModeIfNeeded(best.key, fallback: fallback, locations: locations)
-                let refined = refinedLongDistanceMode(for: corrected, fallback: fallback, locations: locations)
+                let corrected = correctedModeIfNeeded(best.key, locations: locations)
+                let refined = refinedLongDistanceMode(for: corrected, locations: locations)
                 let mode = Self.rejectingImplausibleContinuousTrip(
                     refined,
                     duration: end.timeIntervalSince(start),
@@ -180,17 +189,18 @@ final class CoreMotionTransportClassifier: MotionClassifier {
                 )
                 let total = max(scores.values.reduce(0, +), 1)
                 let dominance = Double(best.value) / Double(total)
-                let motionConfidence = 0.35 + 0.6 * dominance
+                let coverageAndQuality = min(1, Double(best.value) / max(end.timeIntervalSince(start) * 3, 1))
+                let motionConfidence = 0.35 + 0.6 * min(dominance, coverageAndQuality)
                 let speedConfidence = Self.speedBasedConfidence(mode: mode, locations: locations)
                 let confidence = mode == best.key
                     ? max(motionConfidence, speedConfidence * 0.5)
-                    : min(motionConfidence, speedConfidence)
-                return (mode, min(max(confidence, 0), 1))
+                    : min(0.59, min(motionConfidence, speedConfidence))
+                return restrict(mode, confidence: min(max(confidence, 0), 1), locations: locations)
             }
         }
 
-        let corrected = correctedModeIfNeeded(fallback, fallback: fallback, locations: locations)
-        let refined = refinedLongDistanceMode(for: corrected, fallback: fallback, locations: locations)
+        let corrected = correctedModeIfNeeded(fallback, locations: locations)
+        let refined = refinedLongDistanceMode(for: corrected, locations: locations)
         let mode = Self.rejectingImplausibleContinuousTrip(
             refined,
             duration: end.timeIntervalSince(start),
@@ -203,7 +213,9 @@ final class CoreMotionTransportClassifier: MotionClassifier {
         if locations.count < 3 {
             confidence *= 0.9
         }
-        return (mode, min(max(confidence, 0), 1))
+        // Speed alone leaves overlapping modes ambiguous even in the middle of
+        // a speed bucket. Do not present that bucket's center as 95% certainty.
+        return restrict(mode, confidence: min(max(confidence, 0), 0.59), locations: locations)
     }
 
     func approachWasAutomotive(before date: Date) async -> Bool {
@@ -247,6 +259,7 @@ final class CoreMotionTransportClassifier: MotionClassifier {
     /// 0…1 certainty that `mode` matches the observed speeds. Highest at the
     /// centre of the mode's speed bucket, lowest at the boundaries.
     static func speedBasedConfidence(mode: TransportMode, locations: [CLLocation]) -> Double {
+        guard TransportSpeedEvidence(locations: locations).hasSustainedCoverage else { return 0.25 }
         let speed = averageSpeed(for: locations)
         guard let range = speedRange(for: mode) else { return 0.5 }
         let width = max(range.upper - range.lower, 0.1)
@@ -347,90 +360,31 @@ final class CoreMotionTransportClassifier: MotionClassifier {
     }
 
     /// Speed buckets shared with Live Activity tinting.
-    static func inferredMode(from locations: [CLLocation]) -> TransportMode {
-        let validSpeeds = locations.map(\.speed).filter { $0 >= 0 }
+    static func inferredMode(
+        from locations: [CLLocation],
+        preferences: AutomaticTransportModes = .load()
+    ) -> TransportMode {
+        preferences.allowedMode(speedInferredMode(from: locations))
+    }
 
-        let averageSpeed: CLLocationSpeed
-        if validSpeeds.isEmpty {
-            guard
-                let first = locations.first,
-                let last = locations.last,
-                last.timestamp > first.timestamp
-            else {
-                return .unknown
-            }
-
-            let distance = first.distance(from: last)
-            averageSpeed = distance / last.timestamp.timeIntervalSince(first.timestamp)
-        } else {
-            averageSpeed = validSpeeds.reduce(0, +) / Double(validSpeeds.count)
-        }
-
-        switch averageSpeed {
-        case ..<0.7:
-            return .stationary
-        case ..<2.0:
-            return .walking
-        case ..<4.5:
-            return .running
-        case ..<9.0:
-            return .cycling
-        case ..<32:
-            return .automotive
-        case ..<75:
-            return .train
-        default:
-            return .plane
-        }
+    private static func speedInferredMode(from locations: [CLLocation]) -> TransportMode {
+        TransportSpeedEvidence(locations: locations).inferredMode
     }
 
     private func correctedModeIfNeeded(
         _ candidate: TransportMode,
-        fallback: TransportMode,
         locations: [CLLocation]
     ) -> TransportMode {
         guard candidate == .stationary else { return candidate }
-
-        let traveledDistance = Self.totalDistance(for: locations)
-        guard traveledDistance >= Self.minimumDistanceForNonStationaryOverride else {
-            return candidate
-        }
-
-        if fallback != .stationary && fallback != .unknown {
-            return fallback
-        }
-
-        let maxObservedSpeed = locations
-            .map(\.speed)
-            .filter { $0 >= 0 }
-            .max() ?? -1
-
-        switch maxObservedSpeed {
-        case 9...:
-            return .automotive
-        case 4.5...:
-            return .cycling
-        case 2.0...:
-            return .running
-        case 0.8...:
-            return .walking
-        default:
-            break
-        }
-
-        let directDistance = Self.straightLineDistance(for: locations)
-        if directDistance >= 1_500 {
-            return .automotive
-        }
-        if directDistance >= 500 {
-            return .cycling
-        }
-        return .walking
+        let evidence = TransportSpeedEvidence(locations: locations)
+        let inferred = evidence.inferredMode
+        guard evidence.hasSustainedCoverage, evidence.directLowerDistance >= Self.minimumDistanceForNonStationaryOverride,
+              inferred != .unknown, inferred != .stationary else { return candidate }
+        return inferred
     }
 
     private func refinedLongDistanceMode(
         for candidate: TransportMode,
-        fallback: TransportMode,
         locations: [CLLocation]
     ) -> TransportMode {
         switch candidate {
@@ -440,57 +394,13 @@ final class CoreMotionTransportClassifier: MotionClassifier {
             break
         }
 
-        let directDistance = Self.straightLineDistance(for: locations)
-        let averageSpeed = Self.averageSpeed(for: locations)
-        let maxObservedSpeed = Self.maxObservedSpeed(for: locations)
-        let baseline = candidate == .stationary ? fallback : candidate
-
-        if maxObservedSpeed >= 80 ||
-            averageSpeed >= 55 ||
-            (directDistance >= 120_000 && averageSpeed >= 40) {
-            return .plane
-        }
-
-        if averageSpeed >= 16 &&
-            directDistance >= 18_000 &&
-            baseline != .cycling &&
-            baseline != .walking &&
-            baseline != .running {
-            return .train
-        }
-
+        // Road and rail speeds overlap; a single speed spike is not a flight.
+        if TransportSpeedEvidence(locations: locations).inferredMode == .plane { return .plane }
         return candidate
     }
 
-    private static func totalDistance(for locations: [CLLocation]) -> CLLocationDistance {
-        guard locations.count > 1 else { return 0 }
-        return zip(locations, locations.dropFirst()).reduce(0) { partialResult, pair in
-            partialResult + pair.0.distance(from: pair.1)
-        }
-    }
-
     static func averageSpeed(for locations: [CLLocation]) -> CLLocationSpeed {
-        let validSpeeds = locations.map(\.speed).filter { $0 >= 0 }
-        if !validSpeeds.isEmpty {
-            return validSpeeds.reduce(0, +) / Double(validSpeeds.count)
-        }
-
-        guard
-            let first = locations.first,
-            let last = locations.last,
-            last.timestamp > first.timestamp
-        else {
-            return 0
-        }
-
-        return first.distance(from: last) / last.timestamp.timeIntervalSince(first.timestamp)
-    }
-
-    private static func maxObservedSpeed(for locations: [CLLocation]) -> CLLocationSpeed {
-        locations
-            .map(\.speed)
-            .filter { $0 >= 0 }
-            .max() ?? 0
+        TransportSpeedEvidence(locations: locations).typicalSpeed
     }
 
     private static func straightLineDistance(for locations: [CLLocation]) -> CLLocationDistance {
@@ -549,6 +459,7 @@ final class DefaultTimelineAssembler: TimelineAssembler {
     private let repository: TimelineRepository
     private let motionClassifier: MotionClassifier
     private let placeNameResolver: PlaceNameResolver
+    private let automaticModes: () -> AutomaticTransportModes
     /// One rebuild at a time. Location callbacks and foreground refresh overlap.
     private var reconcileTask: Task<Void, Never>?
     private var reconcileAgain = false
@@ -556,11 +467,13 @@ final class DefaultTimelineAssembler: TimelineAssembler {
     init(
         repository: TimelineRepository,
         motionClassifier: MotionClassifier,
-        placeNameResolver: PlaceNameResolver
+        placeNameResolver: PlaceNameResolver,
+        automaticModes: @escaping () -> AutomaticTransportModes = { .load() }
     ) {
         self.repository = repository
         self.motionClassifier = motionClassifier
         self.placeNameResolver = placeNameResolver
+        self.automaticModes = automaticModes
     }
 
     func ingestLocations(_ locations: [CLLocation], source: LocationSampleSource) async {
@@ -712,12 +625,16 @@ final class DefaultTimelineAssembler: TimelineAssembler {
                 duration: duration,
                 stepCount: steps
             )
-            let transportMode = ImplausibleWalk.mode(
+            let proposedMode = ImplausibleWalk.refinedMode(
                 proposed: afterLastBlock,
                 straightLine: straightLine,
                 duration: duration,
-                stepCount: steps
+                stepCount: steps,
+                locations: leg.locations
             )
+            // Post-classification step/distance rules can change a mode too.
+            // Read the current preference after the motion query awaits.
+            let transportMode = automaticModes().allowedMode(proposedMode)
             let between = try repository.samples(from: leg.startDate, to: leg.endDate)
             let move = try repository.upsertMove(
                 startPlace: leg.startPlace,
@@ -729,6 +646,16 @@ final class DefaultTimelineAssembler: TimelineAssembler {
                 stepCount: steps,
                 samples: between
             )
+            // Duplicate enrichment may supply an older guessed mode. It must
+            // obey the same preference without touching a curated replacement.
+            if move.permitsAutomaticModeChanges {
+                let allowed = automaticModes().allowedMode(move.transportMode)
+                if allowed != move.transportMode {
+                    move.transportMode = allowed
+                    move.clearCachedRouteCoordinates()
+                    move.speedProfileData = nil
+                }
+            }
             // Ask only about what the rules left unsure, and never ask twice. A ride read
             // as a walk is one of those: the steps rule it out, but not which vehicle.
             let unsureOfMode = transportMode == classification.mode
@@ -855,8 +782,9 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         let repository = SwiftDataTimelineRepository(modelContainer: modelContainer)
         self.assembler = DefaultTimelineAssembler(
             repository: repository,
-            motionClassifier: CoreMotionTransportClassifier(),
-            placeNameResolver: CLGeocoderPlaceNameResolver()
+            motionClassifier: CoreMotionTransportClassifier(defaults: userDefaults),
+            placeNameResolver: CLGeocoderPlaceNameResolver(),
+            automaticModes: { .load(from: userDefaults) }
         )
 
         super.init()

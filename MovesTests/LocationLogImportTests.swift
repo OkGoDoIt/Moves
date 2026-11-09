@@ -61,7 +61,7 @@ final class LocationLogImportTests: XCTestCase {
         XCTAssertEqual(timeline.stays.first?.points.count, 5)
     }
 
-    func testClassifierUsesDistanceWeightedSpeed() {
+    func testClassifierUsesSustainedEvidenceAndLeavesOverlappingSpeedsUnknown() {
         let start = Date(timeIntervalSince1970: 1_700_000_000)
         // 5 minutes walking to the car, then 10 km in 12 minutes.
         var points = SyntheticLog.leg(from: SyntheticLog.home, bearingNorthMeters: 300, from: start, minutes: 5, stepMinutes: 1)
@@ -73,7 +73,7 @@ final class LocationLogImportTests: XCTestCase {
         XCTAssertEqual(LocationLogTransportClassifier.classify(walk), .walking)
 
         let ride = SyntheticLog.leg(from: SyntheticLog.home, bearingNorthMeters: 6_000, from: start, minutes: 22, stepMinutes: 2)
-        XCTAssertEqual(LocationLogTransportClassifier.classify(ride), .cycling)
+        XCTAssertEqual(LocationLogTransportClassifier.classify(ride), .unknown)
 
         let flight = [
             SyntheticLog.point(SyntheticLog.home, at: start),
@@ -123,7 +123,9 @@ final class LocationLogImportTests: XCTestCase {
         for move in result.moves {
             XCTAssertGreaterThanOrEqual(move.points.count, 2)
             XCTAssertGreaterThan(move.endDate, move.startDate)
-            if move.transportMode != .plane {
+            // A long recording gap can legitimately remain unknown. It must
+            // never become a continent-scale walk or ordinary drive.
+            if move.transportMode != .plane && move.transportMode != .unknown {
                 XCTAssertLessThan(move.distanceMeters, 600_000, "\(move.startDate) \(move.transportMode)")
             }
         }
@@ -138,11 +140,8 @@ final class LocationLogImportTests: XCTestCase {
         XCTAssertTrue(modes.contains(.walking))
         XCTAssertTrue(modes.contains(.automotive))
         XCTAssertTrue(modes.contains(.plane), "the log ends in Saigon, so a trans-Pacific flight must exist")
-        XCTAssertLessThan(
-            Double(result.moves.filter { $0.transportMode == .unknown }.count) / Double(result.moves.count),
-            0.1,
-            "almost every trip should get a transport mode"
-        )
+        XCTAssertTrue(modes.isDisjoint(with: [.cycling, .running, .train]),
+                      "An unlabeled GPS log cannot distinguish these modes from speed alone.")
 
         // Home should be the dominant overnight stay.
         let home = CLLocationCoordinate2D(latitude: 37.749247, longitude: -122.460294)

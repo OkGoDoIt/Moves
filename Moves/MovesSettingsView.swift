@@ -50,6 +50,8 @@ struct MovesSettingsView: View {
     /// Screenshot flag `MOVES_OPEN_WEBHOOK=1` pushes the webhook destination.
     @State private var isShowingWebhookScreenshot =
         ProcessInfo.processInfo.environment["MOVES_OPEN_WEBHOOK"] == "1"
+    @State private var isShowingAutomaticModesScreenshot =
+        ProcessInfo.processInfo.environment["MOVES_OPEN_AUTOMATIC_MODES"] == "1"
 
     init(
         dayTimelines: [DayTimeline],
@@ -188,6 +190,15 @@ struct MovesSettingsView: View {
                     }
 
                     AppIconPickerSection()
+
+                    SettingsCard(title: "Travel modes") {
+                        NavigationLink {
+                            AutomaticModesSettingsView()
+                        } label: {
+                            SettingsNavigationRow(title: "Automatic modes", systemImage: "figure.walk", status: nil)
+                        }
+                        .buttonStyle(.plain)
+                    }
 
                     ICloudSettingsCard(publisher: cloudDataPresencePublisher) {
                         withAnimation(.easeInOut(duration: 0.25)) {
@@ -417,6 +428,9 @@ struct MovesSettingsView: View {
             .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(isPresented: $isShowingWebhookScreenshot) {
                 WebhookSettingsView()
+            }
+            .navigationDestination(isPresented: $isShowingAutomaticModesScreenshot) {
+                AutomaticModesSettingsView()
             }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {

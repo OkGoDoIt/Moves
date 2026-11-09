@@ -1562,7 +1562,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             guard let start = move.startPlace?.coordinate, let end = move.endPlace?.coordinate else { continue }
             let straightLine = Self.distanceMeters(from: start, to: end)
             let duration = move.endDate.timeIntervalSince(move.startDate)
-            let mode = ImplausibleWalk.mode(
+            let proposedMode = ImplausibleWalk.refinedMode(
                 proposed: LastBlockWalk.mode(
                     proposed: move.transportMode,
                     distance: straightLine,
@@ -1571,8 +1571,13 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                 ),
                 straightLine: straightLine,
                 duration: duration,
-                stepCount: move.stepCount
+                stepCount: move.stepCount,
+                locations: move.samples.map(\.asLocation)
             )
+            // A preference change alone is not permission to rewrite old labels.
+            // Only constrain a new guess this repair would already have made.
+            guard proposedMode != move.transportMode else { continue }
+            let mode = AutomaticTransportModes.load().allowedMode(proposedMode)
             if mode != move.transportMode {
                 move.transportMode = mode
                 move.clearCachedRouteCoordinates()
@@ -2451,22 +2456,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
     /// A correction, an import, a comment, a hand-drawn route, a Health workout, or a
     /// reviewed trip is the person's account of it. Automatic repair must leave it alone.
     private func isUserCurated(_ move: MoveSegment) -> Bool {
-        // `.recorded` is not on this list: the schema upgrader sets it on any trip with
-        // route fixes, so it says nothing about what the person chose.
-        if move.transportModeSource != .auto || move.origin != .sensor
-            || move.routeMatchPolicy == .manual || move.routeMatchPolicy == .roads {
-            return true
-        }
-        if move.reviewState == .confirmed || move.reviewState == .dismissed {
-            return true
-        }
-        if let comment = move.comment?.trimmingCharacters(in: .whitespacesAndNewlines), !comment.isEmpty {
-            return true
-        }
-        if move.manualRouteCoordinatesData != nil {
-            return true
-        }
-        return move.samples.contains { $0.source == .healthWorkoutRoute }
+        !move.permitsAutomaticModeChanges
     }
 
     private static let stayMatchDistance: CLLocationDistance = 120
@@ -3076,7 +3066,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             }
             move = existing
             move.dedupeKey = dedupeKey
-            if move.transportModeSource == .auto {
+            if move.permitsAutomaticModeChanges {
                 move.transportMode = transportMode
             }
             move.distanceMeters = distanceMeters

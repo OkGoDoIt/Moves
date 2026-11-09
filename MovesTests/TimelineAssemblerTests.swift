@@ -714,7 +714,7 @@ final class TimelineAssemblerTests: XCTestCase {
         XCTAssertLessThanOrEqual(result.confidence, 1)
     }
 
-    func testClassifierInfersTrainFromHigherSustainedSpeed() async {
+    func testHigherSpeedAcrossSparseFixesDoesNotIdentifyATrain() async {
         let classifier = CoreMotionTransportClassifier()
 
         let start = Date(timeIntervalSince1970: 1_710_000_000)
@@ -727,7 +727,7 @@ final class TimelineAssemblerTests: XCTestCase {
         ]
 
         let result = await classifier.classifyTransport(start: start, end: end, locations: locations)
-        XCTAssertEqual(result.mode, .train)
+        XCTAssertEqual(result.mode, .unknown)
     }
 
     func testClassifierInfersPlaneFromVeryHighSpeed() async {
@@ -767,10 +767,12 @@ final class TimelineAssemblerTests: XCTestCase {
         let center = [
             makeLocation(latitude: 52.52, longitude: 13.405, speed: 1.35, timestamp: start),
             makeLocation(latitude: 52.521, longitude: 13.406, speed: 1.35, timestamp: start.addingTimeInterval(60)),
+            makeLocation(latitude: 52.522, longitude: 13.407, speed: 1.35, timestamp: start.addingTimeInterval(120)),
         ]
         let edge = [
             makeLocation(latitude: 52.52, longitude: 13.405, speed: 1.95, timestamp: start),
             makeLocation(latitude: 52.521, longitude: 13.406, speed: 1.95, timestamp: start.addingTimeInterval(60)),
+            makeLocation(latitude: 52.522, longitude: 13.407, speed: 1.95, timestamp: start.addingTimeInterval(120)),
         ]
 
         let centerConfidence = CoreMotionTransportClassifier.speedBasedConfidence(mode: .walking, locations: center)

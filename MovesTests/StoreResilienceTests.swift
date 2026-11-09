@@ -8,6 +8,49 @@ import XCTest
 /// reader racing the reconciler, and a schema change opening existing history.
 @MainActor
 final class StoreResilienceTests: XCTestCase {
+    func testAutomaticModeCleanupAndUndoPreserveRealStore() throws {
+        let backup = try Self.latestDeviceBackup()
+        let directory = try makeTemporaryDirectory()
+        let storeURL = directory.appendingPathComponent("default.store")
+        for suffix in ["", "-wal", "-shm"] {
+            let source = URL(fileURLWithPath: backup.path + suffix)
+            guard FileManager.default.fileExists(atPath: source.path) else { continue }
+            let target = URL(fileURLWithPath: storeURL.path + suffix)
+            try FileManager.default.copyItem(at: source, to: target)
+            try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: target.path)
+        }
+        let container = try makeContainer(storeURL: storeURL)
+        let context = ModelContext(container)
+        let moves = try context.fetch(FetchDescriptor<MoveSegment>())
+        let originalModes = Dictionary(uniqueKeysWithValues: moves.map { ($0.id, $0.transportMode) })
+        let originalReviews = Dictionary(uniqueKeysWithValues: moves.map { ($0.id, $0.reviewState) })
+        let before = try Self.rowCounts(in: storeURL)
+        let history = AutomaticModeHistory(undoURL: directory.appendingPathComponent("undo.json"))
+        let preferences = AutomaticTransportModes(disabled: [.cycling])
+        let eligible = try history.candidates(in: context, preferences: preferences).count
+        let report = try history.recheck(in: context, preferences: preferences)
+        let reclassified = moves.filter { originalModes[$0.id] == .cycling && $0.transportMode != .cycling }
+        let histogram = Dictionary(grouping: reclassified, by: { $0.transportMode.rawValue }).mapValues(\.count)
+        print("Rechecked cycling mode counts (backup copy only): \(histogram)")
+        let formatter = ISO8601DateFormatter()
+        let knownStart = formatter.date(from: "2026-09-09T00:00:00Z")!
+        let knownEnd = formatter.date(from: "2026-11-10T00:00:00Z")!
+        let recent = reclassified.filter { $0.startDate >= knownStart && $0.startDate < knownEnd }
+        print("Recent false cycling replacements (unverified guesses): \(Dictionary(grouping: recent, by: { $0.transportMode.rawValue }).mapValues(\.count))")
+        XCTAssertEqual(report.changed, eligible)
+        XCTAssertEqual(try history.candidates(in: context, preferences: preferences).count, 0)
+        let after = try Self.rowCounts(in: storeURL)
+        XCTAssertEqual(after.days, before.days)
+        XCTAssertEqual(after.visits, before.visits)
+        XCTAssertEqual(after.moves, before.moves)
+        XCTAssertEqual(after.samples, before.samples)
+        if eligible > 0 { XCTAssertEqual(try history.undo(in: context), eligible) }
+        let restored = try context.fetch(FetchDescriptor<MoveSegment>())
+        XCTAssertEqual(Dictionary(uniqueKeysWithValues: restored.map { ($0.id, $0.transportMode) }), originalModes)
+        XCTAssertEqual(Dictionary(uniqueKeysWithValues: restored.map { ($0.id, $0.reviewState) }), originalReviews)
+        print("Automatic mode cleanup on backup copy: \(eligible) eligible trips, all restored; row counts unchanged.")
+    }
+
     /// 26 field crashes: `MoveSegment.id` aborted inside `ShareMapAggregateBuilder`
     /// because another context deleted the row while the builder walked `day.moves`.
     func testMapCacheRefreshSurvivesMovesBeingDeletedUnderIt() async throws {

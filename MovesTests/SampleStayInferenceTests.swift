@@ -90,11 +90,11 @@ final class SampleStayInferenceTests: XCTestCase {
         XCTAssertEqual(stays.count, 1)
     }
 
-    func testRideReadAsAWalkIsRelabeledByItsSteps() {
-        // 7 km in 24 minutes with 600 steps: a motorbike in traffic.
+    func testFewStepsDoNotIdentifyABicycle() {
+        // Too fast for this walk, but neither speed nor missing steps identifies a bike.
         XCTAssertEqual(
             ImplausibleWalk.mode(proposed: .walking, straightLine: 7_100, duration: 24 * 60, stepCount: 600),
-            .cycling
+            .unknown
         )
         XCTAssertEqual(
             ImplausibleWalk.mode(proposed: .walking, straightLine: 20_000, duration: 25 * 60, stepCount: 200),
@@ -102,10 +102,10 @@ final class SampleStayInferenceTests: XCTestCase {
         )
     }
 
-    func testLongFastRideIsNotABikeRide() {
+    func testDistanceAloneDoesNotOverrideCyclingMotion() {
         XCTAssertEqual(
             ImplausibleWalk.mode(proposed: .cycling, straightLine: 64_000, duration: 146 * 60, stepCount: nil),
-            .automotive
+            .cycling
         )
         // A real long ride at a cyclist's pace keeps its label.
         XCTAssertEqual(
@@ -688,19 +688,41 @@ final class SampleStayReconciliationTests: XCTestCase {
         }
     }
 
+    func testDisabledModesStayDisabledAfterStepAndDistanceCorrections() async throws {
+        let ride = try await makeTwoStopScene(
+            separation: 3_600, tripMinutes: 12, steps: 40, mode: .walking,
+            automaticModes: { .init(disabled: [.cycling]) }
+        )
+        let rideMoves = try ride.fetchMoves()
+        XCTAssertFalse(rideMoves.isEmpty)
+        XCTAssertTrue(rideMoves.allSatisfy { $0.transportMode != .cycling })
+        await ride.assembler.reconcileSampleStays()
+        XCTAssertTrue(try ride.fetchMoves().allSatisfy { $0.transportMode != .cycling })
+
+        let lastBlock = try await makeTwoStopScene(
+            separation: 200, tripMinutes: 8, steps: 100,
+            automaticModes: { .init(disabled: [.walking]) }
+        )
+        XCTAssertFalse(try lastBlock.fetchMoves().isEmpty)
+        XCTAssertTrue(try lastBlock.fetchMoves().allSatisfy { $0.transportMode != .walking })
+    }
+
     private func makeTwoStopScene(
         separation: Double,
         tripMinutes: Double,
         steps: Int = 40,
-        confidence: Double = 0.9
+        confidence: Double = 0.9,
+        mode: TransportMode = .automotive,
+        automaticModes: @escaping () -> AutomaticTransportModes = { .init() }
     ) async throws -> TwoStopScene {
         let container = try makeContainer()
         let context = ModelContext(container)
         let repository = SwiftDataTimelineRepository(modelContext: context)
         let assembler = DefaultTimelineAssembler(
             repository: repository,
-            motionClassifier: FixedMotionClassifier(mode: .automotive, steps: steps, confidence: confidence),
-            placeNameResolver: EmptyPlaceNameResolver()
+            motionClassifier: FixedMotionClassifier(mode: mode, steps: steps, confidence: confidence),
+            placeNameResolver: EmptyPlaceNameResolver(),
+            automaticModes: automaticModes
         )
         let start = Date().addingTimeInterval(-8 * 60 * 60)
         let home = CLLocationCoordinate2D(latitude: 10.76, longitude: 106.70)

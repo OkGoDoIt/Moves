@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Moves · Automatic modes</title>
+<style>
+/* Matched to SettingsCard / PanelSurfaceModifier: 14 pt radius, 12 pt
+   padding, 10 pt content spacing, rounded system type. Colors from Moves assets. */
+:root { color-scheme: light; --accent:#34c759; --bg:#f2f2f7; --card:rgba(255,255,255,.92); --border:#c6c6c873; --muted:#737378; --cycling:#2e85f0; }
+* { box-sizing:border-box } body { margin:0; background:#e9e9ed; color:#171719; font:17px -apple-system,BlinkMacSystemFont,sans-serif; }
+main { max-width:1100px; margin:auto; padding:28px 24px 40px }
+h1 { font-size:27px; margin:0 0 8px; letter-spacing:-.7px } .intro { color:#595961; margin:0 0 24px; line-height:1.5; font-size:15px }
+.options { display:grid; grid-template-columns:1fr 1fr; gap:36px } h2 { font-size:19px; margin:0 0 7px } .caption { font-size:14px; line-height:1.4; margin:0 0 16px; color:#595961; max-width:395px; min-height:40px }
+.phone { background:var(--bg); border:1px solid #ceced2; border-radius:32px; max-width:400px; height:720px; overflow:auto; box-shadow:0 8px 28px #00000008; scrollbar-width:thin; }
+.status { height:42px; display:flex; align-items:center; justify-content:space-between; padding:0 26px; font-size:13px; font-weight:650 }
+nav { display:flex; align-items:center; gap:12px; height:46px; padding:0 16px; position:sticky; top:0; background:#f2f2f7f5; z-index:1 }
+nav strong { font-size:17px } button { font:inherit; cursor:pointer; -webkit-tap-highlight-color:transparent } button:focus-visible, input:focus-visible { outline:3px solid #2e85f0; outline-offset:4px }
+.back { border:0; padding:0; background:none; font-size:28px; color:#258f41; width:28px; height:44px }
+.screen { padding:14px 16px 24px; font-family:ui-rounded,"SF Pro Rounded",-apple-system,BlinkMacSystemFont,sans-serif }
+.card { border:1px solid var(--border); background:var(--card); padding:12px; border-radius:14px; margin-bottom:14px; }
+.card h3 { font-size:13px; font-weight:600; color:var(--muted); margin:0 0 10px }
+.note { font-size:13px; line-height:1.45; margin:8px 0 2px; color:var(--muted) }
+.row { display:flex; align-items:center; gap:12px; min-height:49px; width:100%; background:none; border:0; padding:7px 0; color:inherit; text-align:left }
+.row + .row { border-top:1px solid #e9e9ec } .row .name { flex:1; font-size:16px } .badge { color:var(--muted); font-size:13px } .chevron { color:#939397; font-size:21px }
+.dot { width:11px; height:11px; background:var(--mode); border-radius:50%; flex:none }
+.switch { appearance:none; width:48px; height:29px; background:#e3e3e8; border-radius:18px; position:relative; margin:0; flex:none; cursor:pointer }
+.switch:before { content:""; position:absolute; width:25px; height:25px; left:2px; top:2px; border-radius:50%; background:white; box-shadow:0 1px 3px #0002; transition:transform .15s }
+.switch:checked { background:var(--accent) } .switch:checked:before { transform:translateX(19px) }
+.action { background:var(--accent); color:#102b16; font-size:16px; font-weight:600; width:100%; border:0; border-radius:12px; padding:13px 12px; min-height:48px; margin-top:12px }
+.action:disabled { background:#e5e5e9; color:#737378; cursor:default }
+.textbutton { color:#218c3d; background:none; border:0; min-height:44px; padding:5px 0; font-weight:600 }
+.result { margin:12px 0 0; padding:12px; border-radius:12px; background:#f2f2f7; font-size:14px; line-height:1.4 }
+.hidden { display:none } .big { font-size:25px; font-weight:700; margin:0 0 5px } .subtitle { margin:0 0 12px; font-size:14px; line-height:1.45; color:var(--muted) }
+.history { padding:2px 0 6px; font-size:15px; line-height:1.5 } .history strong { display:block; font-size:16px; font-weight:600 }
+.scope { display:flex; justify-content:space-between; align-items:center; min-height:44px; font-size:14px; }
+.scope select { max-width:68%; font:inherit; color:inherit; border:1px solid #e0e0e6; border-radius:8px; background:var(--bg); padding:8px }
+@media(max-width:730px) { main { padding:20px 14px } .options { grid-template-columns:1fr; gap:28px } .phone { width:100%; margin:auto } .caption { min-height:0 } }
+</style>
+<main>
+<h1>Automatic travel modes</h1>
+<p class="intro">Two working layout options for Moves. Example history counts only; this preview does not change your data.</p>
+<div class="options">
+<section>
+<h2>A · All modes together</h2>
+<p class="caption">One page for the switches. Recheck history for every mode you turn off.</p>
+<div class="phone" id="option-a">
+<div class="status"><span>9:41</span><span>● ▰</span></div>
+<nav><span class="back" aria-hidden="true">‹</span><strong>Automatic modes</strong></nav>
+<div class="screen">
+<div class="card"><h3>Detect automatically</h3><div id="a-modes"></div><p class="note">You can still choose any mode when editing a trip.</p></div>
+<div class="card"><h3>Past trips</h3><div class="history"><strong id="a-count">12 cycling guesses</strong><span id="a-detail">Recheck using your enabled modes.</span></div>
+<p class="note">Your corrections and imported modes stay as they are.</p>
+<button class="action" id="a-clean">Recheck past trips</button><div class="result hidden" id="a-result" role="status"></div>
+<button class="textbutton hidden" id="a-undo">Undo history changes</button></div>
+</div></div></section>
+<section>
+<h2>B · Controls for each mode</h2>
+<p class="caption">Open a mode to change detection and recheck just that mode’s history.</p>
+<div class="phone" id="option-b">
+<div class="status"><span>9:41</span><span>● ▰</span></div>
+<nav><button class="back" id="b-back" aria-label="Back to all modes">‹</button><strong id="b-title">Cycling</strong></nav>
+<div class="screen" id="b-list" hidden><div class="card"><h3>Travel modes</h3><div id="b-modes"></div></div></div>
+<div class="screen" id="b-mode">
+<div class="card"><h3>New trips</h3><label class="row"><span class="name">Detect automatically</span><input class="switch" id="b-enabled" type="checkbox" aria-label="Detect cycling automatically"></label><p class="note">You can still choose this mode when editing a trip.</p></div>
+<div class="card"><h3>Past trips</h3><p class="big" id="b-count">12 cycling guesses</p><p class="subtitle" id="b-description">Recheck these trips without cycling.</p>
+<div class="scope"><label for="b-range">When</label><select id="b-range"><option>All time</option><option>Last 30 days</option><option>Last 7 days</option></select></div>
+<p class="note">Your corrections and imported modes stay as they are.</p>
+<button class="action" id="b-clean">Recheck 12 trips</button><div class="result hidden" id="b-result" role="status"></div>
+<button class="textbutton hidden" id="b-undo">Undo history changes</button></div>
+</div></div></section>
+</div></main>
+<script>
+const modes = [
+ ['Walking','#2eb05c',5],['Running','#f58f2e',3],['Cycling','#2e85f0',12],['Automotive','#786e9e',4],
+ ['Train','#1794ad',2],['Plane','#4280e3',1],['Boat','#8f7ab2',0],['Swimming','#8f7ab2',0]
+];
+const disabledA = new Set(['Cycling']); const disabledB = new Set(['Cycling']);
+const $=id=>document.getElementById(id);
+function showResult(prefix,count) { $(prefix+'-result').textContent=`${count} trips rechecked. Trips without enough evidence are marked Unknown.`; $(prefix+'-result').classList.remove('hidden'); $(prefix+'-undo').classList.remove('hidden'); $(prefix+'-clean').disabled=true; }
+function clearResult(prefix) { $(prefix+'-result').classList.add('hidden'); $(prefix+'-undo').classList.add('hidden'); }
+function updateA() { clearResult('a'); const selected=modes.filter(m=>disabledA.has(m[0])); const count=selected.reduce((n,m)=>n+m[2],0); $('a-count').textContent=selected.length===1?`${count} ${selected[0][0].toLowerCase()} guesses`:`${count} guesses to recheck`; $('a-detail').textContent=selected.length?'Recheck using your enabled modes.':'Turn off a mode to recheck its past guesses.'; $('a-clean').disabled=count===0; }
+for(const [name,color] of modes) { const row=document.createElement('label'); row.className='row'; row.innerHTML=`<span class="dot" style="--mode:${color}"></span><span class="name">${name}</span><input type="checkbox" class="switch" aria-label="Detect ${name.toLowerCase()} automatically" ${disabledA.has(name)?'':'checked'}>`; row.querySelector('input').onchange=e=>{e.target.checked?disabledA.delete(name):disabledA.add(name);updateA()}; $('a-modes').append(row); }
+$('a-clean').onclick=()=>showResult('a',modes.filter(m=>disabledA.has(m[0])).reduce((n,m)=>n+m[2],0));
+$('a-undo').onclick=updateA;
+let current=modes[2];
+function bCount() { return Math.min(current[2], $('b-range').selectedIndex===0?999:$('b-range').selectedIndex===1?5:2); }
+function updateB() { clearResult('b'); const count=bCount(); $('b-count').textContent=`${count} ${current[0].toLowerCase()} guesses`; $('b-description').textContent=`Recheck these trips without ${current[0].toLowerCase()}.`; $('b-clean').textContent=`Recheck ${count} ${count===1?'trip':'trips'}`; $('b-clean').disabled=count===0; }
+function openMode(mode) { current=mode; $('b-list').hidden=true; $('b-mode').hidden=false; $('b-title').textContent=mode[0]; $('b-enabled').checked=!disabledB.has(mode[0]); $('b-enabled').setAttribute('aria-label',`Detect ${mode[0].toLowerCase()} automatically`); updateB(); }
+function showModes() { $('b-list').hidden=false; $('b-mode').hidden=true; $('b-title').textContent='Automatic modes'; $('b-modes').replaceChildren(); for(const mode of modes) { const row=document.createElement('button'); row.className='row'; row.innerHTML=`<span class="dot" style="--mode:${mode[1]}"></span><span class="name">${mode[0]}</span><span class="badge">${disabledB.has(mode[0])?'Off':'On'}</span><span class="chevron">›</span>`; row.onclick=()=>openMode(mode); $('b-modes').append(row); } }
+$('b-back').onclick=showModes; $('b-range').onchange=updateB; $('b-enabled').onchange=e=>{e.target.checked?disabledB.delete(current[0]):disabledB.add(current[0])}; $('b-clean').onclick=()=>showResult('b',bCount()); $('b-undo').onclick=updateB;
+</script>
+</html>

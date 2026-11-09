@@ -398,7 +398,9 @@ struct PhotoHistoryImporter {
         let duration = end.arrivalDate.timeIntervalSince(start.departureDate)
         guard duration > 0 else { return .unknown }
         let kilometersPerHour = (distance / 1_000) / (duration / 3_600)
-        return kilometersPerHour > configuration.planeSpeedKilometersPerHour ? .plane : .unknown
+        return AutomaticTransportModes.load().allowedMode(
+            kilometersPerHour > configuration.planeSpeedKilometersPerHour ? .plane : .unknown
+        )
     }
 
     // MARK: - Write path

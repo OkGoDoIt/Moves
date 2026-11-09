@@ -216,6 +216,21 @@ enum SampleStayInference {
 /// and end times are sloppy enough to make the speed look wrong, so a fast trip with few
 /// steps is the only case relabeled.
 enum ImplausibleWalk {
+    static func refinedMode(
+        proposed: TransportMode,
+        straightLine: CLLocationDistance,
+        duration: TimeInterval,
+        stepCount: Int?,
+        locations: [CLLocation]
+    ) -> TransportMode {
+        let changed = mode(proposed: proposed, straightLine: straightLine, duration: duration, stepCount: stepCount)
+        guard changed != proposed else { return proposed }
+        let threshold: Double = proposed == .running ? 6 : 3.5
+        guard TransportSpeedEvidence(locations: locations).supportsSpeed(above: threshold, tripDuration: duration)
+        else { return proposed }
+        return changed
+    }
+
     static func mode(
         proposed: TransportMode,
         straightLine: CLLocationDistance,
@@ -225,13 +240,10 @@ enum ImplausibleWalk {
         guard straightLine >= 800, duration > 0 else { return proposed }
         let speed = straightLine / duration
 
-        // Sixty kilometres at 25 km/h is a road trip, not a bike ride.
-        if proposed == .cycling {
-            return straightLine >= 20_000 && speed >= 6 ? .automotive : proposed
-        }
-
         guard proposed == .walking || proposed == .running, speed >= 2.5 else { return proposed }
-        let ride: TransportMode = speed >= 9 || straightLine >= 20_000 ? .automotive : .cycling
+        // Too fast for this walk does not identify a bicycle. Missing steps can
+        // also be unavailable coverage, so moderate-speed travel stays unresolved.
+        let ride: TransportMode = speed >= 9 ? .automotive : .unknown
 
         if let stepCount, stepCount > 0 {
             return Double(stepCount) / (duration / 60) < 50 ? ride : proposed

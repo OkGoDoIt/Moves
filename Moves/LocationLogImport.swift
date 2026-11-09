@@ -463,94 +463,13 @@ struct LocationLogSegmenter: Sendable {
 /// a walk to the car does not drag a drive down to "cycling". Long legs at
 /// aircraft speed (including recording gaps across a flight) win outright.
 enum LocationLogTransportClassifier {
-    /// Metres per second.
-    private enum Speed {
-        static let plane: Double = 55            // ~200 km/h sustained
-        static let train: Double = 45            // ~160 km/h sustained
-        static let automotive: Double = 8        // ~29 km/h median
-        static let automotivePeak: Double = 14   // ~50 km/h peak rules out cycling
-        static let trafficMedian: Double = 5     // ~18 km/h median plus…
-        static let trafficPeak: Double = 8.3     // …~30 km/h peaks is a car in traffic
-        static let cycling: Double = 3.3         // ~12 km/h
-        static let running: Double = 2.3         // ~8 km/h
-        static let stopAndGoPeak: Double = 6     // ~22 km/h peaks: a bus, not a runner
-        static let slowVehiclePeak: Double = 4   // ~14 km/h peaks at jogging median: a bike
-        static let walking: Double = 0.35
-    }
-
-    private static let planeMinimumDistance: CLLocationDistance = 150_000
-    private static let trainMinimumDistance: CLLocationDistance = 40_000
-    private static let runningMinimumDistance: CLLocationDistance = 800
-    /// Creeping between two nearby stays is still a walk; anything longer at
-    /// that pace is a recording gap we cannot explain.
-    private static let creepingWalkMaximumDistance: CLLocationDistance = 1_500
-
-    static func classify(_ points: [LocationLogPoint]) -> TransportMode {
-        let legs = Self.legs(for: points)
-        let total = legs.reduce(0.0) { $0 + $1.distance }
-        guard total > 0, let first = points.first, let last = points.last else { return .unknown }
-
-        let duration = last.timestamp.timeIntervalSince(first.timestamp)
-        let average = duration > 0 ? total / duration : 0
-        let direct = first.distance(to: last)
-        let median = weightedSpeed(legs, fraction: 0.5, total: total)
-        let peak = weightedSpeed(legs, fraction: 0.9, total: total)
-        let longestLeg = legs.max(by: { $0.distance < $1.distance })
-
-        if (direct >= planeMinimumDistance && average >= 40)
-            || median >= Speed.plane
-            || (longestLeg.map { $0.distance >= planeMinimumDistance && $0.speed >= 40 } ?? false) {
-            return .plane
-        }
-        if median >= Speed.train && direct >= trainMinimumDistance {
-            return .train
-        }
-        if median >= Speed.automotive
-            || peak >= Speed.automotivePeak
-            || (median >= Speed.trafficMedian && peak >= Speed.trafficPeak) {
-            return .automotive
-        }
-        if median >= Speed.cycling {
-            return .cycling
-        }
-        if median >= Speed.running {
-            // Jogging pace as a median with vehicle-only peaks is stop-and-go
-            // transit, not a run.
-            if peak >= Speed.stopAndGoPeak { return .automotive }
-            if peak >= Speed.slowVehiclePeak { return .cycling }
-            return total >= runningMinimumDistance ? .running : .walking
-        }
-        if median >= Speed.walking || total <= creepingWalkMaximumDistance {
-            return .walking
-        }
-        return .unknown
-    }
-
-    private struct Leg {
-        let distance: CLLocationDistance
-        let speed: Double
-    }
-
-    private static func legs(for points: [LocationLogPoint]) -> [Leg] {
-        zip(points, points.dropFirst()).compactMap { start, end in
-            let interval = end.timestamp.timeIntervalSince(start.timestamp)
-            guard interval > 0 else { return nil }
-            let distance = start.distance(to: end)
-            return Leg(distance: distance, speed: distance / interval)
-        }
-    }
-
-    /// Speed below which `fraction` of the travelled distance was covered.
-    private static func weightedSpeed(_ legs: [Leg], fraction: Double, total: CLLocationDistance) -> Double {
-        guard total > 0 else { return 0 }
-        var covered: CLLocationDistance = 0
-        for leg in legs.sorted(by: { $0.speed < $1.speed }) {
-            covered += leg.distance
-            if covered >= total * fraction {
-                return leg.speed
-            }
-        }
-        return legs.last?.speed ?? 0
+    /// Unlabeled logs use the same conservative evidence as live recording.
+    /// Semantic modes supplied by an archive or a workout bypass this classifier.
+    static func classify(
+        _ points: [LocationLogPoint],
+        preferences: AutomaticTransportModes = .load()
+    ) -> TransportMode {
+        preferences.allowedMode(TransportSpeedEvidence(locations: points.map(\.location)).inferredMode)
     }
 }
 
