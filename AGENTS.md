@@ -117,6 +117,19 @@ Optional: `DEVICE_UDID=... ./Scripts/install-iphone.sh`.
 
 Keep capture, Live Activity, uploads, and SwiftData writes **independent of view identity**. Fold/open/rotation must not tear down `MovesLocationCaptureManager`.
 
+## Visual quality
+
+Polish is a release requirement, including on normal iPhones. Inspect rendered
+screens, not only accessibility labels or passing tests. Check small, standard,
+and large phone sizes, portrait and landscape, larger text, keyboard-visible
+forms, long names, empty states, and populated history. Exercise the main tabs,
+details, corrections/Undo, search, and changed settings/import flows. Keep labels
+readable, touch targets usable, disclosure arrows singular, and maps visible
+beside their controls. Save before/after evidence using synthetic data; keep real
+phone screenshots private. Report exactly what was inspected and what remains.
+Further iPhone Duo work is low priority; Roger's everyday iPhone experience takes
+precedence. See `docs/VISUAL-QA.md` for the current coverage record.
+
 ## Product constraints
 
 - Timeline data stays on-device; CloudKit is the user’s **private** container, not a public database.
