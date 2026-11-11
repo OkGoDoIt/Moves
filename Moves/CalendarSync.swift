@@ -74,7 +74,10 @@ final class MovesCalendarSync: ObservableObject {
         isEnabled = defaults.bool(forKey: Keys.enabled)
         since = defaults.object(forKey: Keys.since) as? Date ?? Calendar.current.startOfDay(for: .now)
         lastSync = defaults.object(forKey: Keys.lastSync) as? Date
+        // Capture saves a location batch every few minutes. Only a change to a visit or a
+        // place name can change the calendar, so the rest skip a read of every synced visit.
         NotificationCenter.default.publisher(for: ModelContext.didSave)
+            .filter(PlaceSaveFilter.touchesPlaces)
             .merge(with: NotificationCenter.default.publisher(for: .EKEventStoreChanged))
             .debounce(for: .seconds(2), scheduler: DispatchQueue.main)
             .sink { [weak self] _ in self?.schedule() }

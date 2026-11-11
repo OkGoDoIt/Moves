@@ -557,7 +557,7 @@ struct ContentView: View {
 
     private var spotlightChanges: AnyPublisher<Notification, Never> {
         NotificationCenter.default.publisher(for: ModelContext.didSave)
-            .filter(SpotlightRefreshPolicy.requiresRefresh)
+            .filter(PlaceSaveFilter.touchesPlaces)
             .merge(with: NotificationCenter.default.publisher(for: .NSPersistentStoreRemoteChange))
             .debounce(for: .milliseconds(350), scheduler: DispatchQueue.main)
             .eraseToAnyPublisher()
@@ -1877,10 +1877,11 @@ private struct RequestedMoveDetailView: View {
     }
 }
 
-/// Location batches do not need a full place-index read. Unknown notification
-/// payloads fail open so older OS versions still refresh renamed/deleted places.
-enum SpotlightRefreshPolicy {
-    static func requiresRefresh(_ notification: Notification) -> Bool {
+/// Whether a save changed a visit or a learned place. Location batches don't, so Spotlight
+/// and calendar sync skip them. Unknown payloads count as a change, so older OS versions
+/// still pick up renamed and deleted places.
+enum PlaceSaveFilter {
+    static func touchesPlaces(_ notification: Notification) -> Bool {
         let keys: [ModelContext.NotificationKey] = [.insertedIdentifiers, .updatedIdentifiers, .deletedIdentifiers]
         guard let info = notification.userInfo else { return true }
         if let invalidated = info[ModelContext.NotificationKey.invalidatedAllIdentifiers]
