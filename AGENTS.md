@@ -62,6 +62,8 @@ plutil -p ~/Library/Developer/Xcode/DerivedData/Moves-iphone/Build/Products/Debu
 
 To build under a different account: `cp Config/Moves.local.xcconfig.example Config/Moves.local.xcconfig`, set the prefix and team, then build to a device once with an Apple ID in **Xcode → Settings → Accounts**. Automatic signing registers the App ID, App Group, and iCloud container. First device run may prompt **Trust This Developer**.
 
+A new target (for example the Quick Look extensions) needs its App ID and profile registered once. Xcode 27's command-line `xcodebuild` can report `No Accounts` even while Xcode → Settings → Apple Accounts is signed in; build once from Xcode with destination G17, and `Scripts/install-iphone.sh` then reuses the cached profiles.
+
 Without the iCloud entitlement, Core Data aborts the process (`SIGTRAP` on `com.apple.coredata.cloudkit.queue`) instead of throwing. `MovesApp.allowsCloudKitContainer()` therefore inspects `embedded.mobileprovision` first and falls back to a local-only store. It **fails open** when no profile is embedded, because App Store builds have none and are signed from the project entitlements.
 
 ## Build / test / run
