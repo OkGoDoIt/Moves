@@ -382,6 +382,7 @@ private func temporaryRouteTrackingAutoStopText(
 }
 
 struct ContentView: View {
+    @State private var screenHeight: CGFloat = 0
     @EnvironmentObject private var captureManager: MovesLocationCaptureManager
     @EnvironmentObject private var undoController: AppUndoController
     @EnvironmentObject private var cloudDataPresencePublisher: MovesCloudDataPresencePublisher
@@ -595,6 +596,12 @@ struct ContentView: View {
 
     var body: some View {
         observedTimeline
+        .environment(\.timelineScreenHeight, screenHeight)
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.size.height + proxy.safeAreaInsets.top + proxy.safeAreaInsets.bottom
+        } action: { height in
+            screenHeight = height
+        }
         .onReceive(spotlightChanges) { _ in refreshSpotlightIndex() }
         .onDisappear { spotlightRefreshTask?.cancel() }
         .task(id: selectedDay?.id) { await openScreenshotMoveIfNeeded() }

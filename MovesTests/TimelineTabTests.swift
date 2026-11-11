@@ -107,6 +107,17 @@ final class TimelineTabTests: XCTestCase {
         XCTAssertEqual(CalendarEventAction.resolve(url: copy.url, visits: [:], seen: &seen), .remove)
     }
 
+    func testTimelineMapIsFortyTwoPercentOfTheScreenButLeavesTheStorylineRoom() {
+        // iPhone 18 Pro: the plan's 42% of an 874pt screen.
+        XCTAssertEqual(TimelineHeroLayout.collapsedHeight(pageHeight: 624, screenHeight: 874), 367.08, accuracy: 0.01)
+        // iPhone SE: the storyline keeps room for about two rows.
+        XCTAssertEqual(TimelineHeroLayout.collapsedHeight(pageHeight: 470, screenHeight: 667), 250, accuracy: 0.01)
+        // A short outer display keeps the map within 45% of the page.
+        XCTAssertEqual(TimelineHeroLayout.collapsedHeight(pageHeight: 300, screenHeight: 420), 135, accuracy: 0.01)
+        // Before the window is measured, the minimum applies.
+        XCTAssertEqual(TimelineHeroLayout.collapsedHeight(pageHeight: 624, screenHeight: 0), 260, accuracy: 0.01)
+    }
+
     func testActivityChipTitlesAreSentenceCase() {
         XCTAssertEqual(TransportMode.walking.chipTitle, "Walk")
         XCTAssertEqual(TransportMode.automotive.chipTitle, "Drive")
