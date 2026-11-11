@@ -142,23 +142,28 @@ struct AutomaticModeHistory {
         if context.hasChanges { try context.save() }
         let ids = changes.map(\.id)
         let rows = try context.fetch(FetchDescriptor<MoveSegment>(predicate: #Predicate { ids.contains($0.id) }))
-        let byID = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
-        let restorable = changes.filter { change in
-            guard let move = byID[change.id] else { return false }
-            return move.permitsAutomaticModeChanges && move.transportMode == change.after
-                && move.reviewState == .pending
+        // CloudKit mirroring cannot enforce unique IDs, so a duplicated row must
+        // not trap here; each copy is restored on its own merits.
+        let byID = Dictionary(grouping: rows, by: \.id)
+        var seen = Set<UUID>()
+        let restorable: [(move: MoveSegment, change: Change)] = changes.flatMap { change in
+            guard seen.insert(change.id).inserted else { return [(MoveSegment, Change)]() }
+            return (byID[change.id] ?? []).filter { move in
+                move.permitsAutomaticModeChanges && move.transportMode == change.after
+                    && move.reviewState == .pending
+            }.map { ($0, change) }
         }
         let undoManager = context.undoManager
         context.undoManager = nil
         defer { context.undoManager = undoManager }
         do {
-            for change in restorable {
-                if let move = byID[change.id] { Self.apply(change.before, review: change.reviewBefore, to: move) }
+            for (move, change) in restorable {
+                Self.apply(change.before, review: change.reviewBefore, to: move)
             }
             try context.save()
         } catch {
-            for change in restorable {
-                if let move = byID[change.id] { Self.apply(change.after, review: .pending, to: move) }
+            for (move, change) in restorable {
+                Self.apply(change.after, review: .pending, to: move)
             }
             throw error
         }

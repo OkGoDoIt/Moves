@@ -183,6 +183,25 @@ final class AutomaticTransportModesTests: XCTestCase {
         XCTAssertFalse(reopened.canUndo)
     }
 
+    /// CloudKit mirroring cannot enforce unique IDs. A duplicated trip must not
+    /// trap Undo, and each copy is restored.
+    func testUndoToleratesDuplicatedTripIDs() throws {
+        let context = try makeContext()
+        let history = makeHistory()
+        defer { try? FileManager.default.removeItem(at: history.undoURL.deletingLastPathComponent()) }
+        let first = insertMove(in: context, speed: 6)
+        let copy = insertMove(in: context, speed: 6)
+        copy.id = first.id
+        try context.save()
+        _ = try history.recheck(in: context, preferences: .init(disabled: [.cycling]))
+        XCTAssertEqual(first.transportMode, .unknown)
+        XCTAssertEqual(copy.transportMode, .unknown)
+        XCTAssertEqual(try history.undo(in: context), 2)
+        XCTAssertEqual(first.transportMode, .cycling)
+        XCTAssertEqual(copy.transportMode, .cycling)
+        XCTAssertFalse(history.canUndo)
+    }
+
     func testFailedUndoBackupCannotModifyHistory() throws {
         let context = try makeContext()
         let move = insertMove(in: context, speed: 12)
