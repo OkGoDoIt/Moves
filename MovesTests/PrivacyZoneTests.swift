@@ -467,11 +467,11 @@ extension PrivacyZoneTests {
     func testSpotlightSkipsLocationOnlySavesButRetainsPlaceChanges() throws {
         let sampleID = try PersistentIdentifier.identifier(for: "test", entityName: "LocationSample", primaryKey: "fix")
         let visitID = try PersistentIdentifier.identifier(for: "test", entityName: "VisitPlace", primaryKey: "visit")
-        XCTAssertFalse(SpotlightRefreshPolicy.requiresRefresh(Notification(name: ModelContext.didSave,
+        XCTAssertFalse(PlaceSaveFilter.touchesPlaces(Notification(name: ModelContext.didSave,
             userInfo: [ModelContext.NotificationKey.insertedIdentifiers: [sampleID]])))
-        XCTAssertTrue(SpotlightRefreshPolicy.requiresRefresh(Notification(name: ModelContext.didSave,
+        XCTAssertTrue(PlaceSaveFilter.touchesPlaces(Notification(name: ModelContext.didSave,
             userInfo: [ModelContext.NotificationKey.deletedIdentifiers.rawValue: Set([visitID])])))
-        XCTAssertTrue(SpotlightRefreshPolicy.requiresRefresh(Notification(name: ModelContext.didSave)))
+        XCTAssertTrue(PlaceSaveFilter.touchesPlaces(Notification(name: ModelContext.didSave)))
     }
 
     func testImportQueueRecoversWithoutDiscardingUnreadableManifest() throws {

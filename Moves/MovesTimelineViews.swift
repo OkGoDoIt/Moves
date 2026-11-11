@@ -145,7 +145,25 @@ struct DayTimelinePage: View {
     }
 }
 
+/// The Timeline map hero in portrait: 42% of the screen with a 260pt minimum. The storyline
+/// keeps room for about two rows and the activity chips, and a short display keeps the
+/// map within 45% of the page, so on small screens the map gives way.
+enum TimelineHeroLayout {
+    static let storylineRoom: CGFloat = 220
+
+    static func collapsedHeight(pageHeight: CGFloat, screenHeight: CGFloat) -> CGFloat {
+        let wanted = max(260, screenHeight * 0.42)
+        return min(wanted, max(pageHeight * 0.45, pageHeight - storylineRoom))
+    }
+}
+
+extension EnvironmentValues {
+    /// Height of the window the Timeline tab sits in, safe areas included.
+    @Entry var timelineScreenHeight: CGFloat = 0
+}
+
 struct DayTimelinePageContent: View {
+    @Environment(\.timelineScreenHeight) private var screenHeight
     @EnvironmentObject private var captureManager: MovesLocationCaptureManager
     @EnvironmentObject private var rootController: MovesRootController
     let dayTimeline: DayTimeline
@@ -402,8 +420,10 @@ struct DayTimelinePageContent: View {
     }
 
     private func portraitContent(pageSize: CGSize) -> some View {
-        // A short, wide outer display still needs room to browse the storyline.
-        let heroHeight = min(max(240, pageSize.height * 0.36), pageSize.height * 0.45)
+        let heroHeight = TimelineHeroLayout.collapsedHeight(
+            pageHeight: pageSize.height,
+            screenHeight: screenHeight
+        )
 
         return ZStack {
             VStack(spacing: 8) {
