@@ -8,24 +8,26 @@ import SwiftUI
 struct MapTabView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.openURL) private var openURL
+    @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var controller: MovesRootController
     @Query(sort: \DayTimeline.dayStart, order: .forward) private var dayTimelines: [DayTimeline]
     @AppStorage(MapRouteShadingSettings.shadeRoutesBySpeedKey) private var shadeRoutesBySpeed = true
 
-    @State private var selection = MapRangeSelection.today()
+    @State private var selection = MapRangeSelection.allTime()
     @State private var loader = MapWindowLoader()
+    @State private var coverage = MapCoverageController()
     @State private var layer: MapCoverageLayer = MapTabView.initialLayer()
     @State private var enabledModes: Set<TransportMode> = []
-    @State private var camera: MapCameraPosition = .region(
-        MKCoordinateRegion(
-            center: CLLocationCoordinate2D(latitude: -33.86, longitude: 151.21),
-            span: MKCoordinateSpan(latitudeDelta: 0.08, longitudeDelta: 0.08)
-        )
-    )
-    @State private var visibleRegion = MKCoordinateRegion(
-        center: CLLocationCoordinate2D(latitude: -33.86, longitude: 151.21),
-        span: MKCoordinateSpan(latitudeDelta: 0.08, longitudeDelta: 0.08)
-    )
+    @State private var camera: MapCameraPosition = .region(MapCameraDefaults.launchRegion)
+    @State private var visibleRegion = MapCameraDefaults.launchRegion
+    /// The camera as it moves, for keeping Heat and Fog pinned to the map.
+    @State private var cameraRect: MercatorRect?
+    /// The camera once it settles, which is when Heat and Fog redraw.
+    @State private var restingCameraRect: MercatorRect?
+    @State private var mapSize: CGSize = .zero
+    @State private var userLocation: CLLocationCoordinate2D?
+    /// All Time opens on where you are rather than fitting years of travel, once per visit to it.
+    @State private var hasFramedAllTime = false
     @State private var selectedRouteID: UUID?
     @State private var isShowingRangeSheet = false
     @State private var isShowingShare = false
@@ -33,18 +35,18 @@ struct MapTabView: View {
     @State private var isShowingTrips = false
     @State private var presentedTripID: UUID?
     @State private var knownModes: Set<TransportMode> = []
-    @State private var detailedCells: [ExplorationDisplayCell] = []
     @State private var coverageRevision = 0
-    @State private var coverageError: String?
-    @State private var coverageRefresh: Task<Void, Never>?
 
     private var calendar: Calendar { .autoupdatingCurrent }
-    private var coverageChanges: AnyPublisher<Notification, Never> {
+    /// Store changes that Heat and Fog redraw for. One shared publisher: one built in `body`
+    /// would be replaced, and its debounce restarted, on every camera frame.
+    private static let coverageChanges: AnyPublisher<Notification, Never> =
         Publishers.Merge3(NotificationCenter.default.publisher(for: .movesLocationSamplesDidChange),
                           NotificationCenter.default.publisher(for: ModelContext.didSave),
                           NotificationCenter.default.publisher(for: .NSPersistentStoreRemoteChange))
-            .debounce(for: .milliseconds(500), scheduler: RunLoop.main).eraseToAnyPublisher()
-    }
+            .debounce(for: .milliseconds(500), scheduler: RunLoop.main)
+            .share()
+            .eraseToAnyPublisher()
 
     /// Where All Time starts.
     private var firstRecordedDate: Date? {
@@ -73,11 +75,12 @@ struct MapTabView: View {
     var body: some View {
         ZStack(alignment: .top) {
             map
-                .ignoresSafeArea(edges: .top)
+                .ignoresSafeArea()
 
             VStack(spacing: 0) {
-                if let coverageError, layer == .fog {
-                    Text(coverageError).font(.caption).padding(8).background(.regularMaterial, in: Capsule())
+                if coverage.loadFailed, layer != .routes {
+                    Text(String(localized: "Coverage couldn’t be loaded."))
+                        .font(.caption).padding(8).background(.regularMaterial, in: Capsule())
                 }
                 topBar
                     .padding(.horizontal, 14)
@@ -110,44 +113,31 @@ struct MapTabView: View {
                 selection: selection,
                 modelContext: modelContext,
                 cameraRegion: visibleRegion,
-                includeCoverage: layer != .routes,
                 calendar: calendar
             )
             syncEnabledModes()
         }
-        .task(id: detailedCoverageKey) {
-            guard layer == .fog else { return }
-            do {
-                try await Task.sleep(for: .milliseconds(250))
-                let cells = try await DetailedExploration.displayCells(container: modelContext.container,
-                    interval: selection.focus, region: visibleRegion, includeUndated: selection.granularity == .allTime)
-                try Task.checkCancellation()
-                detailedCells = cells
-                coverageError = nil
-            } catch is CancellationError { }
-            catch { coverageError = String(localized: "Coverage couldn’t be loaded.") }
+        .onChange(of: coverageKey, initial: true) { _, _ in
+            requestCoverage()
         }
-        .onReceive(coverageChanges) { _ in coverageRevision += 1 }
+        .task(id: layer == .routes) {
+            await followUserLocation()
+        }
+        .onReceive(Self.coverageChanges) { _ in coverageRevision += 1 }
         .onAppear { coverageRevision += 1 }
         .onChange(of: loader.cameraFitKey) { _, _ in
             fitCamera()
         }
-        .onChange(of: layer) { _, newLayer in
+        .onChange(of: coverage.latestActivity?.latitude) { _, _ in
             fitCamera()
-            guard newLayer != .routes else { return }
-            Task { @MainActor in
-                await loader.loadCoverage(
-                    selection: selection,
-                    modelContext: modelContext,
-                    cameraRegion: visibleRegion
-                )
-                fitCamera()
-            }
+        }
+        .onChange(of: selection.granularity) { _, granularity in
+            if granularity != .allTime { hasFramedAllTime = false }
         }
         .onChange(of: controller.requestedMapInterval) { _, newValue in
             applyRequestedInterval(newValue)
         }
-        .onChange(of: firstRecordedDate) { _, newValue in
+        .onChange(of: firstRecordedDate, initial: true) { _, newValue in
             guard selection.granularity == .allTime, !selection.isCustom else { return }
             selection = .preset(.allTime, now: .now, calendar: calendar, firstRecorded: newValue)
         }
@@ -267,8 +257,53 @@ struct MapTabView: View {
         }
     }
 
-    private var detailedCoverageKey: String {
-        "\(layer)|\(selection.focus.start)|\(selection.focus.end)|\(visibleRegion.center.latitude)|\(visibleRegion.center.longitude)|\(visibleRegion.span.latitudeDelta)|\(visibleRegion.span.longitudeDelta)|\(coverageRevision)"
+    /// Everything a Heat or Fog bitmap depends on. Camera motion only counts once it settles.
+    private var coverageKey: String {
+        [
+            layer.rawValue,
+            String(selection.focus.start.timeIntervalSinceReferenceDate),
+            String(selection.focus.end.timeIntervalSinceReferenceDate),
+            enabledModes.map(\.rawValue).sorted().joined(separator: ","),
+            String(coverageRevision),
+            colorScheme == .dark ? "dark" : "light",
+            restingCameraRect.map { "\($0.minX),\($0.minY),\($0.maxX),\($0.maxY)" } ?? "-",
+            "\(mapSize.width)x\(mapSize.height)"
+        ]
+        .joined(separator: "|")
+    }
+
+    private func requestCoverage() {
+        guard layer != .routes, let viewport = restingCameraRect ?? cameraRect, mapSize.width > 1 else { return }
+        let present = Set(loader.presentModes)
+        let modes: Set<TransportMode>? = enabledModes.isEmpty || present.isSubset(of: enabledModes) ? nil : enabledModes
+        coverage.update(MapCoverageController.Update(
+            container: modelContext.container,
+            revision: coverageRevision,
+            request: MapCoverageRenderRequest(
+                layer: layer,
+                viewport: viewport,
+                viewSize: mapSize,
+                isDark: colorScheme == .dark
+            ),
+            interval: selection.focus,
+            modes: modes,
+            includeUndated: selection.granularity == .allTime
+        ))
+    }
+
+    /// Feeds the clearing around the location dot. Only runs while Heat or Fog is up, and never
+    /// asks for permission.
+    private func followUserLocation() async {
+        guard layer != .routes else { return }
+        let status = CLLocationManager().authorizationStatus
+        guard status == .authorizedAlways || status == .authorizedWhenInUse else { return }
+        do {
+            for try await update in CLLocationUpdate.liveUpdates() {
+                if let location = update.location {
+                    userLocation = location.coordinate
+                }
+            }
+        } catch {}
     }
 
     private var map: some View {
@@ -278,20 +313,21 @@ struct MapTabView: View {
                     routeContent
                     visitContent
                 }
+                UserAnnotation()
             }
             .mapStyle(.standard(elevation: .flat, emphasis: .muted))
             .overlay {
-                if layer == .fog {
-                    DetailedFogCanvas(cells: detailedCells, region: visibleRegion)
-                } else if layer == .heat {
-                    MapCoverageCanvas(
-                        cells: loader.coverageCells,
-                        region: visibleRegion,
-                        style: layer == .fog ? .fog : .heat
+                if layer != .routes {
+                    MapCoverageOverlay(
+                        raster: coverage.raster,
+                        layer: layer,
+                        camera: cameraRect,
+                        userLocation: userLocation,
+                        isDark: colorScheme == .dark
                     )
-                    .allowsHitTesting(false)
                 }
             }
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { mapSize = $0 }
             .overlay(alignment: .topLeading) {
                 if let selectedRoute, layer == .routes {
                     routeCallout(selectedRoute)
@@ -301,7 +337,11 @@ struct MapTabView: View {
             }
             .onMapCameraChange(frequency: .continuous) { context in
                 visibleRegion = context.region
-                scheduleCoverageRefresh(for: context.region)
+                cameraRect = MercatorRect(context.rect)
+            }
+            .onMapCameraChange(frequency: .onEnd) { context in
+                cameraRect = MercatorRect(context.rect)
+                restingCameraRect = cameraRect
             }
             .simultaneousGesture(
                 SpatialTapGesture().onEnded { event in
@@ -310,18 +350,6 @@ struct MapTabView: View {
                     selectRoute(near: coordinate)
                 }
             )
-        }
-    }
-
-    /// Regrouping every cell on every camera frame stalls Heat and Fog on a long history. The cells
-    /// on screen pan with the map, padded past its edges, so regroup once it pauses.
-    private func scheduleCoverageRefresh(for region: MKCoordinateRegion) {
-        guard layer != .routes else { return }
-        coverageRefresh?.cancel()
-        coverageRefresh = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(120))
-            guard !Task.isCancelled else { return }
-            loader.refreshCoverage(selection: selection, cameraRegion: region)
         }
     }
 
@@ -442,8 +470,21 @@ struct MapTabView: View {
     }
 
     private func fitCamera() {
-        let coordinates = displayedRoutes.flatMap(\.rendered.coordinates)
-            + (layer == .routes ? loader.visits.map(\.coordinate) : loader.coverageCells.map(\.center))
+        if selection.granularity == .allTime, !selection.isCustom {
+            // Years of travel span countries. Open at city scale on where you are, or failing
+            // that where you last were, and leave the camera alone after that.
+            guard !hasFramedAllTime else { return }
+            let latest = loader.visits.max { $0.arrivalDate < $1.arrivalDate }?.coordinate
+                ?? coverage.latestActivity
+            guard let region = MapCameraDefaults.cityRegion(
+                userLocation: MapCameraDefaults.currentLocation(),
+                latestActivity: latest
+            ) else { return }
+            hasFramedAllTime = true
+            camera = .region(region)
+            return
+        }
+        let coordinates = displayedRoutes.flatMap(\.rendered.coordinates) + loader.visits.map(\.coordinate)
         guard !coordinates.isEmpty else { return }
         camera = .region(MapRegionFactory.region(for: coordinates))
     }
@@ -499,72 +540,38 @@ struct MapTabView: View {
     }
 }
 
-/// Raster overlay for heat (log colour ramp) and adaptive fog (dark mask with punched cells).
-struct MapCoverageCanvas: View {
-    enum Style {
-        case heat
-        case fog
-    }
+/// Where the Map opens: city scale, centred on you if the system knows where you are,
+/// otherwise on the most recent activity.
+enum MapCameraDefaults {
+    /// About 13 km tall: a city, not a country.
+    static let citySpan = MKCoordinateSpan(latitudeDelta: 0.12, longitudeDelta: 0.12)
 
-    let cells: [VisitedCellStore.DisplayCell]
-    let region: MKCoordinateRegion
-    let style: Style
-
-    var body: some View {
-        Canvas { context, size in
-            guard region.span.latitudeDelta > 0, region.span.longitudeDelta > 0 else { return }
-            switch style {
-            case .fog:
-                context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Color.black.opacity(0.72)))
-                context.blendMode = .destinationOut
-                for cell in cells {
-                    context.fill(cellPath(cell, size: size), with: .color(.white))
-                }
-            case .heat:
-                let maxCount = max(cells.map(\.sampleCount).max() ?? 1, 1)
-                for cell in cells {
-                    let t = log(Double(cell.sampleCount) + 1) / log(Double(maxCount) + 1)
-                    context.fill(cellPath(cell, size: size), with: .color(Self.heatColor(fraction: t)))
-                }
-            }
-        }
-        .allowsHitTesting(false)
-    }
-
-    private func cellPath(_ cell: VisitedCellStore.DisplayCell, size: CGSize) -> Path {
-        let origin = cell.origin
-        let end = CLLocationCoordinate2D(
-            latitude: origin.latitude + cell.sizeDegrees,
-            longitude: origin.longitude + cell.sizeDegrees
+    /// Shown for the instant before data loads.
+    static var launchRegion: MKCoordinateRegion {
+        cityRegion(userLocation: currentLocation(), latestActivity: nil) ?? MKCoordinateRegion(
+            center: CLLocationCoordinate2D(latitude: -33.86, longitude: 151.21),
+            span: citySpan
         )
-        let a = point(for: origin, size: size)
-        let b = point(for: end, size: size)
-        let rect = CGRect(
-            x: min(a.x, b.x),
-            y: min(a.y, b.y),
-            width: max(abs(b.x - a.x), 2),
-            height: max(abs(b.y - a.y), 2)
-        )
-        return Path(roundedRect: rect.insetBy(dx: -0.4, dy: -0.4), cornerRadius: 1)
     }
 
-    private func point(for coordinate: CLLocationCoordinate2D, size: CGSize) -> CGPoint {
-        let minLon = region.center.longitude - region.span.longitudeDelta / 2
-        let maxLat = region.center.latitude + region.span.latitudeDelta / 2
-        let x = (coordinate.longitude - minLon) / region.span.longitudeDelta * size.width
-        let y = (maxLat - coordinate.latitude) / region.span.latitudeDelta * size.height
-        return CGPoint(x: x, y: y)
+    static func cityRegion(
+        userLocation: CLLocationCoordinate2D?,
+        latestActivity: CLLocationCoordinate2D?
+    ) -> MKCoordinateRegion? {
+        let center = [userLocation, latestActivity]
+            .compactMap { $0 }
+            .first(where: MapRegionFactory.isUsableCoordinate)
+        guard let center else { return nil }
+        return MapRegionFactory.snapshotSafe(MKCoordinateRegion(center: center, span: citySpan))
     }
 
-    /// Opaque log ramp: indigo → cyan → yellow → red.
-    static func heatColor(fraction: Double) -> Color {
-        let t = min(max(fraction, 0), 1)
-        if t < 0.33 {
-            return Color(red: 0.15, green: 0.28, blue: 0.85).mix(with: Color(red: 0.12, green: 0.78, blue: 0.86), by: t / 0.33)
-        }
-        if t < 0.66 {
-            return Color(red: 0.12, green: 0.78, blue: 0.86).mix(with: Color(red: 1.0, green: 0.84, blue: 0.18), by: (t - 0.33) / 0.33)
-        }
-        return Color(red: 1.0, green: 0.84, blue: 0.18).mix(with: Color(red: 0.95, green: 0.22, blue: 0.12), by: (t - 0.66) / 0.34)
+    /// The system's last fix, without starting updates or asking for permission.
+    static func currentLocation() -> CLLocationCoordinate2D? {
+        let manager = CLLocationManager()
+        let status = manager.authorizationStatus
+        guard status == .authorizedAlways || status == .authorizedWhenInUse,
+              let location = manager.location,
+              abs(location.timestamp.timeIntervalSinceNow) < 7 * 86_400 else { return nil }
+        return location.coordinate
     }
 }

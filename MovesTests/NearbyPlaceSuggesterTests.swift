@@ -115,8 +115,25 @@ final class ReviewInboxBuilderTests: XCTestCase {
         XCTAssertTrue(TimelineReviewHeuristics.isShortTransitStop(light))
         XCTAssertTrue(TimelineReviewHeuristics.isPossibleFalseStop(light))
 
-        let items = ReviewInboxBuilder.items(visits: [start, light, end], moves: [incoming, outgoing])
-        XCTAssertTrue(items.contains { $0.section == .possibleFalseStops && $0.title == light.displayTitle })
+        let items = ReviewInboxBuilder.items(visits: [start, light, end], moves: [incoming, outgoing], now: date(12, 0))
+        XCTAssertEqual(items.map(\.section), [.stops])
+        XCTAssertEqual(items.first?.itemID, light.id)
+    }
+
+    /// A stay that ended the moment it began never reached Review before.
+    func testAZeroLengthStopIsAskedAbout() throws {
+        let (context, _) = try makeContext()
+        let start = insertPlace(in: context, arrival: date(10, 0), departure: date(10, 30), latitude: 52.50, longitude: 13.40)
+        let blip = insertPlace(in: context, arrival: date(10, 32), departure: date(10, 32), latitude: 52.501, longitude: 13.401)
+        let end = insertPlace(in: context, arrival: date(10, 50), departure: date(11, 0), latitude: 52.51, longitude: 13.41)
+        _ = insertMove(in: context, from: start, to: blip, start: date(10, 30), end: date(10, 32))
+        _ = insertMove(in: context, from: blip, to: end, start: date(10, 32), end: date(10, 50))
+        try context.save()
+
+        XCTAssertEqual(TimelineReviewHeuristics.stayDuration(of: blip), 0)
+        XCTAssertTrue(TimelineReviewHeuristics.shouldAskAboutStay(blip, now: date(12, 0)))
+        blip.reviewState = .pending
+        XCTAssertEqual(TimelineReviewHeuristics.question(for: blip, now: date(12, 0)), .notAStop)
     }
 
     func testUncertainAutoModesLandInTheModeSection() throws {
@@ -128,11 +145,11 @@ final class ReviewInboxBuilderTests: XCTestCase {
         move.transportModeSource = .auto
         try context.save()
 
-        let items = ReviewInboxBuilder.items(visits: [start, end], moves: [move])
-        XCTAssertEqual(items.filter { $0.section == .uncertainModes }.count, 1)
+        let items = ReviewInboxBuilder.items(visits: [start, end], moves: [move], now: date(12, 0))
+        XCTAssertEqual(items.filter { $0.section == .trips }.count, 1)
     }
 
-    func testOnlyGoogleTimelineGuessesAreListedAsImportedPaths() throws {
+    func testImportedHistoryIsNeverListed() throws {
         let (context, _) = try makeContext()
         let start = insertPlace(in: context, arrival: date(8, 0), departure: date(8, 10), latitude: 52.5, longitude: 13.4)
         let end = insertPlace(in: context, arrival: date(8, 40), departure: date(9, 0), latitude: 52.54, longitude: 13.44)
@@ -145,10 +162,11 @@ final class ReviewInboxBuilderTests: XCTestCase {
         let restored = insertMove(in: context, from: start, to: end, start: date(9, 0), end: date(9, 30))
         restored.origin = .imported
         restored.routeMatchConfidence = .estimated
+        restored.reviewState = .pending
         try context.save()
 
-        let items = ReviewInboxBuilder.items(visits: [], moves: [google, restored])
-        XCTAssertEqual(items.map(\.id), ["import-move-\(google.id.uuidString)"])
+        let items = ReviewInboxBuilder.items(visits: [], moves: [google, restored], now: date(12, 0))
+        XCTAssertTrue(items.isEmpty)
     }
 
     func testHeadingDifferenceTreatsWrapAround() {

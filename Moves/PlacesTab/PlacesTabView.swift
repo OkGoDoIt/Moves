@@ -27,7 +27,10 @@ struct PlacesTabView: View {
     var body: some View {
         NavigationStack(path: $path) {
             Group {
-                if index.snapshot.isEmpty {
+                if !index.hasLoaded {
+                    ProgressView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if index.snapshot.isEmpty && index.query.isEmpty {
                     emptyState
                 } else {
                     placesList
@@ -53,13 +56,14 @@ struct PlacesTabView: View {
                 switch route {
                 case .known(let id):
                     PlaceDetailView(placeID: id)
-                case .suggested(let clusterID):
-                    if let cluster = index.snapshot.suggestedCluster(id: clusterID) {
-                        SuggestedPlaceDetailView(cluster: cluster) { placeID in
-                            path.removeLast()
-                            path.append(PlacesRoute.known(placeID))
-                        }
+                case .suggested(let cluster):
+                    // The route carries the cluster, so a rebuild cannot blank this page mid-edit.
+                    SuggestedPlaceDetailView(cluster: cluster) { placeID in
+                        path.removeLast()
+                        path.append(PlacesRoute.known(placeID))
                     }
+                case .allSuggested:
+                    AllSuggestedPlacesView(clusters: index.snapshot.suggested)
                 }
             }
         }
@@ -118,25 +122,19 @@ struct PlacesTabView: View {
         List {
             if !index.snapshot.suggested.isEmpty {
                 Section {
-                    ForEach(index.snapshot.suggested) { cluster in
-                        HStack(spacing: 8) {
-                            NavigationLink(value: PlacesRoute.suggested(cluster.id)) {
-                                SuggestedPlaceRow(cluster: cluster)
-                            }
-                            Button(String(localized: "Confirm")) {
-                                clusterToConfirm = cluster
-                            }
-                            .font(.system(size: 13, weight: .semibold, design: .rounded))
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
-                            .accessibilityLabel(String(localized: "Confirm \(cluster.name)"))
+                    ForEach(visibleSuggestions) { cluster in
+                        NavigationLink(value: PlacesRoute.suggested(cluster)) {
+                            SuggestedPlaceRow(cluster: cluster)
+                        }
+                    }
+                    if hiddenSuggestionCount > 0 {
+                        NavigationLink(value: PlacesRoute.allSuggested) {
+                            Text(String(localized: "Show all \(index.snapshot.suggested.count)"))
+                                .font(.system(.body, design: .rounded).weight(.medium))
                         }
                     }
                 } header: {
-                    PlacesSectionHeader(
-                        title: String(localized: "Suggested"),
-                        subtitle: String(localized: "Places you go that aren’t confirmed yet")
-                    )
+                    PlacesSectionHeader(title: String(localized: "To name"))
                 }
             }
 
@@ -156,7 +154,7 @@ struct PlacesTabView: View {
                     } header: {
                         PlacesSectionHeader(
                             title: city.cityName,
-                            subtitle: countryTitle(country),
+                            subtitle: country.countryName,
                             flagEmoji: country.flagEmoji
                         )
                     }
@@ -166,22 +164,33 @@ struct PlacesTabView: View {
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
         .movesFloatingTabBarClearance()
+        .overlay {
+            if index.snapshot.isEmpty, !index.query.isEmpty {
+                ContentUnavailableView.search(text: index.query)
+            }
+        }
+    }
+
+    /// The few places most worth naming; a search shows every match.
+    private static let suggestionPreviewCount = 5
+
+    private var visibleSuggestions: [PlacesSuggestedCluster] {
+        let all = index.snapshot.suggested
+        guard index.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return all }
+        return Array(all.prefix(Self.suggestionPreviewCount))
+    }
+
+    private var hiddenSuggestionCount: Int {
+        index.snapshot.suggested.count - visibleSuggestions.count
     }
 
     private var emptyState: some View {
         ContentUnavailableView {
-            Label(String(localized: "Places you actually go"), systemImage: "mappin.and.ellipse")
+            Label(String(localized: "No places yet"), systemImage: "mappin.and.ellipse")
         } description: {
-            Text(String(localized: "Home, work, and the café downstairs will be grouped by country and city after you confirm a visit."))
+            Text(String(localized: "Places where you stay a while will show up here."))
         }
         .padding(.horizontal, 24)
-    }
-
-    private func countryTitle(_ country: PlacesCountrySection) -> String {
-        if country.flagEmoji.isEmpty {
-            return country.countryName
-        }
-        return "\(country.flagEmoji)  \(country.countryName)"
     }
 
     private func rebuild() {
@@ -236,7 +245,34 @@ struct PlacesTabView: View {
 
 enum PlacesRoute: Hashable {
     case known(UUID)
-    case suggested(String)
+    case suggested(PlacesSuggestedCluster)
+    case allSuggested
+}
+
+/// Every place still to name, longest stays first.
+private struct AllSuggestedPlacesView: View {
+    let clusters: [PlacesSuggestedCluster]
+
+    var body: some View {
+        List(clusters) { cluster in
+            NavigationLink(value: PlacesRoute.suggested(cluster)) {
+                SuggestedPlaceRow(cluster: cluster)
+            }
+        }
+        .listStyle(.insetGrouped)
+        .scrollContentBackground(.hidden)
+        .movesFloatingTabBarClearance()
+        .background {
+            LinearGradient(
+                colors: [MovesPalette.backgroundTop, MovesPalette.backgroundBottom],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea()
+        }
+        .navigationTitle(String(localized: "To name"))
+        .navigationBarTitleDisplayMode(.inline)
+    }
 }
 
 private struct PlacesSectionHeader: View {
@@ -272,23 +308,11 @@ private struct KnownPlaceRow: View {
     let place: PlacesPlaceSummary
 
     var body: some View {
-        HStack(spacing: 12) {
-            PlacesCategoryGlyph(category: place.category)
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text(place.name.isEmpty ? String(localized: "Untitled place") : place.name)
-                    .font(.system(size: 16, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.primary)
-                    .lineLimit(2)
-                Text(place.subtitle)
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
-        }
-        .padding(.vertical, 4)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(place.name), \(place.subtitle)")
+        PlacesListRow(
+            glyph: PlacesCategoryGlyph(category: place.category),
+            title: place.name.isEmpty ? String(localized: "Untitled place") : place.name,
+            subtitle: place.subtitle
+        )
     }
 }
 
@@ -296,45 +320,42 @@ private struct SuggestedPlaceRow: View {
     let cluster: PlacesSuggestedCluster
 
     var body: some View {
-        HStack(spacing: 12) {
-            if cluster.showsMapThumbnail {
-                SuggestedPlaceMapThumb(coordinate: cluster.coordinate)
-            } else {
-                PlacesCategoryGlyph(category: nil, suggested: true)
-            }
+        PlacesListRow(
+            glyph: PlacesCategoryGlyph(category: nil, suggested: true),
+            title: cluster.name,
+            subtitle: cluster.subtitle
+        )
+    }
+}
 
+/// Glyph, name, and one secondary line. At accessibility sizes the glyph steps aside
+/// so names keep their width instead of breaking mid-word.
+private struct PlacesListRow: View {
+    let glyph: PlacesCategoryGlyph
+    let title: String
+    let subtitle: String
+
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    var body: some View {
+        HStack(spacing: 12) {
+            if !dynamicTypeSize.isAccessibilitySize {
+                glyph
+            }
             VStack(alignment: .leading, spacing: 3) {
-                Text(cluster.name)
-                    .font(.system(size: 16, weight: .semibold, design: .rounded))
-                    .lineLimit(2)
-                Text(cluster.subtitle)
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                Text(title)
+                    .font(.system(.body, design: .rounded).weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
+                Text(subtitle)
+                    .font(.system(.caption, design: .rounded).weight(.medium))
                     .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? 4 : 2)
             }
         }
         .padding(.vertical, 4)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(cluster.name), \(cluster.subtitle)")
-    }
-}
-
-private struct SuggestedPlaceMapThumb: View {
-    let coordinate: CLLocationCoordinate2D
-
-    var body: some View {
-        Map(initialPosition: .region(
-            MKCoordinateRegion(center: coordinate, latitudinalMeters: 220, longitudinalMeters: 220)
-        )) {
-            Marker("", coordinate: coordinate)
-                .tint(MovesPalette.place)
-        }
-        .mapStyle(.standard(elevation: .flat, pointsOfInterest: .excludingAll))
-        .mapControlVisibility(.hidden)
-        .disabled(true)
-        .frame(width: 52, height: 52)
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .accessibilityHidden(true)
+        .accessibilityLabel("\(title), \(subtitle)")
     }
 }
 

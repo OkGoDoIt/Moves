@@ -62,7 +62,9 @@ struct DayTimelinePage: View {
 
     var body: some View {
         Group {
-            if isActive, let dayTimeline {
+            if let dayTimeline {
+                // Neighbouring pages render too, so a swipe shows the next day rather than
+                // a blank page. Only the active page hosts a live map.
                 DayTimelinePageContent(dayTimeline: dayTimeline, isActive: isActive)
             } else if isActive {
                 loadingState
@@ -71,7 +73,10 @@ struct DayTimelinePage: View {
             }
         }
         .task(id: pageLoadKey) {
-            await syncDayTimelineForActivation()
+            await loadDayTimeline()
+        }
+        .onDisappear {
+            releaseLoadedDay()
         }
         .onReceive(NotificationCenter.default.publisher(for: .movesPhotoLibraryDidChange)) { _ in
             guard isActive else { return }
@@ -98,19 +103,6 @@ struct DayTimelinePage: View {
     private var inactiveState: some View {
         Color.clear
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .onAppear {
-                releaseLoadedDay()
-            }
-    }
-
-    @MainActor
-    private func syncDayTimelineForActivation() async {
-        guard isActive else {
-            releaseLoadedDay()
-            return
-        }
-
-        await loadDayTimeline()
     }
 
     @MainActor
@@ -145,14 +137,16 @@ struct DayTimelinePage: View {
     }
 }
 
-/// The Timeline map hero in portrait: 42% of the screen with a 260pt minimum. The storyline
-/// keeps room for about two rows and the activity chips, and a short display keeps the
-/// map within 45% of the page, so on small screens the map gives way.
+/// The Timeline map hero in portrait: about a third of the page with a 200pt minimum, so
+/// the day's list gets most of the room. The storyline keeps room for about two rows and the
+/// activity chips, and a short display keeps the map within 45% of the page.
 enum TimelineHeroLayout {
     static let storylineRoom: CGFloat = 220
+    static let pageFraction: CGFloat = 0.36
+    static let minimumHeight: CGFloat = 200
 
     static func collapsedHeight(pageHeight: CGFloat, screenHeight: CGFloat) -> CGFloat {
-        let wanted = max(260, screenHeight * 0.42)
+        let wanted = max(minimumHeight, pageHeight * pageFraction)
         return min(wanted, max(pageHeight * 0.45, pageHeight - storylineRoom))
     }
 }
@@ -388,7 +382,10 @@ struct DayTimelinePageContent: View {
             presentationCache = Self.makePresentationCache(for: dayTimeline)
         }
         .onChange(of: mapSelection) { _, selection in
-            guard let selection else { return }
+            guard let selection else {
+                highlightedEntryID = nil
+                return
+            }
             if let match = displayedTimelineEntries.first(where: { $0.mapSelection == selection }) {
                 highlightedEntryID = match.id
             }
@@ -595,12 +592,16 @@ struct DayTimelinePageContent: View {
         isLast: Bool,
         usesSelection: Bool
     ) -> some View {
+        // A row that opens a detail screen must not also carry a tap gesture: SwiftUI hands
+        // the tap to the gesture and the enclosing NavigationLink never fires. Those rows
+        // select on the map from the map itself; the others still select on tap.
+        let opensDetail = !usesSelection && entry.hasDetailScreen
         let row = StorylineRow(
             entry: entry,
             isFirst: isFirst,
             isLast: isLast,
             isHighlighted: highlightedEntryID == entry.id,
-            onSelect: {
+            onSelect: opensDetail ? nil : {
                 select(entry)
             },
             onCollapseShortStops: collapseHandler(for: entry)
@@ -1035,6 +1036,13 @@ struct DayMapStrip: View {
     @State private var historicalRoutes: [RenderedRoute]
     @State private var presentationCache: DayMapPresentationCache
     @State private var collapsedSnapshotImage: UIImage?
+    /// The live map has had a moment to draw after the page became active, so the
+    /// snapshot that stood in for it can fade away.
+    @State private var isLiveMapSettled: Bool
+    /// Whether the live map is in the hierarchy. Creating and tearing down a map is the
+    /// costliest part of changing pages, so it happens a beat after a page settles rather
+    /// than in the same frame, which keeps the next swipe responsive.
+    @State private var isLiveMapInserted: Bool
 
     private var placeMarkers: [PlaceMarker] {
         presentationCache.placeMarkers
@@ -1050,21 +1058,35 @@ struct DayMapStrip: View {
 
     private var displayedRoutes: [RenderedRoute] {
         guard !filteredModes.isEmpty else { return historicalRoutes }
-        return historicalRoutes.filter { filteredModes.contains($0.transportMode) }
+        return historicalRoutes.filter { filteredModes.contains(ActivityBubbleMetrics.chipMode(for: $0.transportMode)) }
     }
 
     private var historicalRouteCoordinates: [CLLocationCoordinate2D] {
         displayedRoutes.flatMap { $0.coordinates }
     }
 
-    private var usesLiveMap: Bool {
-        fillsAvailableSpace || isExpanded
+    /// Only the active page hosts a live map; neighbouring pages show a snapshot of the
+    /// same region, which keeps swiping between days cheap.
+    private var showsLiveMap: Bool {
+        isLiveMapInserted
+    }
+
+    /// The snapshot stands in while the page is inactive, and stays on top of the live map
+    /// for a moment after activation so the swap is a cross-fade rather than a flash.
+    private var showsSnapshot: Bool {
+        !isActive || !isLiveMapInserted || (!isLiveMapSettled && collapsedSnapshotImage != nil)
     }
 
     /// Expanded / landscape live map may shade by speed when the Map setting
-    /// is on. Collapsed hero snapshots stay solid mode color.
+    /// is on. The collapsed hero stays solid mode color, matching its snapshot.
     private var allowsSpeedShading: Bool {
-        usesLiveMap && shadeRoutesBySpeed
+        (fillsAvailableSpace || isExpanded) && shadeRoutesBySpeed
+    }
+
+    /// The camera no longer shows the whole day: the person moved it, or it zoomed to a
+    /// selected stay or trip.
+    private var hasMovedCamera: Bool {
+        isActive && (camera.positionedByUser || selection != nil)
     }
 
     private var historicalRouteRefreshKey: String {
@@ -1111,6 +1133,8 @@ struct DayMapStrip: View {
         _mapRegion = State(initialValue: initialRegion)
         _historicalRoutes = State(initialValue: renderedRoutes)
         _presentationCache = State(initialValue: cache)
+        _isLiveMapSettled = State(initialValue: isActive)
+        _isLiveMapInserted = State(initialValue: isActive)
     }
 
     var body: some View {
@@ -1131,21 +1155,16 @@ struct DayMapStrip: View {
                         .padding(12)
                 }
             }
-            .overlay(alignment: .bottom) {
-                if !fillsAvailableSpace {
-                    expandHandle
-                        .padding(.bottom, 8)
-                }
-            }
             .overlay(alignment: .bottomTrailing) {
-                if showsCollapseControl {
-                    fullScreenToggleButton(isFullScreen: true)
-                        .padding(16)
-                }
+                mapControls
+                    .padding(showsCollapseControl ? 16 : 10)
             }
             .shadow(color: .black.opacity(fillsAvailableSpace && showsCollapseControl ? 0.12 : 0), radius: 18, x: 0, y: 8)
             .animation(Self.fullScreenMapAnimation, value: isExpanded)
-            .modifier(DayMapExpandDragModifier(isEnabled: !usesLiveMap, isExpanded: $isExpanded))
+            .animation(.easeInOut(duration: 0.2), value: hasMovedCamera)
+            .task(id: isActive) {
+                await settleLiveMapAfterActivation()
+            }
             .task(id: "\(historicalRouteRefreshKey)|\(isActive ? 1 : 0)") {
                 guard isActive else { return }
                 await refreshHistoricalRouteCoordinates()
@@ -1162,6 +1181,17 @@ struct DayMapStrip: View {
             .onChange(of: moveModesKey) { _, _ in
                 presentationCache = Self.makePresentationCache(for: dayTimeline)
             }
+            .onChange(of: placeNamesKey) { _, _ in
+                presentationCache = Self.makePresentationCache(for: dayTimeline)
+            }
+    }
+
+    /// Changes when a stay is named, so its marker shows the new name.
+    private var placeNamesKey: String {
+        dayTimeline.places
+            .map { "\($0.id.uuidString)|\($0.userLabel ?? "")|\($0.knownPlace?.name ?? "")" }
+            .sorted()
+            .joined(separator: ",")
     }
 
     /// Changes when a move's mode is corrected, so the map redraws it in the new color.
@@ -1172,29 +1202,142 @@ struct DayMapStrip: View {
             .joined(separator: ",")
     }
 
-    @ViewBuilder
     private var activeMapView: some View {
-        if usesLiveMap {
-            mapView
-        } else {
-            collapsedMapSnapshotView
+        ZStack {
+            if showsLiveMap {
+                mapView
+            }
+            if showsSnapshot {
+                collapsedMapSnapshotView
+                    .allowsHitTesting(!isActive)
+                    .transition(.opacity)
+            }
         }
     }
 
     private var mapView: some View {
-        Map(position: $camera, interactionModes: [.pan, .zoom]) {
-            mapContent
+        MapReader { proxy in
+            Map(position: $camera, interactionModes: [.pan, .zoom]) {
+                mapContent
+            }
+            .mapStyle(.standard(elevation: .flat, emphasis: .muted))
+            .onTapGesture(coordinateSpace: .local) { point in
+                selectRoute(near: point, proxy: proxy)
+            }
         }
-        .mapStyle(.standard(elevation: .flat, emphasis: .muted))
         .accessibilityLabel(String(localized: "Day map"))
-        .accessibilityHint(String(localized: "Shows today’s places and how you moved"))
+        .accessibilityHint(String(localized: "Shows the day’s places and how you moved"))
+    }
+
+    /// Bottom-trailing map buttons: refit the day once the camera has moved, and
+    /// expand or shrink the map.
+    @ViewBuilder
+    private var mapControls: some View {
+        if isActive {
+            HStack(spacing: 10) {
+                if hasMovedCamera {
+                    recentreButton
+                        .transition(.scale(scale: 0.6).combined(with: .opacity))
+                }
+                if !fillsAvailableSpace || showsCollapseControl {
+                    fullScreenToggleButton(isFullScreen: showsCollapseControl)
+                }
+            }
+        }
+    }
+
+    private var recentreButton: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.35)) {
+                if selection != nil {
+                    selection = nil
+                } else {
+                    refreshCamera(for: nil)
+                }
+            }
+        } label: {
+            Image(systemName: "scope")
+                .font(.system(size: 15, weight: .bold, design: .rounded))
+                .frame(width: 40, height: 40)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .frostedCircle(enabled: true)
+        .accessibilityLabel(String(localized: "Show the whole day"))
+        .help(String(localized: "Show the whole day"))
+    }
+
+    /// Lets the live map draw under the snapshot before the snapshot fades out.
+    @MainActor
+    private func settleLiveMapAfterActivation() async {
+        guard isActive else {
+            isLiveMapSettled = false
+            // A neighbour's snapshot shows the fitted day, so the live map starts there too.
+            if camera.positionedByUser {
+                refreshCamera(for: selection)
+            }
+            guard isLiveMapInserted else { return }
+            try? await Task.sleep(for: .milliseconds(600))
+            guard !Task.isCancelled else { return }
+            isLiveMapInserted = false
+            return
+        }
+        guard !isLiveMapSettled else { return }
+        if !isLiveMapInserted {
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            isLiveMapInserted = true
+        }
+        try? await Task.sleep(for: .milliseconds(400))
+        guard !Task.isCancelled else { return }
+        withAnimation(.easeOut(duration: 0.25)) {
+            isLiveMapSettled = true
+        }
+    }
+
+    /// A tap on a drawn route selects that trip, the way a tap on a marker selects a stay.
+    private func selectRoute(near point: CGPoint, proxy: MapProxy) {
+        let tolerance: CGFloat = 22
+        // Markers handle their own taps.
+        for marker in placeMarkers {
+            if let markerPoint = proxy.convert(marker.coordinate, to: .local),
+               hypot(markerPoint.x - point.x, markerPoint.y - point.y) < 16 {
+                return
+            }
+        }
+
+        var best: (id: String, distance: CGFloat)?
+        for route in displayedRoutes where route.coordinates.count > 1 {
+            let points = route.coordinates.compactMap { proxy.convert($0, to: .local) }
+            guard points.count > 1 else { continue }
+            for (start, end) in zip(points, points.dropFirst()) {
+                let distance = Self.distance(from: point, toSegment: start, end)
+                if distance < tolerance, distance < (best?.distance ?? .greatestFiniteMagnitude) {
+                    best = (route.id, distance)
+                }
+            }
+        }
+
+        guard let best, let id = UUID(uuidString: best.id) else { return }
+        withAnimation(.easeInOut(duration: 0.2)) {
+            selection = .move(id)
+        }
+    }
+
+    private static func distance(from point: CGPoint, toSegment start: CGPoint, _ end: CGPoint) -> CGFloat {
+        let dx = end.x - start.x
+        let dy = end.y - start.y
+        let lengthSquared = dx * dx + dy * dy
+        guard lengthSquared > 0 else { return hypot(point.x - start.x, point.y - start.y) }
+        let t = max(0, min(1, ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared))
+        return hypot(point.x - (start.x + t * dx), point.y - (start.y + t * dy))
     }
 
     private var collapsedMapSnapshotView: some View {
         GeometryReader { proxy in
             let size = CGSize(
                 width: max(proxy.size.width, 1),
-                height: collapsedMapHeight
+                height: max(proxy.size.height, 1)
             )
 
             ZStack {
@@ -1207,9 +1350,6 @@ struct DayMapStrip: View {
                 } else {
                     Rectangle()
                         .fill(MovesPalette.card.opacity(0.72))
-
-                    ProgressView()
-                        .tint(MovesPalette.routeTracking)
                 }
             }
             .task(id: collapsedSnapshotRefreshKey(for: size)) {
@@ -1294,6 +1434,10 @@ struct DayMapStrip: View {
             }
         }
 
+        // Where the person is now, for orientation. It is never part of the fitted camera,
+        // so a past day abroad stays framed on that day.
+        UserAnnotation()
+
         if placeMarkers.isEmpty,
            historicalRouteCoordinates.isEmpty,
            (liveRouteSnapshot?.coordinates.isEmpty ?? true),
@@ -1336,25 +1480,6 @@ struct DayMapStrip: View {
 
     private static func timeString(from date: Date) -> String {
         date.formatted(.dateTime.hour().minute())
-    }
-
-    private var expandHandle: some View {
-        Button {
-            withAnimation(Self.fullScreenMapAnimation) {
-                isExpanded = true
-            }
-        } label: {
-            VStack(spacing: 4) {
-                Capsule()
-                    .fill(.white.opacity(0.92))
-                    .frame(width: 36, height: 5)
-                    .shadow(color: .black.opacity(0.18), radius: 2, y: 1)
-            }
-            .frame(width: 56, height: 22)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(String(localized: "Expand map"))
     }
 
     private func isSelectedRoute(_ route: RenderedRoute) -> Bool {
@@ -1417,7 +1542,7 @@ struct DayMapStrip: View {
 
     @MainActor
     private func refreshCollapsedSnapshot(size: CGSize) async {
-        guard !usesLiveMap, size.width > 1, size.height > 1 else { return }
+        guard size.width > 1, size.height > 1 else { return }
 
         do {
             let image = try await Self.makeCollapsedSnapshot(
@@ -1816,28 +1941,6 @@ private extension DayTimelinePageContent {
     }
 }
 
-private struct DayMapExpandDragModifier: ViewModifier {
-    let isEnabled: Bool
-    @Binding var isExpanded: Bool
-
-    func body(content: Content) -> some View {
-        if isEnabled {
-            content.gesture(
-                DragGesture(minimumDistance: 16)
-                    .onEnded { value in
-                        if value.translation.height < -36 {
-                            withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) {
-                                isExpanded = true
-                            }
-                        }
-                    }
-            )
-        } else {
-            content
-        }
-    }
-}
-
 /// Compact storyline measurements. Hidden stops must stay shorter than a place row.
 enum StorylineCompactMetrics {
     static let hiddenStopRowHeight: CGFloat = 26
@@ -1909,11 +2012,7 @@ struct StorylineRow: View {
             }
         }
         .contentShape(Rectangle())
-        .simultaneousGesture(
-            TapGesture().onEnded {
-                onSelect?()
-            }
-        )
+        .modifier(StorylineRowSelectGesture(onSelect: onSelect))
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(isHighlighted ? [.isSelected] : [])
     }
@@ -2015,6 +2114,19 @@ struct StorylineRow: View {
     }
 }
 
+/// Adds the select-on-tap gesture only for rows that don't open a detail screen.
+private struct StorylineRowSelectGesture: ViewModifier {
+    let onSelect: (() -> Void)?
+
+    func body(content: Content) -> some View {
+        if let onSelect {
+            content.onTapGesture(perform: onSelect)
+        } else {
+            content
+        }
+    }
+}
+
 private struct ShortStopCollapseHint: ViewModifier {
     let isEnabled: Bool
 
@@ -2111,6 +2223,16 @@ private struct StorylineRail: View {
 private struct StorylineRowBody: View {
     let entry: TimelineEntry
     @Environment(\.timelineItemActions) private var actions
+    @EnvironmentObject private var health: HealthSummaryStore
+
+    /// "Stayed 3h 12m · walked 0.4 mi" when Apple Health shows a real walk inside the stay.
+    private var subtitleText: String {
+        guard case .place(let place) = entry,
+              let meters = health.walkedHereMeters(stayID: place.id) else {
+            return entry.subtitleText
+        }
+        return "\(entry.subtitleText) · \(HealthSummaryText.walkedHere(meters))"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -2151,8 +2273,17 @@ private struct StorylineRowBody: View {
                         moveDetails
                     }
                 }
+            } else if case .place(let place) = entry, let actions, TimelinePlaceNaming.needsName(place) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(subtitleText)
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .foregroundStyle(Color.primary.opacity(0.68))
+                    NameThisPlaceChip {
+                        actions.requestRename(place)
+                    }
+                }
             } else {
-                Text(entry.subtitleText)
+                Text(subtitleText)
                     .font(.system(size: 12, weight: .medium, design: .rounded))
                     .foregroundStyle(Color.primary.opacity(0.68))
             }
@@ -2178,6 +2309,46 @@ private struct StorylineRowBody: View {
             .font(.system(size: 12, weight: .medium, design: .rounded))
             .foregroundStyle(Color.primary.opacity(0.68))
             .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// When a stay still goes by a street address or coordinates.
+enum TimelinePlaceNaming {
+    /// A stay with no name of the person's own and no learned place behind it. Short stops
+    /// stay quiet; they are usually traffic lights and doorways.
+    static func needsName(_ place: VisitPlace) -> Bool {
+        let userLabel = place.userLabel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard userLabel.isEmpty else { return false }
+        let knownName = place.knownPlace?.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard knownName.isEmpty else { return false }
+        return !place.isHiddenAsShortStop
+    }
+}
+
+/// The row's way into naming a stay. Same capsule as the mode chip on a trip row.
+struct NameThisPlaceChip: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 3) {
+                Image(systemName: "pencil")
+                    .font(.system(size: 9, weight: .bold))
+                Text(String(localized: "Name this place"))
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+            }
+            .foregroundStyle(MovesPalette.place)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(MovesPalette.place.opacity(0.14)))
+            // A taller touch target that doesn't change the row's height.
+            .padding(.vertical, 10)
+            .contentShape(Rectangle())
+            .padding(.vertical, -10)
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -2215,6 +2386,16 @@ enum TimelineEntry: Identifiable {
         case .start: return .carryOver
         case .liveRoute: return .live
         case .sample: return .sample
+        }
+    }
+
+    /// Whether tapping the row opens a detail screen. Only those rows show a chevron.
+    var hasDetailScreen: Bool {
+        switch self {
+        case .place, .move:
+            return true
+        case .hiddenStops, .liveRoute, .start, .sample:
+            return false
         }
     }
 

@@ -3,107 +3,153 @@ import MapKit
 import SwiftData
 import SwiftUI
 
-/// Confirm form for an unconfirmed cluster: name, address, label, nearby POI chips.
+/// Confirm form for an unconfirmed cluster: map, name, one-tap labels, nearby suggestions.
 ///
-/// Used as a sheet from the Places list and as the hero on the suggested detail page.
+/// The caller owns `name` so the navigation title always shows what the place will be called.
+/// Used on the suggested detail page and in `PlaceConfirmSheet`.
 struct PlaceConfirmForm: View {
     let cluster: PlacesSuggestedCluster
+    @Binding var name: String
     var onConfirmed: (KnownPlace) -> Void
-    var showsConfirmButton: Bool = true
+    var onNameFocusChange: (Bool) -> Void = { _ in }
     var searcher: any LocalPlaceSearching = MapKitLocalPlaceSearcher()
 
     @Environment(\.modelContext) private var modelContext
     @Environment(\.undoToastPresenter) private var undoToast
 
-    @State private var name: String
     @State private var address: String
-    @State private var category: String
     @State private var camera: MapCameraPosition
-    @State private var pinCoordinate: CLLocationCoordinate2D
     @State private var chips: [NearbyPlaceCandidate] = []
+    @State private var chipCategories: [String: String] = [:]
     @State private var existingPlaceID: UUID?
-    @State private var appliedChipName: String?
-    @State private var nameTouched = false
-    @State private var isGeocoding = false
+    @State private var nameSource: NameSource = .guess
+    @State private var guessedName: String
+    @State private var isLookingUp = false
     @State private var extraCategories: [String] = []
+    @State private var confirmCount = 0
+    @FocusState private var isNameFocused: Bool
+
+    /// Where the current name came from. Only a guess may be replaced without asking.
+    private enum NameSource: Equatable {
+        case guess
+        case chip(String)
+        case typed
+    }
 
     init(
         cluster: PlacesSuggestedCluster,
+        name: Binding<String>,
         onConfirmed: @escaping (KnownPlace) -> Void,
-        showsConfirmButton: Bool = true,
+        onNameFocusChange: @escaping (Bool) -> Void = { _ in },
         searcher: any LocalPlaceSearching = MapKitLocalPlaceSearcher()
     ) {
         self.cluster = cluster
+        _name = name
         self.onConfirmed = onConfirmed
-        self.showsConfirmButton = showsConfirmButton
+        self.onNameFocusChange = onNameFocusChange
         self.searcher = searcher
-        let seedName = cluster.isNaming ? "" : cluster.name
-        _name = State(initialValue: seedName)
-        _address = State(initialValue: cluster.formattedAddress ?? cluster.address ?? cluster.thoroughfare ?? "")
-        _category = State(initialValue: "")
-        _pinCoordinate = State(initialValue: cluster.coordinate)
+        _guessedName = State(initialValue: name.wrappedValue)
+        _address = State(initialValue: cluster.formattedAddress ?? cluster.address ?? "")
+        let meters = max(cluster.spreadRadius * 6, 280)
         _camera = State(
             initialValue: .region(
-                MKCoordinateRegion(
-                    center: cluster.coordinate,
-                    latitudinalMeters: 280,
-                    longitudinalMeters: 280
-                )
+                MKCoordinateRegion(center: cluster.coordinate, latitudinalMeters: meters, longitudinalMeters: meters)
             )
         )
     }
 
+    /// Seeds the editable name for a cluster: its list title, or empty while still naming.
+    static func initialName(for cluster: PlacesSuggestedCluster) -> String {
+        cluster.isNaming ? "" : cluster.name
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            pinMap
+        VStack(alignment: .leading, spacing: 18) {
+            map
             nameField
-            nearbyChips
-            addressField
             labelChips
-            if showsConfirmButton {
-                confirmButton
-            }
+            nearbyChips
+            confirmButton
+        }
+        .sensoryFeedback(.success, trigger: confirmCount)
+        .onChange(of: isNameFocused) { _, focused in onNameFocusChange(focused) }
+        // Scroll again once the keyboard has taken its space, so Confirm lands above it.
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardDidShowNotification)) { _ in
+            if isNameFocused { onNameFocusChange(true) }
         }
         .task {
             await refreshLookup()
         }
     }
 
-    private var pinMap: some View {
-        ZStack {
-            Map(position: $camera)
-                .mapStyle(.standard(elevation: .flat))
-                .onMapCameraChange(frequency: .onEnd) { context in
-                    handleCameraMove(context.region.center)
-                }
-            Image(systemName: "mappin")
-                .font(.system(size: 28, weight: .semibold))
-                .foregroundStyle(MovesPalette.place)
-                .shadow(color: .black.opacity(0.18), radius: 4, y: 2)
-                .offset(y: -14)
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
+    // MARK: Sections
+
+    private var map: some View {
+        Map(position: $camera) {
+            MapCircle(center: cluster.coordinate, radius: cluster.spreadRadius)
+                .foregroundStyle(MovesPalette.place.opacity(0.16))
+                .stroke(MovesPalette.place.opacity(0.85), lineWidth: 2)
+            Annotation(PlaceDisplayNamer.meaningful(name) ?? "", coordinate: cluster.coordinate, anchor: .center) {
+                PlacesCategoryGlyph(category: selectedPreset)
+            }
+            UserAnnotation()
         }
-        .frame(height: 180)
+        .mapStyle(.standard(elevation: .flat))
+        .mapControls {
+            MapUserLocationButton()
+            MapCompass()
+        }
+        .frame(height: 200)
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .accessibilityLabel(String(localized: "Map pin. Drag the map to set the address."))
+        .accessibilityLabel(String(localized: "Map of this place"))
     }
 
     private var nameField: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(String(localized: "Name"))
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .font(.system(.caption, design: .rounded).weight(.semibold))
                 .foregroundStyle(.secondary)
-            TextField(String(localized: "Name"), text: $name)
+            TextField(String(localized: "Name this place"), text: typedName)
+                .font(.system(.body, design: .rounded))
                 .textInputAutocapitalization(.words)
                 .submitLabel(.done)
-                .onChange(of: name) { _, newValue in
-                    nameTouched = true
-                    // A chip sets the name and its place together. Only a different name clears the place.
-                    guard newValue != appliedChipName else { return }
-                    appliedChipName = nil
-                    existingPlaceID = nil
+                .focused($isNameFocused)
+                .onSubmit { isNameFocused = false }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(MovesPalette.textFieldBackground.opacity(0.92))
+                )
+            if let line = addressLine {
+                Text(line)
+                    .font(.system(.footnote, design: .rounded).weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+        }
+    }
+
+    private var labelChips: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(String(localized: "This is"))
+                .font(.system(.caption, design: .rounded).weight(.semibold))
+                .foregroundStyle(.secondary)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(labelOptions, id: \.self) { option in
+                        PlaceChip(
+                            title: option,
+                            systemImage: KnownPlaceCategory(title: option)?.symbolName,
+                            isSelected: false
+                        ) {
+                            confirm(label: option)
+                        }
+                        .accessibilityHint(String(localized: "Confirms this place"))
+                    }
                 }
+            }
+            .scrollClipDisabled()
         }
     }
 
@@ -112,90 +158,80 @@ struct PlaceConfirmForm: View {
         if !chips.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
                 Text(String(localized: "Nearby"))
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .font(.system(.caption, design: .rounded).weight(.semibold))
                     .foregroundStyle(.secondary)
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
                         ForEach(chips) { chip in
-                            Button {
+                            PlaceChip(
+                                title: chip.name,
+                                systemImage: nil,
+                                isSelected: nameSource == .chip(chip.id)
+                            ) {
                                 applyChip(chip)
-                            } label: {
-                                Text(chip.name)
-                                    .font(.system(size: 13, weight: .medium, design: .rounded))
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 7)
-                                    .foregroundStyle(.primary)
-                                    .background(
-                                        Capsule().fill(Color.accentColor.opacity(name == chip.name ? 0.22 : 0.12))
-                                    )
                             }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel(chip.name)
                         }
                     }
                 }
+                .scrollClipDisabled()
             }
-        } else if isGeocoding {
+        } else if isLookingUp {
             ProgressView()
                 .frame(maxWidth: .infinity)
         }
     }
 
-    private var addressField: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(String(localized: "Address"))
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                .foregroundStyle(.secondary)
-            TextField(String(localized: "Address"), text: $address, axis: .vertical)
-                .lineLimit(1...3)
-                .textInputAutocapitalization(.words)
-        }
-    }
-
-    private var labelChips: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(String(localized: "Label"))
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                .foregroundStyle(.secondary)
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(labelOptions, id: \.self) { option in
-                        let selected = category.caseInsensitiveCompare(option) == .orderedSame
-                        Button {
-                            category = selected ? "" : option
-                        } label: {
-                            Text(option)
-                                .font(.system(size: 13, weight: .medium, design: .rounded))
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 7)
-                                .foregroundStyle(selected ? Color.white : Color.primary)
-                                .background(
-                                    Capsule().fill(selected ? MovesPalette.place : Color.accentColor.opacity(0.12))
-                                )
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
-            TextField(String(localized: "Custom label"), text: $category)
-                .textInputAutocapitalization(.words)
-        }
-    }
-
     private var confirmButton: some View {
-        Button(action: confirm) {
+        Button {
+            confirm(label: nil)
+        } label: {
             Text(String(localized: "Confirm place"))
                 .font(.system(.body, design: .rounded).weight(.semibold))
-                .frame(maxWidth: .infinity)
+                .frame(maxWidth: .infinity, minHeight: 34)
         }
         .buttonStyle(.borderedProminent)
         .tint(MovesPalette.place)
         .disabled(!canConfirm)
-        .padding(.top, 4)
+    }
+
+    // MARK: State
+
+    /// The text field's binding: anything typed is the person's own name.
+    private var typedName: Binding<String> {
+        Binding(
+            get: { name },
+            set: { newValue in
+                guard newValue != name else { return }
+                name = newValue
+                nameSource = .typed
+                existingPlaceID = nil
+            }
+        )
+    }
+
+    /// The address under the name, without repeating the name itself.
+    private var addressLine: String? {
+        guard let full = PlacesIndexBuilder.consistentAddress(
+            title: name,
+            address: PlaceDisplayNamer.meaningful(address),
+            locality: cluster.locality
+        ) else { return nil }
+        let typed = PlaceDisplayNamer.folded(name)
+        let parts = full.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        if PlaceDisplayNamer.folded(full) == typed { return nil }
+        if let first = parts.first, PlaceDisplayNamer.folded(first) == typed {
+            let rest = parts.dropFirst().joined(separator: ", ")
+            return rest.isEmpty ? nil : rest
+        }
+        return full
     }
 
     private var canConfirm: Bool {
         PlaceDisplayNamer.meaningful(name) != nil
+    }
+
+    private var selectedPreset: KnownPlaceCategory? {
+        KnownPlaceCategory(title: name)
     }
 
     private var labelOptions: [String] {
@@ -207,10 +243,10 @@ struct PlaceConfirmForm: View {
     }
 
     private func applyChip(_ chip: NearbyPlaceCandidate) {
-        appliedChipName = chip.name
         name = chip.name
-        nameTouched = true
-        if let subtitle = chip.subtitle, !subtitle.isEmpty {
+        nameSource = .chip(chip.id)
+        isNameFocused = false
+        if let subtitle = PlaceDisplayNamer.meaningful(chip.subtitle) {
             address = subtitle
         }
         if case .knownPlace(let id) = chip.source {
@@ -220,70 +256,132 @@ struct PlaceConfirmForm: View {
         }
     }
 
-    private func handleCameraMove(_ center: CLLocationCoordinate2D) {
-        let moved = CLLocation(latitude: pinCoordinate.latitude, longitude: pinCoordinate.longitude)
-            .distance(from: CLLocation(latitude: center.latitude, longitude: center.longitude))
-        guard moved > 8 else { return }
-        pinCoordinate = center
-        Task { await refreshLookup() }
-    }
-
     private func refreshLookup() async {
-        isGeocoding = true
-        defer { isGeocoding = false }
+        isLookingUp = true
+        defer { isLookingUp = false }
+        let coordinate = cluster.coordinate
         let known = (try? SwiftDataTimelineRepository(modelContext: modelContext)
-            .knownPlaces(near: pinCoordinate, within: NearbyPlaceSuggester.searchRadius)) ?? []
-        extraCategories = Array(
-            Set(known.compactMap { place -> String? in
-                guard let raw = place.category?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
-                    return nil
-                }
-                return KnownPlaceCategory(stored: raw)?.title ?? raw.capitalized
-            })
-        ).sorted()
+            .knownPlaces(near: coordinate, within: NearbyPlaceSuggester.searchRadius)) ?? []
+        // Copy what the chips need now; the rows may change while the lookups run.
+        var categories: [String: String] = [:]
+        var extras = Set<String>()
+        for place in known {
+            guard let raw = PlaceDisplayNamer.meaningful(place.category) else { continue }
+            let title = KnownPlaceCategory(stored: raw)?.title ?? raw.capitalized
+            categories[place.id.uuidString] = title
+            if KnownPlaceCategory(stored: raw) == nil { extras.insert(title) }
+        }
+        chipCategories = categories
+        extraCategories = extras.sorted()
 
-        if let region = try? await MapKitPlaceReverseGeocoder().reverseGeocode(pinCoordinate) {
-            if !nameTouched, let best = region.bestPlaceName {
-                name = best
-            }
-            if let formatted = region.formattedAddress ?? region.thoroughfare {
+        if let region = try? await MapKitPlaceReverseGeocoder().reverseGeocode(coordinate) {
+            if let formatted = region.formattedAddress ?? region.thoroughfare,
+               PlaceDisplayNamer.meaningful(address) == nil {
                 address = formatted
+            }
+            if nameSource == .guess, PlaceDisplayNamer.meaningful(name) == nil, let best = region.bestPlaceName {
+                name = best
+                guessedName = best
             }
         }
 
         let suggester = NearbyPlaceSuggester(searcher: searcher)
         let merged = await suggester.suggestions(
-            near: pinCoordinate,
+            near: coordinate,
             knownPlaces: known,
             query: nil,
             limit: 8
         )
         guard !Task.isCancelled else { return }
         chips = merged
-        if !nameTouched, name.isEmpty, let first = merged.first {
-            name = first.name
-            if let subtitle = first.subtitle { address = subtitle }
+        if nameSource == .guess, PlaceDisplayNamer.meaningful(name) == nil, let first = merged.first {
+            applyChip(first)
+            nameSource = .guess
+            guessedName = first.name
         }
     }
 
-    private func confirm() {
-        guard canConfirm else { return }
+    /// Confirms with the current name, or with a one-tap label such as Home.
+    /// A label names the place only when the name is still a guess.
+    private func confirm(label: String?) {
+        var finalName = name
+        var category: String?
+        if let label {
+            category = label
+            if nameSource == .guess || PlaceDisplayNamer.meaningful(name) == nil {
+                finalName = label
+                existingPlaceID = nil
+            }
+        } else if case .chip(let id) = nameSource, let known = chipCategories[existingPlaceID?.uuidString ?? id] {
+            category = known
+        } else {
+            category = KnownPlaceCategory(title: finalName)?.title
+        }
+        guard PlaceDisplayNamer.meaningful(finalName) != nil else { return }
+        isNameFocused = false
         do {
             let created = try PlacesLibrary.confirmSuggested(
                 visitIDs: cluster.visitIDs,
-                name: name,
+                name: finalName,
                 in: modelContext,
                 formattedAddress: PlaceDisplayNamer.meaningful(address),
                 thoroughfare: cluster.thoroughfare,
-                category: PlaceDisplayNamer.meaningful(category),
-                existingPlaceID: existingPlaceID,
-                center: pinCoordinate
+                category: category,
+                existingPlaceID: existingPlaceID
             )
-            undoToast?.show(actionName: String(localized: "Confirmed")) {
+            name = created.name
+            confirmCount += 1
+            undoToast?.show(actionName: String(localized: "Confirmed \(created.name)")) {
                 modelContext.undoManager?.undo()
             }
             onConfirmed(created)
         } catch {}
+    }
+}
+
+/// Capsule chip shared by the confirm form and place detail.
+struct PlaceChip: View {
+    let title: String
+    var systemImage: String?
+    var isSelected: Bool
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.system(.caption, design: .rounded).weight(.semibold))
+                }
+                Text(title)
+                    .lineLimit(1)
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .font(.system(.caption2, design: .rounded).weight(.bold))
+                }
+            }
+            .font(.system(.subheadline, design: .rounded).weight(.medium))
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .foregroundStyle(isSelected ? Color.white : Color.primary)
+            .background(
+                Capsule().fill(isSelected ? MovesPalette.place : Color.accentColor.opacity(0.12))
+            )
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+}
+
+extension KnownPlaceCategory {
+    /// Matches a typed or chip title ("Home", "home") to a preset.
+    init?(title: String) {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let match = KnownPlaceCategory.allCases.first(where: {
+            $0 != .other && $0.title.caseInsensitiveCompare(trimmed) == .orderedSame
+        }) else { return nil }
+        self = match
     }
 }
 
@@ -293,15 +391,34 @@ struct PlaceConfirmSheet: View {
     var onConfirmed: (KnownPlace) -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @State private var name: String
+
+    init(cluster: PlacesSuggestedCluster, onConfirmed: @escaping (KnownPlace) -> Void) {
+        self.cluster = cluster
+        self.onConfirmed = onConfirmed
+        _name = State(initialValue: PlaceConfirmForm.initialName(for: cluster))
+    }
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                PlaceConfirmForm(cluster: cluster) { place in
-                    onConfirmed(place)
-                    dismiss()
+            ScrollViewReader { proxy in
+                ScrollView {
+                    PlaceConfirmForm(
+                        cluster: cluster,
+                        name: $name,
+                        onConfirmed: { place in
+                            onConfirmed(place)
+                            dismiss()
+                        },
+                        onNameFocusChange: { focused in
+                            guard focused else { return }
+                            withAnimation { proxy.scrollTo(PlaceConfirmFormAnchor.id, anchor: .bottom) }
+                        }
+                    )
+                    .padding(20)
+                    .id(PlaceConfirmFormAnchor.id)
                 }
-                .padding(20)
+                .scrollDismissesKeyboard(.interactively)
             }
             .background {
                 LinearGradient(
@@ -311,7 +428,7 @@ struct PlaceConfirmSheet: View {
                 )
                 .ignoresSafeArea()
             }
-            .navigationTitle(String(localized: "Confirm place"))
+            .navigationTitle(PlaceDisplayNamer.meaningful(name) ?? String(localized: "New place"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -321,4 +438,9 @@ struct PlaceConfirmSheet: View {
         }
         .presentationDetents([.large])
     }
+}
+
+/// Scroll target that brings the whole form, through Confirm, above the keyboard.
+enum PlaceConfirmFormAnchor {
+    static let id = "place-confirm-form"
 }

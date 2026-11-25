@@ -7,29 +7,77 @@
 //
 
 import Foundation
+import SwiftData
 
-struct MovesLocationSummary: Identifiable {
+/// One visit, copied off the store so Connections never holds a model another context can delete.
+struct ConnectionVisit: Identifiable, Sendable {
+    let id: UUID
+    let arrivalDate: Date
+    let departureDate: Date?
+    let title: String
+    let comment: String?
+    let locationKey: String
+
+    init(_ place: VisitPlace) {
+        id = place.id
+        arrivalDate = place.arrivalDate
+        departureDate = place.departureDate
+        title = place.displayTitle
+        comment = place.comment
+        locationKey = MovesStatisticsSnapshot.locationKey(place)
+    }
+}
+
+/// One trip, copied off the store with what its two ends need.
+struct ConnectionLeg: Identifiable, Sendable {
+    let id: UUID
+    let startDate: Date
+    let endDate: Date
+    let distanceMeters: Double
+    let modeRaw: String
+    let startKey: String?
+    let endKey: String?
+    let startTitle: String?
+    let endTitle: String?
+
+    var transportMode: TransportMode { TransportMode(rawValue: modeRaw) ?? .unknown }
+    var duration: TimeInterval { max(endDate.timeIntervalSince(startDate), 0) }
+
+    init(_ move: MoveSegment) {
+        id = move.id
+        startDate = move.timelineStartDate
+        endDate = move.endDate
+        distanceMeters = move.distanceMeters
+        modeRaw = move.transportModeRawValue
+        startKey = MovesStatisticsSnapshot.locationKey(move.startPlace)
+        endKey = MovesStatisticsSnapshot.locationKey(move.endPlace)
+        startTitle = move.startPlace?.displayTitle
+        endTitle = move.endPlace?.displayTitle
+    }
+}
+
+struct MovesLocationSummary: Identifiable, Sendable {
     let id: String
     let title: String
-    let visits: [VisitPlace]
+    let visits: [ConnectionVisit]
     let totalDuration: TimeInterval
 
     var visitCount: Int { visits.count }
     var averageDuration: TimeInterval { visits.isEmpty ? 0 : totalDuration / Double(visits.count) }
-    var latestVisit: VisitPlace? { visits.max(by: { $0.arrivalDate < $1.arrivalDate }) }
+    var latestVisit: ConnectionVisit? { visits.max(by: { $0.arrivalDate < $1.arrivalDate }) }
 }
 
-struct MovesConnectionJourney: Identifiable {
-    let legs: [MoveSegment]
+struct MovesConnectionJourney: Identifiable, Sendable {
+    let legs: [ConnectionLeg]
 
     var id: String { legs.map { $0.id.uuidString }.joined(separator: "|") }
-    var startDate: Date { legs.first?.timelineStartDate ?? .distantPast }
+    var startDate: Date { legs.first?.startDate ?? .distantPast }
     var endDate: Date { legs.last?.endDate ?? startDate }
     var duration: TimeInterval { max(endDate.timeIntervalSince(startDate), 0) }
     var distanceMeters: Double { legs.reduce(0) { $0 + max($1.distanceMeters, 0) } }
     var isDirect: Bool { legs.count == 1 }
-    var originTitle: String { legs.first?.startPlace?.displayTitle ?? "Unknown place" }
-    var destinationTitle: String { legs.last?.endPlace?.displayTitle ?? "Unknown place" }
+    var originTitle: String { legs.first?.startTitle ?? "Unknown place" }
+    var destinationTitle: String { legs.last?.endTitle ?? "Unknown place" }
 }
 
 struct MovesConnectionStatistics {
@@ -43,32 +91,55 @@ struct MovesConnectionStatistics {
     }
 }
 
-struct MovesStatisticsSnapshot {
+/// Visit and journey aggregates for Insights Connections, held as plain values.
+struct MovesStatisticsSnapshot: Sendable {
     let locations: [MovesLocationSummary]
-    let visits: [VisitPlace]
-    let moves: [MoveSegment]
+    let visits: [ConnectionVisit]
+    let moves: [ConnectionLeg]
 
+    /// Reads every visit and trip on a private context off the main actor. The reconciler
+    /// deletes trips on its own context, and reading one on the main context before the
+    /// merge aborts the process, so this never walks the view's `@Query` rows.
+    static func load(from container: ModelContainer, now: Date = .now) async throws -> MovesStatisticsSnapshot {
+        try await Task.detached(priority: .userInitiated) {
+            let context = ModelContext(container)
+            context.autosaveEnabled = false
+            var placeFetch = FetchDescriptor<VisitPlace>()
+            placeFetch.relationshipKeyPathsForPrefetching = [\.dayTimeline]
+            let visits = try context.fetch(placeFetch)
+                .filter { $0.dayTimeline != nil }
+                .map(ConnectionVisit.init)
+            var moveFetch = FetchDescriptor<MoveSegment>()
+            moveFetch.relationshipKeyPathsForPrefetching = [\.dayTimeline, \.startPlace, \.endPlace]
+            let moves = try context.fetch(moveFetch)
+                .filter { $0.dayTimeline != nil }
+                .map(ConnectionLeg.init)
+            return MovesStatisticsSnapshot(visits: visits, moves: moves, now: now)
+        }.value
+    }
+
+    /// Only for models no other context can delete: unsaved fixtures, or rows on a private context.
     init(dayTimelines: [DayTimeline], now: Date = .now) {
-        var placesByID: [UUID: VisitPlace] = [:]
-        var movesByID: [UUID: MoveSegment] = [:]
-
+        var places: [UUID: ConnectionVisit] = [:]
+        var moves: [UUID: ConnectionLeg] = [:]
         for day in dayTimelines {
             for place in day.places {
-                placesByID[place.id] = place
+                places[place.id] = ConnectionVisit(place)
             }
             for move in day.moves {
-                movesByID[move.id] = move
-                if let startPlace = move.startPlace {
-                    placesByID[startPlace.id] = startPlace
-                }
-                if let endPlace = move.endPlace {
-                    placesByID[endPlace.id] = endPlace
-                }
+                moves[move.id] = ConnectionLeg(move)
+                if let startPlace = move.startPlace { places[startPlace.id] = ConnectionVisit(startPlace) }
+                if let endPlace = move.endPlace { places[endPlace.id] = ConnectionVisit(endPlace) }
             }
         }
+        self.init(visits: Array(places.values), moves: Array(moves.values), now: now)
+    }
 
-        let allVisits = placesByID.values.sorted { $0.arrivalDate > $1.arrivalDate }
-        let groupedVisits = Dictionary(grouping: allVisits, by: Self.locationKey)
+    init(visits: [ConnectionVisit], moves: [ConnectionLeg], now: Date = .now) {
+        var uniqueVisits: [UUID: ConnectionVisit] = [:]
+        for visit in visits { uniqueVisits[visit.id] = visit }
+        let allVisits = uniqueVisits.values.sorted { $0.arrivalDate > $1.arrivalDate }
+        let groupedVisits = Dictionary(grouping: allVisits, by: \.locationKey)
 
         locations = groupedVisits.map { key, grouped in
             let sortedVisits = grouped.sorted { $0.arrivalDate > $1.arrivalDate }
@@ -78,7 +149,7 @@ struct MovesStatisticsSnapshot {
             }
             return MovesLocationSummary(
                 id: key,
-                title: sortedVisits.first?.displayTitle ?? "Unknown place",
+                title: sortedVisits.first?.title ?? "Unknown place",
                 visits: sortedVisits,
                 totalDuration: totalDuration
             )
@@ -89,8 +160,10 @@ struct MovesStatisticsSnapshot {
             return $0.title.localizedStandardCompare($1.title) == .orderedAscending
         }
 
-        visits = allVisits
-        moves = movesByID.values.sorted { $0.timelineStartDate < $1.timelineStartDate }
+        self.visits = allVisits
+        var uniqueMoves: [UUID: ConnectionLeg] = [:]
+        for move in moves { uniqueMoves[move.id] = move }
+        self.moves = uniqueMoves.values.sorted { $0.startDate < $1.startDate }
     }
 
     func filteredLocations(matching query: String) -> [MovesLocationSummary] {
@@ -102,7 +175,7 @@ struct MovesStatisticsSnapshot {
         }
     }
 
-    func filteredVisits(matching query: String) -> [VisitPlace] {
+    func filteredVisits(matching query: String) -> [ConnectionVisit] {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return visits }
         return visits.filter { Self.visit($0, matches: query) }
@@ -120,10 +193,10 @@ struct MovesStatisticsSnapshot {
         var results: [MovesConnectionJourney] = []
         for startIndex in moves.indices {
             let firstMove = moves[startIndex]
-            guard Self.locationKey(firstMove.startPlace) == originKey else { continue }
+            guard firstMove.startKey == originKey else { continue }
 
             var legs = [firstMove]
-            guard let firstDestination = Self.locationKey(firstMove.endPlace) else { continue }
+            guard let firstDestination = firstMove.endKey else { continue }
             if firstDestination == destinationKey {
                 results.append(MovesConnectionJourney(legs: legs))
                 continue
@@ -134,13 +207,13 @@ struct MovesStatisticsSnapshot {
             var nextIndex = moves.index(after: startIndex)
             while nextIndex < moves.endIndex, legs.count < maximumLegCount {
                 let nextMove = moves[nextIndex]
-                guard Self.locationKey(nextMove.startPlace) == currentLocationKey else { break }
+                guard nextMove.startKey == currentLocationKey else { break }
 
-                let stopDuration = nextMove.timelineStartDate.timeIntervalSince(legs.last?.endDate ?? nextMove.timelineStartDate)
+                let stopDuration = nextMove.startDate.timeIntervalSince(legs.last?.endDate ?? nextMove.startDate)
                 guard stopDuration >= -60, stopDuration <= maximumIntermediateStop else { break }
 
                 legs.append(nextMove)
-                guard let nextDestination = Self.locationKey(nextMove.endPlace) else { break }
+                guard let nextDestination = nextMove.endKey else { break }
                 if nextDestination == destinationKey {
                     results.append(MovesConnectionJourney(legs: legs))
                     break
@@ -184,8 +257,8 @@ struct MovesStatisticsSnapshot {
         return trimmed.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
     }
 
-    private static func visit(_ visit: VisitPlace, matches query: String) -> Bool {
-        if visit.displayTitle.localizedCaseInsensitiveContains(query) { return true }
+    private static func visit(_ visit: ConnectionVisit, matches query: String) -> Bool {
+        if visit.title.localizedCaseInsensitiveContains(query) { return true }
         if visit.comment?.localizedCaseInsensitiveContains(query) == true { return true }
 
         let dateText = visit.arrivalDate.formatted(date: .long, time: .shortened)
@@ -229,8 +302,12 @@ enum MovesStatisticsFormatting {
     }
 
     static func visitInterval(_ place: VisitPlace) -> String {
-        let arrival = place.arrivalDate.formatted(date: .abbreviated, time: .shortened)
-        guard let departure = place.departureDate else { return "Since \(arrival)" }
-        return "\(arrival) · \(duration(departure.timeIntervalSince(place.arrivalDate)))"
+        visitInterval(arrival: place.arrivalDate, departure: place.departureDate)
+    }
+
+    static func visitInterval(arrival arrivalDate: Date, departure departureDate: Date?) -> String {
+        let arrival = arrivalDate.formatted(date: .abbreviated, time: .shortened)
+        guard let departureDate else { return "Since \(arrival)" }
+        return "\(arrival) · \(duration(departureDate.timeIntervalSince(arrivalDate)))"
     }
 }

@@ -45,7 +45,8 @@ struct MapVisitMarker: Identifiable, Sendable {
     let arrivalDate: Date
 }
 
-/// Loads routes, visits, histogram buckets, and coverage cells for the current Map window.
+/// Loads routes, visits, and histogram buckets for the current Map window. Heat and Fog draw
+/// from `MapCoverageController` instead.
 @Observable
 @MainActor
 final class MapWindowLoader {
@@ -58,15 +59,12 @@ final class MapWindowLoader {
     var visits: [MapVisitMarker] = []
     var histogram: [MapHistogramBucket] = []
     private(set) var histogramSpans: [MapHistogramSpan] = []
-    var coverageCells: [VisitedCellStore.DisplayCell] = []
     var presentModes: [TransportMode] = []
     var isLoading = false
     var cameraFitKey = ""
 
     @ObservationIgnored
     private var loadGeneration = 0
-    @ObservationIgnored
-    private var storedCells: [VisitedCell] = []
     @ObservationIgnored
     private var histogramSource: HistogramSource?
     @ObservationIgnored
@@ -83,7 +81,6 @@ final class MapWindowLoader {
         selection: MapRangeSelection,
         modelContext: ModelContext,
         cameraRegion: MKCoordinateRegion,
-        includeCoverage: Bool = false,
         calendar: Calendar = .autoupdatingCurrent
     ) async {
         loadGeneration += 1
@@ -93,11 +90,6 @@ final class MapWindowLoader {
             if generation == loadGeneration {
                 isLoading = false
             }
-        }
-
-        if includeCoverage {
-            await loadStoredCells(modelContext: modelContext)
-            guard generation == loadGeneration else { return }
         }
 
         refreshHistogram(selection: selection, modelContext: modelContext, calendar: calendar)
@@ -128,40 +120,6 @@ final class MapWindowLoader {
                 calendar: calendar
             )
         }
-
-        guard generation == loadGeneration, includeCoverage else { return }
-        refreshCoverage(selection: selection, cameraRegion: cameraRegion)
-    }
-
-    /// Readies Heat and Fog when one is first shown, without reloading routes.
-    func loadCoverage(
-        selection: MapRangeSelection,
-        modelContext: ModelContext,
-        cameraRegion: MKCoordinateRegion
-    ) async {
-        await loadStoredCells(modelContext: modelContext)
-        refreshCoverage(selection: selection, cameraRegion: cameraRegion)
-    }
-
-    private func loadStoredCells(modelContext: ModelContext) async {
-        do {
-            try await VisitedCellStore.ensureBuilt(container: modelContext.container)
-            let count = try modelContext.fetchCount(FetchDescriptor<VisitedCell>())
-            if count != storedCells.count {
-                storedCells = try VisitedCellStore.fetchAll(in: modelContext)
-            }
-        } catch {
-            storedCells = []
-        }
-    }
-
-    func refreshCoverage(selection: MapRangeSelection, cameraRegion: MKCoordinateRegion) {
-        coverageCells = VisitedCellStore.displayCells(
-            from: storedCells,
-            latitudeSpan: cameraRegion.span.latitudeDelta,
-            region: cameraRegion,
-            overlapping: selection.focus
-        )
     }
 
     /// The scrubber's bars cover the whole interval, so they read moves for all of it rather

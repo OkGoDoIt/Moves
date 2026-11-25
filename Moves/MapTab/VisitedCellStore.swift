@@ -15,7 +15,8 @@ enum VisitedCellStore {
     /// Cap on overlay primitives so a country-scale fog stays cheap.
     static let maximumDisplayCells = 2_400
     /// Raise to rebuild once more from existing history on the next Heat or Fog view.
-    static let builtVersion = 1
+    /// 2: fixes worse than `MapActivityIndexBuilder.maximumHorizontalAccuracy` no longer count.
+    static let builtVersion = 2
     static let builtVersionKey = "moves.visitedCells.builtVersion"
     private static let rebuildPageSize = 5_000
 
@@ -116,7 +117,7 @@ enum VisitedCellStore {
     }
 
     private static func tally(_ samples: [LocationSample], into pending: inout [String: CellTally]) {
-        for sample in samples {
+        for sample in samples where MapActivityIndexBuilder.isAccurateEnough(sample) {
             let key = cellKey(latitude: sample.latitude, longitude: sample.longitude)
             if let existing = pending[key] {
                 pending[key] = (

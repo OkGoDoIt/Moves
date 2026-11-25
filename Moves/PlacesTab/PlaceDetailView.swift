@@ -151,6 +151,12 @@ struct PlaceDetailView: View {
             }
 
             Section {
+                identity(summary: summary)
+                    .listRowInsets(EdgeInsets(top: 4, leading: 4, bottom: 4, trailing: 4))
+                    .listRowBackground(Color.clear)
+            }
+
+            Section {
                 statsGrid(summary: summary)
                     .listRowInsets(EdgeInsets(top: 8, leading: 4, bottom: 8, trailing: 4))
                     .listRowBackground(Color.clear)
@@ -168,12 +174,14 @@ struct PlaceDetailView: View {
                         } label: {
                             PlaceVisitRow(visit: visit)
                         }
+                        .buttonStyle(.plain)
                     }
                     if visibleVisitCount < visits.count {
-                        Button("Show more visits") { visibleVisitCount += 100 }
+                        Button(String(localized: "Show more visits")) { visibleVisitCount += 100 }
+                            .font(.system(.body, design: .rounded).weight(.medium))
                     }
                 } header: {
-                    Text(String(localized: "Recent visits"))
+                    Text(String(localized: "Visits"))
                 }
             }
         }
@@ -190,30 +198,80 @@ struct PlaceDetailView: View {
             Annotation(summary.name, coordinate: place.coordinate, anchor: .center) {
                 PlacesCategoryGlyph(category: summary.category)
             }
+            UserAnnotation()
         }
         .mapStyle(.standard(elevation: .flat, pointsOfInterest: .excludingAll))
+        .mapControls {
+            MapUserLocationButton()
+            MapCompass()
+        }
         .frame(height: 220)
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .overlay(alignment: .bottomLeading) {
-            Text(String(localized: "\(Int(place.footprintRadius.rounded())) m footprint"))
-                .font(.system(size: 11, weight: .semibold, design: .rounded))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(.ultraThinMaterial, in: Capsule())
-                .padding(12)
-        }
         .accessibilityLabel(String(localized: "Map of \(summary.name)"))
     }
 
-    private func statsGrid(summary: PlacesPlaceSummary) -> some View {
-        let first = summary.firstVisitAt?.formatted(date: .abbreviated, time: .omitted) ?? "—"
-        let last = summary.lastVisitAt?.formatted(date: .abbreviated, time: .omitted) ?? "—"
-        return LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
-            PlacesMetric(title: String(localized: "Visits"), value: summary.visitCount.formatted())
-            PlacesMetric(title: String(localized: "Total time"), value: MovesStatisticsFormatting.duration(summary.totalStay))
-            PlacesMetric(title: String(localized: "Average stay"), value: MovesStatisticsFormatting.duration(summary.averageStay))
-            PlacesMetric(title: String(localized: "First / last"), value: "\(first) · \(last)")
+    /// Name and one-tap label, the two things a person fixes most.
+    private func identity(summary: PlacesPlaceSummary) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button {
+                draftName = summary.name
+                isRenaming = true
+            } label: {
+                HStack(spacing: 8) {
+                    Text(summary.name.isEmpty ? String(localized: "Untitled place") : summary.name)
+                        .font(.system(.title3, design: .rounded).weight(.bold))
+                        .foregroundStyle(.primary)
+                        .multilineTextAlignment(.leading)
+                    Image(systemName: "pencil")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(String(localized: "Rename \(summary.name)"))
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach([KnownPlaceCategory.home, .work, .gym]) { category in
+                        let selected = summary.category == category
+                        PlaceChip(
+                            title: category.title,
+                            systemImage: category.symbolName,
+                            isSelected: selected
+                        ) {
+                            setCategory(selected ? nil : category)
+                        }
+                    }
+                }
+            }
+            .scrollClipDisabled()
         }
+    }
+
+    private func statsGrid(summary: PlacesPlaceSummary) -> some View {
+        let last = summary.lastVisitAt.map(lastVisitText) ?? "—"
+        return Grid(horizontalSpacing: 10, verticalSpacing: 10) {
+            GridRow {
+                PlacesMetric(title: String(localized: "Visits"), value: summary.visitCount.formatted())
+                PlacesMetric(title: String(localized: "Total time"), value: MovesStatisticsFormatting.duration(summary.totalStay))
+            }
+            GridRow {
+                PlacesMetric(title: String(localized: "Average stay"), value: MovesStatisticsFormatting.duration(summary.averageStay))
+                PlacesMetric(title: String(localized: "Last visit"), value: last)
+            }
+        }
+    }
+
+    private func lastVisitText(_ date: Date) -> String {
+        let calendar = Calendar.autoupdatingCurrent
+        if calendar.isDateInToday(date) { return String(localized: "Today") }
+        if calendar.isDateInYesterday(date) { return String(localized: "Yesterday") }
+        if calendar.isDate(date, equalTo: .now, toGranularity: .year) {
+            return date.formatted(.dateTime.month(.abbreviated).day())
+        }
+        return date.formatted(date: .abbreviated, time: .omitted)
     }
 
     private func region(for place: KnownPlace) -> MKCoordinateRegion {
@@ -248,7 +306,7 @@ struct PlaceDetailView: View {
         guard let place else { return }
         do {
             try PlacesLibrary.setCategory(place, to: category, in: modelContext)
-            toast(String(localized: "Set category"))
+            toast(category.map { String(localized: "Marked as \($0.title)") } ?? String(localized: "Label removed"))
         } catch {}
     }
 
@@ -290,39 +348,61 @@ struct SuggestedPlaceDetailView: View {
     @Query(sort: \VisitPlace.arrivalDate, order: .reverse)
     private var allVisits: [VisitPlace]
 
+    /// The one name on this screen: the title shows exactly what Confirm will save.
+    @State private var name: String
+
+    init(cluster: PlacesSuggestedCluster, onConfirmed: @escaping (UUID) -> Void) {
+        self.cluster = cluster
+        self.onConfirmed = onConfirmed
+        _name = State(initialValue: PlaceConfirmForm.initialName(for: cluster))
+    }
+
     private var visits: [VisitPlace] {
         let wanted = Set(cluster.visitIDs)
         return allVisits.filter { wanted.contains($0.id) }
     }
 
     var body: some View {
-        List {
-            Section {
-                PlaceConfirmForm(cluster: cluster) { place in
-                    onConfirmed(place.id)
-                }
-                .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
-                .listRowBackground(Color.clear)
-            } footer: {
-                Text(String(localized: "Moves will use this name the next time you stop here."))
-            }
-
-            if !visits.isEmpty {
-                Section(String(localized: "Visits")) {
-                    ForEach(visits) { visit in
-                        Button {
-                            rootController.selectedTab = .timeline
-                            rootController.requestedJumpDate = visit.arrivalDate
-                        } label: {
-                            PlaceVisitRow(visit: visit)
+        ScrollViewReader { proxy in
+            List {
+                Section {
+                    PlaceConfirmForm(
+                        cluster: cluster,
+                        name: $name,
+                        onConfirmed: { place in onConfirmed(place.id) },
+                        onNameFocusChange: { focused in
+                            guard focused else { return }
+                            withAnimation { proxy.scrollTo(PlaceConfirmFormAnchor.id, anchor: .bottom) }
                         }
+                    )
+                    .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+                    .listRowBackground(Color.clear)
+                    .id(PlaceConfirmFormAnchor.id)
+                }
+
+                if !visits.isEmpty {
+                    Section {
+                        ForEach(visits) { visit in
+                            Button {
+                                rootController.selectedTab = .timeline
+                                rootController.requestedJumpDate = visit.arrivalDate
+                            } label: {
+                                PlaceVisitRow(visit: visit)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    } header: {
+                        Text(visits.count == 1
+                            ? String(localized: "1 visit")
+                            : String(localized: "\(visits.count) visits"))
                     }
                 }
             }
+            .listStyle(.insetGrouped)
+            .scrollContentBackground(.hidden)
+            .scrollDismissesKeyboard(.interactively)
+            .movesFloatingTabBarClearance()
         }
-        .listStyle(.insetGrouped)
-        .scrollContentBackground(.hidden)
-        .movesFloatingTabBarClearance()
         .background {
             LinearGradient(
                 colors: [MovesPalette.backgroundTop, MovesPalette.backgroundBottom],
@@ -331,7 +411,7 @@ struct SuggestedPlaceDetailView: View {
             )
             .ignoresSafeArea()
         }
-        .navigationTitle(cluster.name)
+        .navigationTitle(PlaceDisplayNamer.meaningful(name) ?? String(localized: "New place"))
         .navigationBarTitleDisplayMode(.inline)
     }
 }
@@ -347,10 +427,10 @@ private struct PlaceVisitRow: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(dayTitle)
-                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                    .font(.system(.subheadline, design: .rounded).weight(.semibold))
                     .foregroundStyle(.primary)
                 Text(detailLine)
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .font(.system(.caption, design: .rounded).weight(.medium))
                     .foregroundStyle(.secondary)
             }
 
@@ -390,11 +470,11 @@ private struct PlacesMetric: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(value)
-                .font(.system(size: 17, weight: .bold, design: .rounded))
+                .font(.system(.headline, design: .rounded).weight(.bold))
                 .lineLimit(2)
                 .minimumScaleFactor(0.7)
             Text(title)
-                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .font(.system(.caption2, design: .rounded).weight(.semibold))
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -418,11 +498,11 @@ private struct MergePlaceSheet: View {
                 } label: {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(place.name)
-                            .font(.system(size: 16, weight: .semibold, design: .rounded))
+                            .font(.system(.body, design: .rounded).weight(.semibold))
                             .foregroundStyle(.primary)
                         if let locality = place.locality, !locality.isEmpty {
                             Text(locality)
-                                .font(.system(size: 12, weight: .medium, design: .rounded))
+                                .font(.system(.caption, design: .rounded).weight(.medium))
                                 .foregroundStyle(.secondary)
                         }
                     }

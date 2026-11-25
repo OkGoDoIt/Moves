@@ -692,6 +692,141 @@ final class SampleStayReconciliationTests: XCTestCase {
         XCTAssertEqual(try ModelContext(container).fetchCount(FetchDescriptor<VisitPlace>()), 2)
     }
 
+    /// Field log: "Rebuilt 0 stops and 2 trips" on every run with nothing new. One trip left
+    /// a stop whose arrival had been clamped past its departure; the trip from it overlapped
+    /// the stop before, so each pass deleted it and the next built it again.
+    @MainActor
+    func testUnchangedWeekIsANoOpAfterTheFirstPass() async throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let repository = SwiftDataTimelineRepository(modelContext: context)
+        let assembler = DefaultTimelineAssembler(
+            repository: repository,
+            motionClassifier: FixedMotionClassifier(mode: .walking, steps: 400),
+            placeNameResolver: EmptyPlaceNameResolver(),
+            automaticModes: { .init() }
+        )
+        let base = Calendar.current.startOfDay(for: Date()).addingTimeInterval(-2 * 24 * 60 * 60 + 9 * 60 * 60)
+        let cafe = CLLocationCoordinate2D(latitude: 10.76, longitude: 106.70)
+        let corner = offset(cafe, north: 142, east: 0)
+        let office = offset(corner, north: 900, east: 0)
+        let longStop = VisitPlace(arrivalDate: base, departureDate: base.addingTimeInterval(74 * 60),
+                                  latitude: cafe.latitude, longitude: cafe.longitude, horizontalAccuracy: 20)
+        // Arrived when the long stop ended, but "left" four minutes earlier.
+        let inverted = VisitPlace(arrivalDate: base.addingTimeInterval(74 * 60), departureDate: base.addingTimeInterval(70 * 60),
+                                  latitude: corner.latitude, longitude: corner.longitude, horizontalAccuracy: 20)
+        let destination = VisitPlace(arrivalDate: base.addingTimeInterval(74 * 60 + 10), departureDate: base.addingTimeInterval(4 * 60 * 60),
+                                     latitude: office.latitude, longitude: office.longitude, horizontalAccuracy: 20)
+        // A trip the person never recognised: unknown, days old, between two other stops.
+        let oldUnknownFrom = VisitPlace(arrivalDate: base.addingTimeInterval(5 * 60 * 60), departureDate: base.addingTimeInterval(6 * 60 * 60),
+                                        latitude: office.latitude, longitude: office.longitude + 0.02, horizontalAccuracy: 20)
+        let oldUnknownTo = VisitPlace(arrivalDate: base.addingTimeInterval(6 * 60 * 60 + 9 * 60), departureDate: base.addingTimeInterval(8 * 60 * 60),
+                                      latitude: office.latitude, longitude: office.longitude + 0.04, horizontalAccuracy: 20)
+        for place in [longStop, inverted, destination, oldUnknownFrom, oldUnknownTo] { context.insert(place) }
+        let unknown = MoveSegment(dedupeKey: "old-unknown", startDate: oldUnknownFrom.departureDate!, endDate: oldUnknownTo.arrivalDate,
+                                  transportMode: .unknown, distanceMeters: 2_200, stepCount: 0)
+        unknown.startPlace = oldUnknownFrom
+        unknown.endPlace = oldUnknownTo
+        context.insert(unknown)
+        try context.save()
+
+        await assembler.reconcileSampleStays()
+        let settled = try identities(in: ModelContext(container))
+
+        var saves = 0
+        // Only the reconciler's own context: the test host app saves its demo store too.
+        let observer = NotificationCenter.default.addObserver(forName: ModelContext.didSave, object: context, queue: nil) { _ in
+            saves += 1
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        for pass in 2...4 {
+            let result = try repository.reconcileSampleStays(now: .now)
+            XCTAssertTrue(result.moveLegs.isEmpty, "Pass \(pass) rebuilt \(result.moveLegs.count) trips with nothing new")
+            XCTAssertTrue(result.newPlaces.isEmpty)
+            await assembler.reconcileSampleStays()
+        }
+        XCTAssertEqual(saves, 0, "An unchanged week must not save")
+        let after = try identities(in: ModelContext(container))
+        XCTAssertEqual(after.moves, settled.moves)
+        XCTAssertEqual(after.visits, settled.visits)
+        XCTAssertTrue(after.moves.contains(unknown.id), "The old unknown trip stays as it was")
+    }
+
+    /// Photo fixes arrive with their capture time, days in the past. Nothing in the
+    /// reconcile skips on "newest fix": every pass reads the whole window, so a stop that
+    /// only a back-dated fix reveals is still built.
+    @MainActor
+    func testBackdatedFixInsideTheWindowIsRebuilt() async throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let repository = SwiftDataTimelineRepository(modelContext: context)
+        let assembler = DefaultTimelineAssembler(
+            repository: repository,
+            motionClassifier: FixedMotionClassifier(mode: .walking, steps: 400),
+            placeNameResolver: EmptyPlaceNameResolver(),
+            automaticModes: { .init() }
+        )
+        let morning = Calendar.current.startOfDay(for: Date()).addingTimeInterval(-3 * 24 * 60 * 60 + 8 * 60 * 60)
+        let home = CLLocationCoordinate2D(latitude: 10.76, longitude: 106.70)
+        let cafe = offset(home, north: 2_000, east: 0)
+        let work = offset(home, north: 4_000, east: 0)
+        let atWork = morning.addingTimeInterval(7 * 60 * 60)
+        _ = try repository.addOrUpdateVisit(from: MockVisit(coordinate: home, horizontalAccuracy: 20, arrivalDate: morning, departureDate: morning.addingTimeInterval(60 * 60)))
+        _ = try repository.addOrUpdateVisit(from: MockVisit(coordinate: work, horizontalAccuracy: 20, arrivalDate: atWork, departureDate: atWork.addingTimeInterval(2 * 60 * 60)))
+        _ = try repository.appendSamples(
+            from: (0...3).map { location(home, at: morning.addingTimeInterval(Double($0) * 20 * 60)) }
+                + (0...3).map { location(work, at: atWork.addingTimeInterval(Double($0) * 30 * 60)) },
+            source: .significantChange
+        )
+        await assembler.reconcileSampleStays()
+        await assembler.reconcileSampleStays()
+        let before = try context.fetch(FetchDescriptor<VisitPlace>())
+        XCTAssertFalse(before.contains { distance($0.coordinate, cafe) < 150 })
+
+        // Fixes captured three days ago, stored now: two hours still at a café in between.
+        let cafeStart = morning.addingTimeInterval(3 * 60 * 60)
+        _ = try repository.appendSamples(
+            from: (0...6).map { location(cafe, at: cafeStart.addingTimeInterval(Double($0) * 20 * 60)) },
+            source: .significantChange
+        )
+        let result = try repository.reconcileSampleStays(now: .now)
+        XCTAssertTrue(
+            result.newPlaces.contains { distance($0.coordinate, cafe) < 150 },
+            "A stop that only back-dated fixes show must be built"
+        )
+    }
+
+    /// The retry that left an unknown trip open to reclassification still runs while it is fresh.
+    @MainActor
+    func testRecentUnknownTripIsStillRetried() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let repository = SwiftDataTimelineRepository(modelContext: context)
+        let left = Date().addingTimeInterval(-2 * 60 * 60)
+        let home = CLLocationCoordinate2D(latitude: 10.76, longitude: 106.70)
+        let work = offset(home, north: 2_000, east: 0)
+        let from = VisitPlace(arrivalDate: left.addingTimeInterval(-60 * 60), departureDate: left,
+                              latitude: home.latitude, longitude: home.longitude, horizontalAccuracy: 20)
+        let to = VisitPlace(arrivalDate: left.addingTimeInterval(12 * 60), departureDate: left.addingTimeInterval(60 * 60),
+                            latitude: work.latitude, longitude: work.longitude, horizontalAccuracy: 20)
+        context.insert(from)
+        context.insert(to)
+        let move = MoveSegment(dedupeKey: "fresh-unknown", startDate: left, endDate: to.arrivalDate,
+                               transportMode: .unknown, distanceMeters: 2_000, stepCount: nil)
+        move.startPlace = from
+        move.endPlace = to
+        context.insert(move)
+        try context.save()
+
+        let result = try repository.reconcileSampleStays(now: .now)
+        XCTAssertEqual(result.moveLegs.count, 1)
+    }
+
+    private func identities(in context: ModelContext) throws -> (visits: Set<UUID>, moves: Set<UUID>) {
+        (Set(try context.fetch(FetchDescriptor<VisitPlace>()).map(\.id)),
+         Set(try context.fetch(FetchDescriptor<MoveSegment>()).map(\.id)))
+    }
+
     /// Two stops with fixes that hold still at each and one trip the reconciler built between them.
     private struct TwoStopScene {
         let context: ModelContext

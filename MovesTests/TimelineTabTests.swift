@@ -107,15 +107,70 @@ final class TimelineTabTests: XCTestCase {
         XCTAssertEqual(CalendarEventAction.resolve(url: copy.url, visits: [:], seen: &seen), .remove)
     }
 
-    func testTimelineMapIsFortyTwoPercentOfTheScreenButLeavesTheStorylineRoom() {
-        // iPhone 18 Pro: the plan's 42% of an 874pt screen.
-        XCTAssertEqual(TimelineHeroLayout.collapsedHeight(pageHeight: 624, screenHeight: 874), 367.08, accuracy: 0.01)
-        // iPhone SE: the storyline keeps room for about two rows.
-        XCTAssertEqual(TimelineHeroLayout.collapsedHeight(pageHeight: 470, screenHeight: 667), 250, accuracy: 0.01)
+    func testTimelineMapTakesAboutAThirdOfThePageAndLeavesTheStorylineRoom() {
+        // iPhone 18 Pro: about a third of the page, so the list shows most of the day.
+        XCTAssertEqual(TimelineHeroLayout.collapsedHeight(pageHeight: 624, screenHeight: 874), 224.64, accuracy: 0.01)
+        // iPhone SE: the minimum applies.
+        XCTAssertEqual(TimelineHeroLayout.collapsedHeight(pageHeight: 470, screenHeight: 667), 200, accuracy: 0.01)
         // A short outer display keeps the map within 45% of the page.
         XCTAssertEqual(TimelineHeroLayout.collapsedHeight(pageHeight: 300, screenHeight: 420), 135, accuracy: 0.01)
-        // Before the window is measured, the minimum applies.
-        XCTAssertEqual(TimelineHeroLayout.collapsedHeight(pageHeight: 624, screenHeight: 0), 260, accuracy: 0.01)
+    }
+
+    func testActivityChipsAccountForEveryTripIncludingUnknownModes() {
+        let metrics = ActivityBubbleMetrics.make(from: [
+            (mode: .walking, duration: 600, distance: 800),
+            (mode: .automotive, duration: 1_200, distance: 8_000),
+            (mode: .unknown, duration: 300, distance: 1_800),
+            (mode: .stationary, duration: 60, distance: 20),
+        ])
+        XCTAssertEqual(metrics.map(\.mode), [.walking, .automotive, .unknown])
+        XCTAssertEqual(metrics.reduce(0) { $0 + $1.distanceMeters }, 10_620, accuracy: 0.01)
+        let other = try? XCTUnwrap(metrics.last)
+        XCTAssertEqual(other?.chipTitle, "Other")
+        XCTAssertEqual(other?.distanceMeters ?? 0, 1_820, accuracy: 0.01)
+        XCTAssertEqual(ActivityBubbleMetrics.chipMode(for: .stationary), .unknown)
+        XCTAssertEqual(ActivityBubbleMetrics.chipMode(for: .running), .running)
+    }
+
+    func testOnlyStaysWithoutANameOfTheirOwnAskToBeNamed() throws {
+        let schema = Schema(MovesTimelineSchema.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)
+        )
+        let context = ModelContext(container)
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        func visit() -> VisitPlace {
+            let visit = VisitPlace(arrivalDate: start, departureDate: start.addingTimeInterval(3_600), latitude: 10.77, longitude: 106.70, horizontalAccuracy: 10)
+            context.insert(visit)
+            return visit
+        }
+
+        let address = visit()
+        address.autoLabel = "15 Tran Nhat Duat"
+        XCTAssertTrue(TimelinePlaceNaming.needsName(address))
+
+        let labelled = visit()
+        labelled.userLabel = "Home"
+        XCTAssertFalse(TimelinePlaceNaming.needsName(labelled))
+
+        let learned = visit()
+        let place = KnownPlace(name: "Corner café", latitude: 10.77, longitude: 106.70)
+        context.insert(place)
+        learned.knownPlace = place
+        XCTAssertFalse(TimelinePlaceNaming.needsName(learned))
+
+        let shortStop = visit()
+        shortStop.isHiddenAsShortStop = true
+        XCTAssertFalse(TimelinePlaceNaming.needsName(shortStop))
+    }
+
+    func testOnlyStaysAndTripsOpenADetailScreen() {
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let stay = VisitPlace(arrivalDate: start, departureDate: nil, latitude: 0, longitude: 0, horizontalAccuracy: 10)
+        XCTAssertTrue(TimelineEntry.place(stay).hasDetailScreen)
+        XCTAssertFalse(TimelineEntry.start(place: stay, timestamp: start).hasDetailScreen)
+        XCTAssertFalse(TimelineEntry.hiddenStops(HiddenStopsCluster(places: [stay])).hasDetailScreen)
     }
 
     func testActivityChipTitlesAreSentenceCase() {

@@ -56,6 +56,7 @@ struct MapKitPlaceReverseGeocoder: PlaceReverseGeocoding {
             region.merge(placemark: mark)
         }
 
+        region = region.withoutCountryAsCity()
         return region.hasAnyValue ? region : nil
     }
 }
@@ -66,6 +67,10 @@ extension PlaceGeocodeRegion {
         let representations = mapItem.addressRepresentations
         countryCode = PlaceGeocodeRegion.isoCountryCode(from: representations?.region)
         locality = PlaceGeocodeRegion.cleaned(representations?.cityName)
+        if PlaceGeocodeRegion.isCountryName(locality, countryCode: countryCode) {
+            // No city here; let the placemark's locality fill it, or leave it empty.
+            locality = nil
+        }
         let regionName = PlaceGeocodeRegion.cleaned(representations?.regionName)
         if let countryCode, let regionName,
            regionName.caseInsensitiveCompare(PlacesGeography.countryName(forCountryCode: countryCode)) == .orderedSame {
@@ -114,6 +119,29 @@ extension PlaceGeocodeRegion {
                 name = candidate
             }
         }
+    }
+
+    /// True when `value` is the country's own name ("Türkiye" for TR). A geocode with no
+    /// city can hand that back as the city, and a country must never be listed as one.
+    static func isCountryName(_ value: String?, countryCode: String?) -> Bool {
+        guard let value = cleaned(value) else { return false }
+        let key = PlaceDisplayNamer.folded(value)
+        guard let code = cleaned(countryCode)?.uppercased() else { return false }
+        if key == PlaceDisplayNamer.folded(code) { return true }
+        let locales = [Locale.current, Locale(identifier: "en_US"), Locale(identifier: "en_GB")]
+        return locales.contains { locale in
+            locale.localizedString(forRegionCode: code).map(PlaceDisplayNamer.folded) == key
+        }
+    }
+
+    /// The same region with a country-named city dropped. The Places list already falls
+    /// back to the administrative area when a stay has no city.
+    func withoutCountryAsCity() -> PlaceGeocodeRegion {
+        var region = self
+        if Self.isCountryName(region.locality, countryCode: region.countryCode) {
+            region.locality = nil
+        }
+        return region
     }
 
     static func isoCountryCode(from region: Locale.Region?) -> String? {
@@ -240,19 +268,24 @@ enum PlaceGeocodeBackfill {
         var completed = 0
 
         do {
-            while completed < limit, !Task.isCancelled {
-                let work = try pendingNameWork(in: context)
-                guard let next = work.first(where: { cache.regions[$0.cellKey] == nil }) ?? work.first else {
-                    break
-                }
-
+            // Stays at a spot that already has a name take it before anything is geocoded.
+            if try reuseNearbyLabels(in: context) > 0 {
+                try context.save()
+            }
+            // Each cell is visited once per run. A cell the geocoder had nothing for stays
+            // cached as empty and is not asked again, so the trickle cannot spin.
+            var requested = 0
+            for next in try pendingNameWork(in: context) {
+                guard completed < limit, !Task.isCancelled else { break }
                 var region: PlaceGeocodeRegion
-                if let cached = cache.regions[next.cellKey], cached.hasAnyValue {
+                if let cached = cache.regions[next.cellKey] {
+                    guard cached.hasAnyValue else { continue }
                     region = cached
                 } else {
-                    if completed > 0 {
+                    if requested > 0 {
                         try await Task.sleep(for: requestInterval)
                     }
+                    requested += 1
                     guard var resolved = try await geocoder.reverseGeocode(next.coordinate) else {
                         cache.store(PlaceGeocodeRegion(), for: next.cellKey)
                         completed += 1
@@ -294,19 +327,19 @@ enum PlaceGeocodeBackfill {
         var completed = 0
 
         do {
-            while completed < limit, !Task.isCancelled {
-                let work = try pendingWork(in: context)
-                guard let next = work.first(where: { cache.regions[$0.cellKey] == nil }) ?? work.first else {
-                    break
-                }
-
+            // One pass over the cells: a cell whose answer has no city would otherwise be
+            // picked again forever.
+            var requested = 0
+            for next in try pendingWork(in: context) {
+                guard completed < limit, !Task.isCancelled else { break }
                 let region: PlaceGeocodeRegion
                 if let cached = cache.regions[next.cellKey] {
                     region = cached
                 } else {
-                    if completed > 0 {
+                    if requested > 0 {
                         try await Task.sleep(for: requestInterval)
                     }
+                    requested += 1
                     guard let resolved = try await geocoder.reverseGeocode(next.coordinate) else {
                         cache.store(PlaceGeocodeRegion(), for: next.cellKey)
                         completed += 1
@@ -361,22 +394,33 @@ enum PlaceGeocodeBackfill {
         return items.values.sorted { $0.cellKey < $1.cellKey }
     }
 
-    /// Unassigned visits still missing a POI or street name, grouped by ~100 m cells.
+    /// Unassigned visits still missing a POI or street name, and any visit or learned place
+    /// still missing its street address, grouped by ~100 m cells.
     static func pendingNameWork(in context: ModelContext) throws -> [PlaceGeocodeWorkItem] {
         let visits = try context.fetch(FetchDescriptor<VisitPlace>())
+        let places = try context.fetch(FetchDescriptor<KnownPlace>())
         var items: [String: PlaceGeocodeWorkItem] = [:]
-        for visit in visits {
-            guard visit.knownPlace == nil, visit.needsPlaceNameGeocode else { continue }
-            guard CLLocationCoordinate2DIsValid(visit.coordinate) else { continue }
-            let key = PlaceGeocodeCellCache.nameCellKey(for: visit.coordinate)
+        func enqueue(_ coordinate: CLLocationCoordinate2D) {
+            guard CLLocationCoordinate2DIsValid(coordinate) else { return }
+            let key = PlaceGeocodeCellCache.nameCellKey(for: coordinate)
             if items[key] == nil {
-                items[key] = PlaceGeocodeWorkItem(cellKey: key, coordinate: visit.coordinate)
+                items[key] = PlaceGeocodeWorkItem(cellKey: key, coordinate: coordinate)
             }
+        }
+        for visit in visits {
+            let needsName = visit.knownPlace == nil && visit.needsPlaceNameGeocode
+            guard needsName || visit.formattedAddress == nil else { continue }
+            enqueue(visit.coordinate)
+        }
+        for place in places where place.formattedAddress == nil {
+            enqueue(place.coordinate)
         }
         return items.values.sorted { $0.cellKey < $1.cellKey }
     }
 
-    /// Writes street / POI fields onto unlabeled visits in a ~100 m cell.
+    /// Writes street / POI fields onto visits in a ~100 m cell, and the street address
+    /// onto learned places centred there. A cell this small is one block, so its address
+    /// is the stay's own.
     @discardableResult
     static func applyName(
         _ region: PlaceGeocodeRegion,
@@ -389,12 +433,53 @@ enum PlaceGeocodeBackfill {
         for visit in visits {
             let key = PlaceGeocodeCellCache.nameCellKey(for: visit.coordinate)
             guard key == cellKey else { continue }
-            if fill(visitCountry: visit, with: region, includePlaceName: true) { changed += 1 }
+            if fill(visitCountry: visit, with: region, includeAddress: true, includePlaceName: true) { changed += 1 }
+        }
+        let places = try context.fetch(FetchDescriptor<KnownPlace>())
+        for place in places where PlaceGeocodeCellCache.nameCellKey(for: place.coordinate) == cellKey {
+            if fill(place: place, with: region, includeAddress: true) { changed += 1 }
+        }
+        return changed
+    }
+
+    /// Gives unnamed, unassigned stays the label earlier stays at the same spot carry,
+    /// so they need no geocode of their own.
+    @discardableResult
+    static func reuseNearbyLabels(in context: ModelContext) throws -> Int {
+        let unassigned = try context.fetch(FetchDescriptor<VisitPlace>()).filter { visit in
+            visit.knownPlace == nil && visit.assignmentSource == .none
+        }
+        let needing = unassigned.filter(\.needsPlaceNameGeocode)
+        guard !needing.isEmpty else { return 0 }
+        let labeled = unassigned.compactMap { visit -> PlaceLearningEngine.StaySnapshot? in
+            guard PlaceDisplayNamer.meaningful(visit.userLabel) == nil,
+                  let label = PlaceDisplayNamer.meaningful(visit.autoLabel)
+            else { return nil }
+            return PlaceLearningEngine.StaySnapshot(visit, label: label)
+        }
+        guard !labeled.isEmpty else { return 0 }
+        let places = try context.fetch(FetchDescriptor<KnownPlace>())
+        var changed = 0
+        for visit in needing {
+            let nearbyPlaces = places.filter {
+                PlaceLearningEngine.distance(from: $0.coordinate, to: visit.coordinate)
+                    <= PlaceLearningEngine.rejectedLabelSearchRadius
+            }
+            guard let label = PlaceLearningEngine.reusableLabel(
+                for: PlaceLearningEngine.StaySnapshot(visit, label: nil),
+                among: labeled,
+                isSuppressed: { PlaceLearningEngine.shouldSuppress($0, nearbyPlaces: nearbyPlaces) }
+            ) else { continue }
+            visit.autoLabel = label
+            changed += 1
         }
         return changed
     }
 
     /// Writes cached region fields onto every visit / known place in the cell that still needs them.
+    ///
+    /// The cell is a kilometre across, so only country, city, and area hold for all of
+    /// it. Streets and addresses come from `applyName`'s ~100 m cells.
     @discardableResult
     static func apply(
         _ region: PlaceGeocodeRegion,
@@ -427,8 +512,11 @@ enum PlaceGeocodeBackfill {
     private static func fill(
         visitCountry visit: VisitPlace,
         with region: PlaceGeocodeRegion,
+        includeAddress: Bool = false,
         includePlaceName: Bool = false
     ) -> Bool {
+        // Regions cached before this rule may still name the country as the city.
+        let region = region.withoutCountryAsCity()
         var changed = false
         if visit.countryCode == nil, let countryCode = region.countryCode {
             visit.countryCode = countryCode
@@ -442,11 +530,11 @@ enum PlaceGeocodeBackfill {
             visit.administrativeArea = administrativeArea
             changed = true
         }
-        if visit.thoroughfare == nil, let thoroughfare = region.thoroughfare {
+        if includeAddress, visit.thoroughfare == nil, let thoroughfare = region.thoroughfare {
             visit.thoroughfare = thoroughfare
             changed = true
         }
-        if visit.formattedAddress == nil, let formattedAddress = region.formattedAddress {
+        if includeAddress, visit.formattedAddress == nil, let formattedAddress = region.formattedAddress {
             visit.formattedAddress = formattedAddress
             changed = true
         }
@@ -455,13 +543,14 @@ enum PlaceGeocodeBackfill {
            PlaceDisplayNamer.meaningful(visit.userLabel) == nil,
            PlaceDisplayNamer.meaningful(visit.autoLabel) == nil,
            let name = region.bestPlaceName {
-            visit.autoLabel = name
+            visit.autoLabel = PlaceDisplayNamer.normalizedAutomaticLabel(name)
             changed = true
         }
         return changed
     }
 
-    private static func fill(place: KnownPlace, with region: PlaceGeocodeRegion) -> Bool {
+    private static func fill(place: KnownPlace, with region: PlaceGeocodeRegion, includeAddress: Bool = false) -> Bool {
+        let region = region.withoutCountryAsCity()
         var changed = false
         if place.countryCode == nil, let countryCode = region.countryCode {
             place.countryCode = countryCode
@@ -475,11 +564,11 @@ enum PlaceGeocodeBackfill {
             place.administrativeArea = administrativeArea
             changed = true
         }
-        if place.thoroughfare == nil, let thoroughfare = region.thoroughfare {
+        if includeAddress, place.thoroughfare == nil, let thoroughfare = region.thoroughfare {
             place.thoroughfare = thoroughfare
             changed = true
         }
-        if place.formattedAddress == nil, let formattedAddress = region.formattedAddress {
+        if includeAddress, place.formattedAddress == nil, let formattedAddress = region.formattedAddress {
             place.formattedAddress = formattedAddress
             changed = true
         }

@@ -225,20 +225,92 @@ enum TimelineReviewHeuristics {
     static let headingAlignmentDegrees: Double = 30
     static let uncertainModeConfidence = 0.6
     static let longVisitDeleteConfirmation: TimeInterval = 60 * 60
+    /// Only recent items are worth asking about. Older history is left as recorded.
+    static let newQuestionWindow: TimeInterval = 14 * 24 * 60 * 60
+    /// A question nobody answered within this long is dropped without asking.
+    static let unansweredQuestionExpiry: TimeInterval = 30 * 24 * 60 * 60
 
+    /// What the Review inbox asks about one item.
+    enum Question: Equatable {
+        /// The stay was matched to one of several nearby places.
+        case whichPlace
+        /// A stay so brief it may be a pause on the way, not a stop.
+        case notAStop
+        /// The trip's mode was a guess.
+        case mode
+    }
+
+    /// Length of a finished stay. Zero for a stay that ended when it began; `nil` while open.
     static func stayDuration(of visit: VisitPlace) -> TimeInterval? {
-        guard let departure = visit.departureDate, departure > visit.arrivalDate else {
+        guard let departure = visit.departureDate else {
             return nil
         }
-        return departure.timeIntervalSince(visit.arrivalDate)
+        return max(departure.timeIntervalSince(visit.arrivalDate), 0)
     }
 
     /// Brief stay with both an inbound and outbound move — candidate for "not a stop".
+    /// A stay with no length at all counts.
     static func isShortTransitStop(_ visit: VisitPlace) -> Bool {
         guard let duration = stayDuration(of: visit), duration < shortStopDuration else {
             return false
         }
         return !visit.incomingMoves.isEmpty && !visit.outgoingMoves.isEmpty
+    }
+
+    /// Whether a freshly written stay should be put to the person. Ingest calls this
+    /// once the stay has a departure; nothing older than `newQuestionWindow` is asked.
+    static func shouldAskAboutStay(_ visit: VisitPlace, now: Date = .now) -> Bool {
+        guard visit.reviewState == .none,
+              visit.origin == .sensor,
+              visit.assignmentSource != .user,
+              now.timeIntervalSince(visit.arrivalDate) <= newQuestionWindow,
+              !isImportedHistory(visit)
+        else { return false }
+        return isShortTransitStop(visit)
+    }
+
+    /// The question still worth asking about `visit`, or `nil` once its reason is gone:
+    /// the person answered or labelled it, it came from an import, it is too old, or the
+    /// stay grew long.
+    static func question(for visit: VisitPlace, now: Date = .now) -> Question? {
+        guard visit.reviewState == .pending,
+              visit.origin == .sensor,
+              visit.assignmentSource != .user,
+              now.timeIntervalSince(visit.arrivalDate) <= unansweredQuestionExpiry,
+              !isImportedHistory(visit)
+        else { return nil }
+        if visit.assignmentSource == .autoAmbiguous, visit.knownPlace != nil {
+            return .whichPlace
+        }
+        if isShortTransitStop(visit) {
+            return .notAStop
+        }
+        return nil
+    }
+
+    /// The question still worth asking about `move`, or `nil` once its reason is gone.
+    static func question(for move: MoveSegment, now: Date = .now) -> Question? {
+        guard move.reviewState == .pending,
+              move.origin == .sensor,
+              move.transportModeSource == .auto,
+              now.timeIntervalSince(move.startDate) <= unansweredQuestionExpiry,
+              !isImportedHistory(move)
+        else { return nil }
+        return .mode
+    }
+
+    /// Fixes that all came from a history file, even if the row predates origin tagging.
+    static func isImportedHistory(_ move: MoveSegment) -> Bool {
+        if move.origin == .imported { return true }
+        let samples = move.samples
+        return !samples.isEmpty && samples.allSatisfy { $0.source.isHistoryImport }
+    }
+
+    /// A stay whose every trip in and out is imported history.
+    static func isImportedHistory(_ visit: VisitPlace) -> Bool {
+        if visit.origin == .imported { return true }
+        let moves = visit.incomingMoves + visit.outgoingMoves
+        return !moves.isEmpty && moves.allSatisfy { isImportedHistory($0) }
     }
 
     /// Short transit whose in/out path headings agree within 30°.

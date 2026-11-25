@@ -212,8 +212,11 @@ private final class MovesRuntime: ObservableObject {
     let webhookSyncManager: WebhookSyncManager
     let calendarSync: MovesCalendarSync
     let importQueue: DurableImportQueue
+    let healthSummaryStore = HealthSummaryStore()
+    let healthTimelineSync: HealthTimelineSync
     init(container: ModelContainer) {
         self.container = container
+        healthTimelineSync = HealthTimelineSync(container: container, summaryStore: healthSummaryStore)
         captureManager = MovesLocationCaptureManager(modelContainer: container)
         watchRouteInbox = WatchRouteInbox(modelContainer: container)
         healthWorkoutRouteAutoImporter = HealthWorkoutRouteAutoImportManager(modelContainer: container)
@@ -247,9 +250,13 @@ private struct MovesRunningContent: View {
     @ObservedObject private var webhookSyncManager: WebhookSyncManager
     @ObservedObject private var importQueue: DurableImportQueue
     @ObservedObject private var calendarSync: MovesCalendarSync
+    private let healthSummaryStore: HealthSummaryStore
+    private let healthTimelineSync: HealthTimelineSync
 
     init(runtime: MovesRuntime) {
         sharedModelContainer = runtime.container
+        healthSummaryStore = runtime.healthSummaryStore
+        healthTimelineSync = runtime.healthTimelineSync
         _captureManager = ObservedObject(wrappedValue: runtime.captureManager)
         _watchRouteInbox = ObservedObject(wrappedValue: runtime.watchRouteInbox)
         _healthWorkoutRouteAutoImporter = ObservedObject(wrappedValue: runtime.healthWorkoutRouteAutoImporter)
@@ -284,6 +291,7 @@ private struct MovesRunningContent: View {
                     .environmentObject(webhookSyncManager)
                     .environmentObject(calendarSync)
                     .environmentObject(importQueue)
+                    .environmentObject(healthSummaryStore)
             }
         }
         .modelContainer(sharedModelContainer)
@@ -306,6 +314,8 @@ private struct MovesRunningContent: View {
                     await webhookSyncManager.syncNewItemsIfEnabled()
                     calendarSync.schedule()
                 }
+                // Reads Health on its own task, after any timeline upgrade.
+                healthTimelineSync.sceneBecameActive()
                 Task(priority: .utility) {
                     await ShareMapAggregateBuilder.refreshAll(in: sharedModelContainer)
                 }

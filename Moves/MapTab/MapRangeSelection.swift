@@ -99,7 +99,16 @@ struct MapRangeSelection: Equatable, Sendable {
     /// True when the user picked arbitrary start/end rather than a named preset.
     var isCustom: Bool
 
-    /// Today’s calendar day. The Map tab always opens here.
+    /// Everything recorded so far. The Map tab opens here.
+    static func allTime(
+        now: Date = .now,
+        calendar: Calendar = .autoupdatingCurrent,
+        firstRecorded: Date? = nil
+    ) -> MapRangeSelection {
+        preset(.allTime, now: now, calendar: calendar, firstRecorded: firstRecorded)
+    }
+
+    /// Today’s calendar day.
     static func today(now: Date = .now, calendar: Calendar = .autoupdatingCurrent) -> MapRangeSelection {
         preset(.today, now: now, calendar: calendar)
     }

@@ -553,6 +553,154 @@ final class TimelineEditingTests: XCTestCase {
         XCTAssertEqual(move.reviewState, ReviewState.none)
     }
 
+    // MARK: - Review questions
+
+    /// Questions clear themselves once their reason is gone, recent brief stays are asked
+    /// about, and what is left is exactly what the inbox lists.
+    func testSettlingReviewQuestionsKeepsOnlyQuestionsThatStillHold() throws {
+        let (_, context, _) = try makeRepository()
+        let now = date(23, 0)
+        let home = insertPlace(in: context, arrival: date(8, 0), departure: date(9, 0), latitude: 52.50, longitude: 13.40)
+        // Flagged as short while it was still being written; it became a long stay.
+        let grewLong = insertPlace(in: context, arrival: date(9, 20), departure: date(11, 0), latitude: 52.51, longitude: 13.41)
+        let brief = insertPlace(in: context, arrival: date(11, 20), departure: date(11, 22), latitude: 52.52, longitude: 13.42)
+        let blip = insertPlace(in: context, arrival: date(11, 40), departure: date(11, 40), latitude: 52.53, longitude: 13.43)
+        let labelled = insertPlace(in: context, arrival: date(12, 0), departure: date(12, 2), latitude: 52.54, longitude: 13.44)
+        let last = insertPlace(in: context, arrival: date(12, 30), departure: date(13, 0), latitude: 52.55, longitude: 13.45)
+        let legs = [home, grewLong, brief, blip, labelled, last]
+        var moves: [MoveSegment] = []
+        for (from, to) in zip(legs, legs.dropFirst()) {
+            moves.append(insertMove(
+                in: context, from: from, to: to,
+                start: from.departureDate!, end: to.arrivalDate,
+                mode: .walking, distance: 500
+            ))
+        }
+        grewLong.reviewState = .pending
+        brief.reviewState = .pending
+        labelled.reviewState = .pending
+        labelled.assignmentSource = .user
+        moves[0].reviewState = .pending
+
+        // Imported before the importer tagged origin: every fix came from a file.
+        let oldStart = insertPlace(in: context, arrival: date(6, 0), departure: date(6, 10), latitude: 52.4, longitude: 13.3)
+        let oldEnd = insertPlace(in: context, arrival: date(6, 40), departure: date(7, 0), latitude: 52.45, longitude: 13.35)
+        let imported = insertMove(in: context, from: oldStart, to: oldEnd, start: date(6, 10), end: date(6, 40), mode: .unknown, distance: 3_000)
+        imported.reviewState = .pending
+        for minute in [12, 25, 38] {
+            insertSample(in: context, at: date(6, minute), latitude: 52.42, longitude: 13.32, move: imported).source = .fileRouteImport
+        }
+
+        // Unanswered for longer than a month.
+        let stale = insertPlace(in: context, arrival: date(9, 0).addingTimeInterval(-40 * 86_400), departure: date(9, 2).addingTimeInterval(-40 * 86_400), latitude: 52.6, longitude: 13.5)
+        stale.reviewState = .pending
+        try context.save()
+
+        XCTAssertGreaterThan(try TimelineSchemaUpgrader.tagImportedHistory(in: context), 0)
+        try TimelineSchemaUpgrader.settleReviewQuestions(in: context, now: now)
+        try context.save()
+
+        XCTAssertEqual(imported.origin, .imported)
+        XCTAssertEqual(oldStart.origin, .imported)
+        XCTAssertEqual(imported.reviewState, ReviewState.none)
+        XCTAssertEqual(grewLong.reviewState, ReviewState.none)
+        XCTAssertEqual(labelled.reviewState, ReviewState.none)
+        XCTAssertEqual(stale.reviewState, ReviewState.none)
+        XCTAssertEqual(brief.reviewState, .pending)
+        XCTAssertEqual(blip.reviewState, .pending, "A stop with no length is asked about")
+        XCTAssertEqual(moves[0].reviewState, .pending)
+
+        let pendingVisits = try context.fetch(FetchDescriptor<VisitPlace>()).filter { $0.reviewState == .pending }
+        let pendingMoves = try context.fetch(FetchDescriptor<MoveSegment>()).filter { $0.reviewState == .pending }
+        let items = ReviewInboxBuilder.items(visits: pendingVisits, moves: pendingMoves, now: now)
+        XCTAssertEqual(items.count, pendingVisits.count + pendingMoves.count)
+        XCTAssertEqual(Set(items.map(\.itemID)), [brief.id, blip.id, moves[0].id])
+        XCTAssertEqual(items.map(\.date), items.map(\.date).sorted(by: >), "Newest first")
+
+        // Running again changes nothing.
+        XCTAssertEqual(try TimelineSchemaUpgrader.settleReviewQuestions(in: context, now: now), 0)
+    }
+
+    func testAStayOlderThanTwoWeeksIsNeverAskedAbout() throws {
+        let (_, context, _) = try makeRepository()
+        let shift: TimeInterval = -15 * 86_400
+        let a = insertPlace(in: context, arrival: date(8, 0).addingTimeInterval(shift), departure: date(9, 0).addingTimeInterval(shift), latitude: 52.5, longitude: 13.4)
+        let b = insertPlace(in: context, arrival: date(9, 10).addingTimeInterval(shift), departure: date(9, 11).addingTimeInterval(shift), latitude: 52.51, longitude: 13.41)
+        let c = insertPlace(in: context, arrival: date(9, 30).addingTimeInterval(shift), departure: date(10, 0).addingTimeInterval(shift), latitude: 52.52, longitude: 13.42)
+        _ = insertMove(in: context, from: a, to: b, start: a.departureDate!, end: b.arrivalDate, mode: .walking, distance: 400)
+        _ = insertMove(in: context, from: b, to: c, start: b.departureDate!, end: c.arrivalDate, mode: .walking, distance: 400)
+        try context.save()
+
+        XCTAssertFalse(TimelineReviewHeuristics.shouldAskAboutStay(b, now: date(12, 0)))
+        XCTAssertEqual(try TimelineSchemaUpgrader.settleReviewQuestions(in: context, now: date(12, 0)), 0)
+    }
+
+    /// Dismiss all is one step on the Undo pill, and Undo brings every question back.
+    func testDismissingASectionIsOneUndoableStep() throws {
+        let (_, context, _) = try makeRepository()
+        let start = insertPlace(in: context, arrival: date(8, 0), departure: date(8, 10), latitude: 52.5, longitude: 13.4)
+        let end = insertPlace(in: context, arrival: date(9, 40), departure: date(10, 0), latitude: 52.54, longitude: 13.44)
+        var ids: [UUID] = []
+        for index in 0..<7 {
+            let move = insertMove(
+                in: context, from: start, to: end,
+                start: date(8, 10 + index * 4), end: date(8, 12 + index * 4),
+                mode: .unknown, distance: 300
+            )
+            move.reviewState = .pending
+            ids.append(move.id)
+        }
+        try context.save()
+        let (controller, undoController) = makeEditController(for: context)
+
+        grouped(undoController) {
+            controller.dismissReviews(visitIDs: [], moveIDs: ids)
+        }
+        XCTAssertTrue(undoController.manager.canUndo)
+        let afterDismiss = try context.fetch(FetchDescriptor<MoveSegment>())
+        XCTAssertTrue(afterDismiss.allSatisfy { $0.reviewState == .dismissed })
+        XCTAssertEqual(controller.toast?.actionName, "Dismissed 7")
+
+        controller.undoLastChange()
+        let afterUndo = try context.fetch(FetchDescriptor<MoveSegment>())
+        XCTAssertTrue(afterUndo.allSatisfy { $0.reviewState == .pending })
+    }
+
+    /// "Yes" on a place question teaches the place, records the answer, and can be undone.
+    func testConfirmingAMatchedPlaceAssignsItAndUndoBringsTheQuestionBack() throws {
+        let (_, context, _) = try makeRepository()
+        let place = KnownPlace(name: "Studio", latitude: 52.5, longitude: 13.4)
+        context.insert(place)
+        let visit = insertPlace(in: context, arrival: date(9, 0), departure: date(10, 0), latitude: 52.5, longitude: 13.4)
+        visit.knownPlace = place
+        visit.assignmentSource = .autoAmbiguous
+        visit.reviewState = .pending
+        try context.save()
+        XCTAssertEqual(TimelineReviewHeuristics.question(for: visit, now: date(12, 0)), .whichPlace)
+        let (controller, undoController) = makeEditController(for: context)
+
+        grouped(undoController) {
+            controller.confirmPlace(visit)
+        }
+        XCTAssertEqual(visit.assignmentSource, .user)
+        XCTAssertEqual(visit.reviewState, .confirmed)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<PlaceCorrectionEvent>()).count, 1)
+        XCTAssertNil(TimelineReviewHeuristics.question(for: visit, now: date(12, 0)))
+        XCTAssertTrue(undoController.manager.canUndo)
+
+        controller.undoLastChange()
+        XCTAssertEqual(visit.reviewState, .pending)
+        XCTAssertEqual(visit.assignmentSource, .autoAmbiguous)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<PlaceCorrectionEvent>()).count, 0)
+
+        grouped(undoController) {
+            controller.keepStop(visit)
+        }
+        XCTAssertEqual(visit.reviewState, .confirmed)
+        controller.undoLastChange()
+        XCTAssertEqual(visit.reviewState, .pending)
+    }
+
     func testSchemaUpgraderClustersLabeledVisitsIdempotently() throws {
         let (_, context, _) = try makeRepository()
         let first = insertPlace(

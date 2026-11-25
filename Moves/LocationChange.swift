@@ -144,10 +144,18 @@ protocol PlaceNameResolver {
 @MainActor
 protocol TimelineAssembler {
     func ingestVisit(_ visit: CLVisit) async
-    func ingestLocations(_ locations: [CLLocation], source: LocationSampleSource) async
+    /// Stores fixes. With `reconcile` false the stops are not rebuilt; the caller
+    /// coalesces that work (continuous capture delivers a batch every few seconds).
+    func ingestLocations(_ locations: [CLLocation], source: LocationSampleSource, reconcile: Bool) async
     func reconcileSampleStays() async
     func approachWasAutomotive(before date: Date) async -> Bool
     func recentlyWalking(at date: Date) async -> Bool
+}
+
+extension TimelineAssembler {
+    func ingestLocations(_ locations: [CLLocation], source: LocationSampleSource) async {
+        await ingestLocations(locations, source: source, reconcile: true)
+    }
 }
 
 final class CoreMotionTransportClassifier: MotionClassifier {
@@ -449,6 +457,7 @@ actor CLGeocoderPlaceNameResolver: PlaceNameResolver {
         return candidates
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .first(where: { !$0.isEmpty })
+            .map(PlaceDisplayNamer.normalizedAutomaticLabel)
     }
 }
 
@@ -476,7 +485,7 @@ final class DefaultTimelineAssembler: TimelineAssembler {
         self.automaticModes = automaticModes
     }
 
-    func ingestLocations(_ locations: [CLLocation], source: LocationSampleSource) async {
+    func ingestLocations(_ locations: [CLLocation], source: LocationSampleSource, reconcile: Bool = true) async {
         guard !locations.isEmpty else { return }
 
         await withStoreWriteTime {
@@ -484,10 +493,12 @@ final class DefaultTimelineAssembler: TimelineAssembler {
                 _ = try repository.appendSamples(from: locations, source: source)
                 try repository.saveIfNeeded()
             } catch {
-                print("Failed to persist location samples: \(error.localizedDescription)")
+                Self.timelineLog.error("Failed to persist \(locations.count) location samples: \(error.localizedDescription, privacy: .public)")
             }
 
-            await reconcileSampleStays()
+            if reconcile {
+                await reconcileSampleStays()
+            }
         }
     }
 
@@ -580,10 +591,22 @@ final class DefaultTimelineAssembler: TimelineAssembler {
     private func performSampleStayReconciliation() async {
         await TimelineSchemaUpgrader.waitUntilFinished()
         do {
-            try await apply(try repository.reconcileSampleStays(now: .now))
+            let started = ContinuousClock.now
+            let result = try repository.reconcileSampleStays(now: .now)
+            let rebuilt = ContinuousClock.now - started
+            try await apply(result)
+            let total = ContinuousClock.now - started
+            Self.timelineLog.debug(
+                "Reconciled the last week in \(Self.milliseconds(rebuilt)) ms (\(Self.milliseconds(total)) ms with classification)"
+            )
         } catch {
             Self.timelineLog.error("Failed to rebuild stops from fixes: \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    private static func milliseconds(_ duration: Duration) -> Int {
+        let parts = duration.components
+        return Int(parts.seconds * 1_000 + parts.attoseconds / 1_000_000_000_000_000)
     }
 
     /// One-time repair of older trips that swallowed a stop, rebuilt from their own fixes.
@@ -661,11 +684,14 @@ final class DefaultTimelineAssembler: TimelineAssembler {
             let unsureOfMode = transportMode == classification.mode
                 ? classification.confidence < TimelineReviewHeuristics.uncertainModeConfidence
                 : transportMode != afterLastBlock
-            if asksForReview, move.reviewState == .none, move.transportModeSource == .auto, unsureOfMode {
+            // Only recent, recorded trips are worth a question: nobody should be asked
+            // about imported history or last month.
+            if asksForReview, move.reviewState == .none, move.transportModeSource == .auto, unsureOfMode,
+               Date.now.timeIntervalSince(move.startDate) <= TimelineReviewHeuristics.newQuestionWindow,
+               !TimelineReviewHeuristics.isImportedHistory(move) {
                 move.reviewState = .pending
             }
-            if asksForReview, leg.startPlace.reviewState == .none,
-               TimelineReviewHeuristics.isShortTransitStop(leg.startPlace) {
+            if asksForReview, TimelineReviewHeuristics.shouldAskAboutStay(leg.startPlace) {
                 leg.startPlace.reviewState = .pending
             }
         }
@@ -692,6 +718,19 @@ final class DefaultTimelineAssembler: TimelineAssembler {
         guard place.assignmentSource == .none, place.knownPlace == nil else { return }
         guard !hasUserLabel, !hasAutoLabel else { return }
         guard place.horizontalAccuracy <= 180 else { return }
+
+        // Earlier stays at this spot already have a name; a fresh geocode would only
+        // add another house number for the same building.
+        let placeID = place.id
+        do {
+            if let reused = try repository.reusableAutomaticLabel(for: placeID) {
+                try repository.setAutomaticLabel(reused, for: placeID)
+                try repository.saveIfNeeded()
+                return
+            }
+        } catch {
+            print("Failed to reuse a nearby place label: \(error.localizedDescription)")
+        }
 
         if let resolvedName = await placeNameResolver.resolveName(for: place.coordinate) {
             do {
@@ -724,6 +763,10 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
     @Published private(set) var temporaryRouteTrackingStopsAtFiftyPercentBattery = false
     @Published private(set) var temporaryRouteTrackingStopsInLowPowerMode = false
     @Published private(set) var temporaryRouteTrackingStopNotificationEnabled = false
+    @Published private(set) var captureDetailLevel: CaptureDetailLevel = .defaultLevel
+
+    private static let captureLog = Logger(subsystem: MovesAppIdentity.bundleIdentifier, category: "Capture")
+    private static let departureRegionIdentifier = "Moves.capture.departure"
 
     private let manager = CLLocationManager()
     private let userDefaults: UserDefaults
@@ -737,7 +780,22 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
     private var oneShotRequestGate = OneShotLocationRequestGate()
     private var pendingTemporaryRouteTrackingDuration: TemporaryRouteTrackingDuration?
     private var shouldChainToAlwaysAfterWhenInUse = false
-    private var isHighAccuracyMonitoring = false
+    /// A standard location session (`startUpdatingLocation`) is running.
+    private var isStandardLocationRunning = false
+    /// Settled or following a trip, for balanced and detailed capture.
+    private var captureMachine = CaptureStateMachine(level: .batterySaver, isListening: false, departureAnchor: nil, now: .now)
+    private var fixFilter = CaptureFixFilter()
+    private var reconcileThrottle = ReconcileThrottle()
+    /// Continuous fixes waiting to be written, so the store is not saved every few seconds.
+    private var pendingContinuousFixes: [CLLocation] = []
+    private var pendingContinuousSince: Date?
+    private var lastStoredSettledFixAt: Date?
+    private var appliedConfiguration: CaptureConfiguration?
+    private var appliedShowsIndicator = false
+    private let motionActivityManager = CMMotionActivityManager()
+    private var isReceivingMotionUpdates = false
+    private var settleCheckTask: Task<Void, Never>?
+    private var continuousSessionStartedAt: Date?
     private var temporaryRouteTrackingExpiryTask: Task<Void, Never>?
     /// When the short post-ride / departure fix burst should stop.
     private var lastMileEndsAt: Date?
@@ -762,17 +820,6 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
 
     private static let stopNotificationIdentifier = "Moves.temporaryRouteTracking.stoppedNotification"
 
-    private static let lowPowerDesiredAccuracy = kCLLocationAccuracyHundredMeters
-    private static let lowPowerDistanceFilter: CLLocationDistance = 150
-    private static let highAccuracyDesiredAccuracy = kCLLocationAccuracyBestForNavigation
-    private static let highAccuracyDistanceFilter: CLLocationDistance = 10
-    /// Ten-metre fixes for a few minutes. Enough to draw a walk off a bus,
-    /// far cheaper than navigation-grade GPS left on all day.
-    private static let lastMileDesiredAccuracy = kCLLocationAccuracyNearestTenMeters
-    private static let lastMileDistanceFilter: CLLocationDistance = 20
-    private static let lastMileDuration: TimeInterval = 10 * 60
-    private static let lastMileMaximumDuration: TimeInterval = 12 * 60
-
     private var shouldSkipLiveTracking: Bool {
         isDemoMode || ProcessInfo.processInfo.isRunningUnitTests
     }
@@ -791,8 +838,8 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
 
         manager.delegate = self
         manager.activityType = .otherNavigation
-        manager.desiredAccuracy = Self.lowPowerDesiredAccuracy
-        manager.distanceFilter = Self.lowPowerDistanceFilter
+        manager.desiredAccuracy = CapturePolicy.Tuning.lowPowerAccuracy
+        manager.distanceFilter = CapturePolicy.Tuning.lowPowerDistanceFilter
         manager.pausesLocationUpdatesAutomatically = true
         manager.showsBackgroundLocationIndicator = false
 
@@ -803,6 +850,22 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         }
         restoreTemporaryRouteTrackingState()
         restoreBackgroundLocationListeningState()
+        captureDetailLevel = CaptureDetailLevel.load(from: userDefaults)
+        captureMachine = CaptureStateMachine(
+            level: captureDetailLevel,
+            isListening: isBackgroundLocationListeningEnabled && !shouldSkipLiveTracking,
+            departureAnchor: shouldSkipLiveTracking ? nil : storedDepartureAnchor(),
+            now: .now
+        )
+        if !shouldSkipLiveTracking {
+            Self.captureLog.notice(
+                "Capture launched at \(self.captureDetailLevel.rawValue, privacy: .public), phase \(self.captureMachine.phase.rawValue, privacy: .public)"
+            )
+        }
+        if captureMachine.phase == .moving {
+            continuousSessionStartedAt = .now
+            fixFilter.beginSession(at: .now)
+        }
         updateBackgroundLocationAllowance()
     }
 
@@ -899,7 +962,12 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         manager.showsBackgroundLocationIndicator = false
         oneShotRequestGate.cancel()
         isMonitoring = false
-        isHighAccuracyMonitoring = false
+        isStandardLocationRunning = false
+        appliedConfiguration = nil
+        stopMotionUpdates()
+        removeDepartureRegion()
+        updateSettleChecks()
+        Self.captureLog.notice("Capture stopped (authorization \(self.authorizationStatus.rawValue))")
     }
 
     func setBackgroundLocationListeningEnabled(_ isEnabled: Bool) {
@@ -908,6 +976,24 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
 
         guard !shouldSkipLiveTracking else { return }
 
+        Self.captureLog.notice("Background listening \(isEnabled ? "on" : "off", privacy: .public)")
+        handle(captureMachine.configure(level: captureDetailLevel, isListening: isEnabled, now: .now))
+        applyTrackingConfiguration()
+    }
+
+    /// Settings → Tracking detail.
+    func setCaptureDetailLevel(_ level: CaptureDetailLevel) {
+        guard level != captureDetailLevel else { return }
+        let previous = captureDetailLevel
+        captureDetailLevel = level
+        level.save(to: userDefaults)
+
+        guard !shouldSkipLiveTracking else { return }
+
+        Self.captureLog.notice(
+            "Tracking detail \(previous.rawValue, privacy: .public) -> \(level.rawValue, privacy: .public)"
+        )
+        handle(captureMachine.configure(level: level, isListening: isBackgroundLocationListeningEnabled, now: .now))
         applyTrackingConfiguration()
     }
 
@@ -927,6 +1013,9 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         // One current fix bridges a short silence, and the fixes already stored
         // are re-read so a missed visit does not stay a single multi-hour trip.
         requestOneShotLocation(source: .launchBackfill)
+        // The app came forward: write what is buffered and rebuild now.
+        storePendingContinuousFixes(reconcile: false)
+        reconcileThrottle.recordRun(at: .now)
         await assembler.reconcileSampleStays()
     }
 
@@ -1024,6 +1113,7 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         applyTrackingConfiguration()
         Task {
             await routeTrackingLiveActivity.end()
+            await assembler.reconcileSampleStays()
         }
     }
 
@@ -1081,6 +1171,24 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         isMonitoring = true
     }
 
+    /// Balanced or detailed capture: follow trips and watch for departures.
+    private var isFollowingTrips: Bool {
+        !shouldSkipLiveTracking
+            && captureDetailLevel.followsTrips
+            && isBackgroundLocationListeningEnabled
+            && captureMachine.phase != .off
+    }
+
+    private var currentEnergyState: CaptureEnergyState {
+        let device = UIDevice.current
+        let level = device.batteryLevel
+        return CaptureEnergyState(
+            isLowPowerModeEnabled: ProcessInfo.processInfo.isLowPowerModeEnabled,
+            batteryLevel: level >= 0 ? level : nil,
+            isCharging: device.batteryState == .charging || device.batteryState == .full
+        )
+    }
+
     private func applyTrackingConfiguration() {
         guard isAuthorizedForTracking else {
             stop()
@@ -1090,32 +1198,51 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         startLowPowerMonitoringIfNeeded()
         updateBackgroundLocationAllowance()
 
-        let shouldUseHighAccuracy = isTemporaryRouteTrackingActive
-        if shouldUseHighAccuracy {
+        if isTemporaryRouteTrackingActive {
+            // Manual route tracking overrides every level, exactly as before.
             manager.stopMonitoringSignificantLocationChanges()
-            manager.activityType = .otherNavigation
-            manager.desiredAccuracy = Self.highAccuracyDesiredAccuracy
-            manager.distanceFilter = Self.highAccuracyDistanceFilter
-            manager.pausesLocationUpdatesAutomatically = false
-            manager.showsBackgroundLocationIndicator = authorizationStatus == .authorizedAlways
+            applyLocationConfiguration(
+                CapturePolicy.routeTracking,
+                showsIndicator: authorizationStatus == .authorizedAlways
+            )
+            updateSettleChecks()
+            return
+        }
 
-            if !isHighAccuracyMonitoring {
-                manager.startUpdatingLocation()
-                isHighAccuracyMonitoring = true
+        if isFollowingTrips {
+            // Significant changes and visits stay on in every phase: they relaunch the
+            // app if iOS ends it, and visits still close stops.
+            manager.startMonitoringSignificantLocationChanges()
+            startMotionUpdatesIfNeeded()
+            if lastMileEndsAt != nil {
+                clearLastMile()
             }
-        } else if isLastMileActive {
+            let configuration = CapturePolicy.configuration(
+                level: captureDetailLevel,
+                phase: captureMachine.phase,
+                motion: captureMachine.motion,
+                recentSpeed: fixFilter.lastAccepted?.speed,
+                energy: currentEnergyState,
+                isRouteTrackingActive: false
+            )
+            // Automatic capture never shows the location indicator or a Live Activity.
+            applyLocationConfiguration(configuration, showsIndicator: false)
+            updateSettleChecks()
+            return
+        }
+
+        // Battery saver, or listening off: the original behaviour.
+        stopMotionUpdates()
+        removeDepartureRegion()
+        updateSettleChecks()
+        if isLastMileActive {
             // Visits stay on so a real stop still closes. Continuous fixes are
             // only for this short walk, at pedestrian accuracy.
             manager.stopMonitoringSignificantLocationChanges()
-            manager.activityType = .fitness
-            manager.desiredAccuracy = Self.lastMileDesiredAccuracy
-            manager.distanceFilter = Self.lastMileDistanceFilter
-            manager.pausesLocationUpdatesAutomatically = true
-            manager.showsBackgroundLocationIndicator = authorizationStatus == .authorizedAlways
-            if !isHighAccuracyMonitoring {
-                manager.startUpdatingLocation()
-                isHighAccuracyMonitoring = true
-            }
+            applyLocationConfiguration(
+                CapturePolicy.lastMile,
+                showsIndicator: authorizationStatus == .authorizedAlways
+            )
         } else {
             if isBackgroundLocationListeningEnabled {
                 manager.startMonitoringSignificantLocationChanges()
@@ -1124,24 +1251,298 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
                 manager.stopMonitoringVisits()
                 isMonitoring = false
             }
-            manager.stopUpdatingLocation()
-            isHighAccuracyMonitoring = false
-            manager.activityType = .otherNavigation
-            manager.desiredAccuracy = Self.lowPowerDesiredAccuracy
-            manager.distanceFilter = Self.lowPowerDistanceFilter
-            manager.pausesLocationUpdatesAutomatically = true
-            manager.showsBackgroundLocationIndicator = false
+            applyLocationConfiguration(CapturePolicy.lowPower, showsIndicator: false)
         }
     }
+
+    private func applyLocationConfiguration(_ configuration: CaptureConfiguration, showsIndicator: Bool) {
+        let isRunningAsWanted = isStandardLocationRunning == configuration.usesStandardLocationUpdates
+        if configuration == appliedConfiguration, showsIndicator == appliedShowsIndicator, isRunningAsWanted {
+            return
+        }
+
+        if !configuration.usesStandardLocationUpdates, isStandardLocationRunning {
+            manager.stopUpdatingLocation()
+            isStandardLocationRunning = false
+        }
+        manager.activityType = configuration.activityType
+        manager.desiredAccuracy = configuration.desiredAccuracy
+        manager.distanceFilter = configuration.distanceFilter
+        manager.pausesLocationUpdatesAutomatically = configuration.pausesLocationUpdatesAutomatically
+        manager.showsBackgroundLocationIndicator = showsIndicator
+        if configuration.usesStandardLocationUpdates, !isStandardLocationRunning {
+            manager.startUpdatingLocation()
+            isStandardLocationRunning = true
+        }
+
+        if configuration != appliedConfiguration {
+            Self.captureLog.notice(
+                "Configuration: \(configuration.logDescription, privacy: .public) level=\(self.captureDetailLevel.rawValue, privacy: .public) phase=\(self.captureMachine.phase.rawValue, privacy: .public) motion=\(self.captureMachine.motion.rawValue, privacy: .public) constrained=\(self.currentEnergyState.isConstrained)"
+            )
+        }
+        appliedConfiguration = configuration
+        appliedShowsIndicator = showsIndicator
+    }
+
+    // MARK: Following trips
+
+    private func handle(_ transition: CaptureStateMachine.Transition, now: Date = .now) {
+        switch transition {
+        case .none:
+            return
+        case .startedMoving(let trigger):
+            Self.captureLog.notice(
+                "Following a trip: started by \(trigger.rawValue, privacy: .public), motion \(self.captureMachine.motion.rawValue, privacy: .public)"
+            )
+            removeDepartureRegion()
+            fixFilter.beginSession(at: now)
+            continuousSessionStartedAt = now
+        case .settled(let anchor, let verdict):
+            let minutes = continuousSessionStartedAt.map { Int(now.timeIntervalSince($0) / 60) } ?? -1
+            Self.captureLog.notice(
+                "Settled (\(String(describing: verdict), privacy: .public)) after \(minutes) min: stored \(self.fixFilter.acceptedCount) fixes, dropped \(self.fixFilter.droppedCount) [\(self.fixFilter.dropSummary, privacy: .public)]"
+            )
+            continuousSessionStartedAt = nil
+            lastStoredSettledFixAt = now
+            storePendingContinuousFixes(reconcile: true, now: now)
+            if let anchor, anchor.supportsDepartureRegion {
+                registerDepartureRegion(around: anchor)
+            } else {
+                Self.captureLog.notice("Settled without a precise point; relying on motion, visits, and significant changes")
+            }
+        case .turnedOff:
+            Self.captureLog.notice("Trip following off")
+            continuousSessionStartedAt = nil
+            storePendingContinuousFixes(reconcile: true, now: now)
+            removeDepartureRegion()
+        }
+        applyTrackingConfiguration()
+    }
+
+    /// Fixes while balanced or detailed capture is on and route tracking is not.
+    private func handleFollowedFixes(_ locations: [CLLocation]) {
+        let now = Date.now
+        var departureFixes: [CLLocation] = []
+
+        for location in locations {
+            let phaseBefore = captureMachine.phase
+            let transition: CaptureStateMachine.Transition
+            if phaseBefore == .settled, !isStandardLocationRunning {
+                // No keep-alive session (balanced on low power): a fix while settled
+                // is a significant-change wake.
+                transition = captureMachine.handleWake(.significantChange, location: location, now: now)
+            } else {
+                transition = captureMachine.handleFix(location, now: now)
+            }
+
+            switch phaseBefore {
+            case .moving:
+                let minimumInterval = appliedConfiguration?.minimumInterval ?? 0
+                let accepted = fixFilter.accept([location], minimumInterval: minimumInterval)
+                if !accepted.isEmpty {
+                    if pendingContinuousFixes.isEmpty { pendingContinuousSince = now }
+                    pendingContinuousFixes.append(contentsOf: accepted)
+                }
+            case .settled:
+                // Keep the first fix of a departure, and one now and then during a long stay.
+                // The rest is the coarse keep-alive session and would only add jitter.
+                if case .startedMoving = transition {
+                    departureFixes.append(location)
+                    lastStoredSettledFixAt = now
+                } else if location.horizontalAccuracy >= 0,
+                          location.horizontalAccuracy <= CapturePolicy.Tuning.absoluteMaximumAccuracy,
+                          lastStoredSettledFixAt.map({ now.timeIntervalSince($0) >= CapturePolicy.Tuning.settledHeartbeatInterval }) ?? true {
+                    departureFixes.append(location)
+                    lastStoredSettledFixAt = now
+                }
+            case .off:
+                break
+            }
+
+            handle(transition, now: now)
+        }
+
+        if !departureFixes.isEmpty {
+            Task {
+                await assembler.ingestLocations(departureFixes, source: .significantChange)
+            }
+        }
+
+        if CapturePolicy.shouldFlush(
+            pendingCount: pendingContinuousFixes.count,
+            oldestPendingAt: pendingContinuousSince,
+            now: now
+        ) {
+            storePendingContinuousFixes(reconcile: false, now: now)
+        }
+
+        // Speed can change the travel kind (motion lags when boarding a bus).
+        if captureMachine.phase == .moving {
+            applyTrackingConfiguration()
+        }
+    }
+
+    /// Writes buffered continuous fixes. Stops are rebuilt when `reconcile` is true,
+    /// otherwise at most every few minutes.
+    private func storePendingContinuousFixes(reconcile forceReconcile: Bool, now: Date = .now) {
+        let fixes = pendingContinuousFixes
+        pendingContinuousFixes.removeAll()
+        pendingContinuousSince = nil
+
+        let reconcile: Bool
+        if forceReconcile {
+            reconcileThrottle.recordRun(at: now)
+            reconcile = true
+        } else {
+            reconcile = !fixes.isEmpty && reconcileThrottle.shouldRun(at: now)
+        }
+        guard !fixes.isEmpty || reconcile else { return }
+
+        Self.captureLog.debug("Writing \(fixes.count) continuous fixes, rebuild \(reconcile)")
+        Task {
+            if fixes.isEmpty {
+                await assembler.reconcileSampleStays()
+            } else {
+                await assembler.ingestLocations(fixes, source: .continuous, reconcile: reconcile)
+            }
+        }
+    }
+
+    private func updateSettleChecks() {
+        let needsChecks = isFollowingTrips
+            && captureMachine.phase == .moving
+            && !isTemporaryRouteTrackingActive
+            && isAuthorizedForTracking
+        guard needsChecks else {
+            settleCheckTask?.cancel()
+            settleCheckTask = nil
+            return
+        }
+        guard settleCheckTask == nil else { return }
+
+        let interval = CapturePolicy.Tuning.settleCheckInterval
+        settleCheckTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(interval))
+                guard !Task.isCancelled, let self else { return }
+                self.runSettleCheck()
+            }
+        }
+    }
+
+    /// No fixes arrive while standing still, so settling is noticed on a timer.
+    private func runSettleCheck() {
+        let now = Date.now
+        if CapturePolicy.shouldFlush(
+            pendingCount: pendingContinuousFixes.count,
+            oldestPendingAt: pendingContinuousSince,
+            now: now
+        ) {
+            storePendingContinuousFixes(reconcile: false, now: now)
+        }
+        handle(captureMachine.tick(now: now), now: now)
+    }
+
+    private func startMotionUpdatesIfNeeded() {
+        guard !isReceivingMotionUpdates,
+              CMMotionActivityManager.isActivityAvailable(),
+              CMMotionActivityManager.authorizationStatus() == .authorized
+        else { return }
+
+        isReceivingMotionUpdates = true
+        motionActivityManager.startActivityUpdates(to: .main) { [weak self] activity in
+            guard let activity else { return }
+            MainActor.assumeIsolated {
+                self?.handleMotionActivity(activity)
+            }
+        }
+        Self.captureLog.notice("Live motion updates on")
+    }
+
+    private func stopMotionUpdates() {
+        guard isReceivingMotionUpdates else { return }
+        motionActivityManager.stopActivityUpdates()
+        isReceivingMotionUpdates = false
+        Self.captureLog.notice("Live motion updates off")
+    }
+
+    private func handleMotionActivity(_ activity: CMMotionActivity) {
+        let state = CaptureMotionState.from(
+            stationary: activity.stationary,
+            walking: activity.walking,
+            running: activity.running,
+            cycling: activity.cycling,
+            automotive: activity.automotive,
+            isLowConfidence: activity.confidence == .low
+        )
+        let previous = captureMachine.motion
+        guard isFollowingTrips, !isTemporaryRouteTrackingActive else {
+            _ = captureMachine.handleMotion(state, now: .now)
+            return
+        }
+        let transition = captureMachine.handleMotion(state, now: .now)
+        if state != previous {
+            Self.captureLog.info("Motion \(previous.rawValue, privacy: .public) -> \(state.rawValue, privacy: .public)")
+        }
+        if transition != .none {
+            handle(transition)
+        } else if state != previous, captureMachine.phase == .moving {
+            applyTrackingConfiguration()
+        }
+    }
+
+    // MARK: Departure circle
+
+    private func storedDepartureAnchor() -> CaptureAnchor? {
+        guard let region = manager.monitoredRegions
+            .first(where: { $0.identifier == Self.departureRegionIdentifier }) as? CLCircularRegion
+        else { return nil }
+        return CaptureAnchor(
+            latitude: region.center.latitude,
+            longitude: region.center.longitude,
+            horizontalAccuracy: 0
+        )
+    }
+
+    /// Leaving this circle wakes or relaunches the app, even when it is suspended.
+    private func registerDepartureRegion(around anchor: CaptureAnchor) {
+        guard authorizationStatus == .authorizedAlways,
+              CLLocationManager.isMonitoringAvailable(for: CLCircularRegion.self)
+        else {
+            Self.captureLog.notice("Departure circle unavailable (authorization \(self.authorizationStatus.rawValue))")
+            return
+        }
+        let radius = min(CapturePolicy.Tuning.departureRegionRadius, manager.maximumRegionMonitoringDistance)
+        let region = CLCircularRegion(
+            center: CLLocationCoordinate2D(latitude: anchor.latitude, longitude: anchor.longitude),
+            radius: radius,
+            identifier: Self.departureRegionIdentifier
+        )
+        region.notifyOnEntry = false
+        region.notifyOnExit = true
+        manager.startMonitoring(for: region)
+        Self.captureLog.notice("Watching for departure: \(Int(radius)) m circle, point accuracy \(Int(anchor.horizontalAccuracy)) m")
+    }
+
+    private func removeDepartureRegion() {
+        for region in manager.monitoredRegions where region.identifier == Self.departureRegionIdentifier {
+            manager.stopMonitoring(for: region)
+            Self.captureLog.info("Departure circle removed")
+        }
+    }
+
+    // MARK: Battery saver's burst
 
     /// Records the walk off a bus, or the first minutes after leaving on foot.
     ///
     /// Significant-change updates are about 500 metres apart, so the last
     /// couple of blocks never arrive. A ten-minute pedestrian session covers
     /// that without leaving navigation GPS on for the rest of the day.
+    /// Battery saver only; the other levels follow the whole trip.
     private func startLastMileTracking() {
         guard !shouldSkipLiveTracking else { return }
         guard !isTemporaryRouteTrackingActive else { return }
+        guard !isFollowingTrips else { return }
         guard isAuthorizedForTracking else { return }
         guard isBackgroundLocationListeningEnabled else { return }
 
@@ -1150,10 +1551,11 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
             lastMileStartedAt = now
         }
         guard let startedAt = lastMileStartedAt else { return }
-        let cap = startedAt.addingTimeInterval(Self.lastMileMaximumDuration)
+        let cap = startedAt.addingTimeInterval(CapturePolicy.Tuning.lastMileMaximumDuration)
         guard now < cap else { return }
 
-        lastMileEndsAt = min(now.addingTimeInterval(Self.lastMileDuration), cap)
+        lastMileEndsAt = min(now.addingTimeInterval(CapturePolicy.Tuning.lastMileDuration), cap)
+        Self.captureLog.notice("Battery saver burst started")
         scheduleLastMileExpiry()
         applyTrackingConfiguration()
     }
@@ -1181,13 +1583,18 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         }
     }
 
-    private func expireLastMile() {
-        guard lastMileEndsAt != nil else { return }
+    private func clearLastMile() {
         lastMileEndsAt = nil
         lastMileStartedAt = nil
         lastMileRecentLocations.removeAll()
         lastMileExpiryTask?.cancel()
         lastMileExpiryTask = nil
+    }
+
+    private func expireLastMile() {
+        guard lastMileEndsAt != nil else { return }
+        clearLastMile()
+        Self.captureLog.notice("Battery saver burst ended")
         applyTrackingConfiguration()
     }
 
@@ -1220,7 +1627,7 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
     private func requestOneShotLocation(source: LocationSampleSource) {
         guard isAuthorizedForTracking,
               isBackgroundLocationListeningEnabled || isTemporaryRouteTrackingActive || isLastMileActive,
-              !isHighAccuracyMonitoring,
+              !isStandardLocationRunning,
               oneShotRequestGate.begin(source: source, at: .now) else { return }
         manager.requestLocation()
     }
@@ -1372,6 +1779,7 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         applyTrackingConfiguration()
         Task {
             await routeTrackingLiveActivity.end()
+            await assembler.reconcileSampleStays()
         }
     }
 
@@ -1407,6 +1815,7 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
             ) { [weak self] _ in
                 Task { @MainActor in
                     self?.refreshTemporaryRouteTrackingStateIfNeeded()
+                    self?.energyStateDidChange()
                 }
             }
         )
@@ -1418,6 +1827,7 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
             ) { [weak self] _ in
                 Task { @MainActor in
                     self?.refreshTemporaryRouteTrackingStateIfNeeded()
+                    self?.energyStateDidChange()
                 }
             }
         )
@@ -1429,9 +1839,16 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
             ) { [weak self] _ in
                 Task { @MainActor in
                     self?.refreshTemporaryRouteTrackingStateIfNeeded()
+                    self?.energyStateDidChange()
                 }
             }
         )
+    }
+
+    /// Balanced capture thins out in Low Power Mode or on a low battery.
+    private func energyStateDidChange() {
+        guard isFollowingTrips, !isTemporaryRouteTrackingActive, isAuthorizedForTracking else { return }
+        applyTrackingConfiguration()
     }
 
     private func notificationAuthorizationStatus() async -> UNAuthorizationStatus {
@@ -1549,6 +1966,27 @@ extension MovesLocationCaptureManager: @preconcurrency CLLocationManagerDelegate
 
         lastCaptureAt = .now
 
+        if isFollowingTrips {
+            // A fresh departure is a sign of movement. Visits often arrive late, so
+            // an old one is only history.
+            let departedRecently = visit.departureDate != .distantFuture
+                && Date.now.timeIntervalSince(visit.departureDate) < 10 * 60
+            Self.captureLog.info(
+                "Visit \(visit.departureDate == .distantFuture ? "arrival" : "departure", privacy: .public), accuracy \(Int(visit.horizontalAccuracy)) m"
+            )
+            if departedRecently, !isTemporaryRouteTrackingActive {
+                handle(captureMachine.handleWake(.visitDeparture, location: nil, now: .now))
+            }
+            // The visit rebuilds stops; write buffered fixes first so it sees them.
+            storePendingContinuousFixes(reconcile: false)
+            reconcileThrottle.recordRun(at: .now)
+            Task {
+                await assembler.ingestLocations([visitLocation], source: .visit, reconcile: false)
+                await assembler.ingestVisit(visit)
+            }
+            return
+        }
+
         Task {
             await assembler.ingestLocations([visitLocation], source: .visit)
             await assembler.ingestVisit(visit)
@@ -1572,6 +2010,13 @@ extension MovesLocationCaptureManager: @preconcurrency CLLocationManagerDelegate
             || isBackgroundLocationListeningEnabled
         else { return }
 
+        if pendingOneShotLocationSource == nil, !isTemporaryRouteTrackingActive, isFollowingTrips {
+            lastCaptureAt = .now
+            oneShotRequestGate.cancel()
+            handleFollowedFixes(locations)
+            return
+        }
+
         let idleFor = lastCaptureAt.map { Date.now.timeIntervalSince($0) }
         lastCaptureAt = .now
         let source: LocationSampleSource
@@ -1586,6 +2031,18 @@ extension MovesLocationCaptureManager: @preconcurrency CLLocationManagerDelegate
         }
         oneShotRequestGate.cancel()
 
+        // A one-shot fix while settled can still show the person has left.
+        if isFollowingTrips, !isTemporaryRouteTrackingActive {
+            for location in locations {
+                handle(captureMachine.handleFix(location, now: .now))
+            }
+        }
+
+        // Route tracking delivers a fix every few metres. Rebuilding a week of stops
+        // for each one is wasted work; do it every few minutes and when tracking ends.
+        let reconcile = source != .routeTracking || reconcileThrottle.shouldRun(at: .now)
+        let followsTrips = isFollowingTrips
+
         Task {
             if source == .routeTracking {
                 await routeTrackingLiveActivity.record(
@@ -1593,10 +2050,11 @@ extension MovesLocationCaptureManager: @preconcurrency CLLocationManagerDelegate
                     endsAt: temporaryRouteTrackingEndsAt
                 )
             }
-            await assembler.ingestLocations(locations, source: source)
+            await assembler.ingestLocations(locations, source: source, reconcile: reconcile)
             // Left somewhere on foot after a long pause. Catch the rest of
             // the walk; a ride keeps the cheaper significant-change stream.
-            if source == .significantChange,
+            if !followsTrips,
+               source == .significantChange,
                let idleFor, idleFor >= 8 * 60,
                await assembler.recentlyWalking(at: Date()) {
                 startLastMileTracking()
@@ -1606,6 +2064,22 @@ extension MovesLocationCaptureManager: @preconcurrency CLLocationManagerDelegate
         if source == .lastMile {
             stopLastMileIfSettled(locations)
         }
+    }
+
+    func locationManager(_ manager: CLLocationManager, didExitRegion region: CLRegion) {
+        guard region.identifier == Self.departureRegionIdentifier else { return }
+        Self.captureLog.notice("Left the departure circle")
+        guard isFollowingTrips else {
+            removeDepartureRegion()
+            return
+        }
+        guard !isTemporaryRouteTrackingActive else { return }
+        handle(captureMachine.handleWake(.regionExit, location: nil, now: .now))
+    }
+
+    func locationManager(_ manager: CLLocationManager, monitoringDidFailFor region: CLRegion?, withError error: Error) {
+        guard region?.identifier == Self.departureRegionIdentifier else { return }
+        Self.captureLog.error("Departure circle failed: \((error as NSError).code)")
     }
 
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
@@ -1618,6 +2092,7 @@ extension MovesLocationCaptureManager: @preconcurrency CLLocationManagerDelegate
             return
         }
 
+        Self.captureLog.error("Location error \(nsError.code)")
         lastErrorMessage = error.localizedDescription
     }
 }

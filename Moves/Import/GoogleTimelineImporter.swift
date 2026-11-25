@@ -416,7 +416,7 @@ struct GoogleTimelineImportSettingsView: View {
                     .disabled(importer.isImporting || importQueue.isStaging)
 
 
-                    Text("Select the Location History (Timeline) folder from a Google Takeout. Moves reads Semantic Location History first, then streams Records.json. A zip or a single JSON file (one month, Records, or an on-device Timeline.json) also works. Settings.json is ignored.")
+                    Text("Choose the Location History folder from your Google Takeout download, or a zip or JSON file from it.")
                         .font(.system(size: 12, weight: .medium, design: .rounded))
                         .foregroundStyle(.secondary)
                 }

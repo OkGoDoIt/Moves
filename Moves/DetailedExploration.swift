@@ -6,91 +6,8 @@ import SwiftData
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Coverage values have no SwiftData identity. Undated imported coverage never creates visits.
-struct ExplorationDisplayCell: Hashable, Sendable {
-    let x: UInt32
-    let y: UInt32
-    let factor: UInt32
-    var bounds: FogCellGeographicBounds {
-        let start = FogRaster.coordinate(x: x, y: y)
-        let end = FogRaster.coordinate(x: min(x + factor, FogRasterV1.globalCellDimension - 1), y: min(y + factor, FogRasterV1.globalCellDimension - 1))
-        return .init(west: start.longitude, south: end.latitude, east: end.longitude, north: start.latitude)
-    }
-}
-
-private extension FogRaster {
-    static func coordinate(x: UInt32, y: UInt32) -> FogGeographicCoordinate {
-        geographicCoordinate(for: FogWorldCoordinate(x: x, y: y))
-    }
-}
-
-/// Fine raster adapted from upstream Exploration, built only for the visible map.
-/// Paging bounds memory; cancellation stops work on navigation. No new background schedule or GPS work.
-enum DetailedExploration {
-    static func displayCells(container: ModelContainer, interval: DateInterval, region: MKCoordinateRegion,
-                             includeUndated: Bool) async throws -> [ExplorationDisplayCell] {
-        try await importWorkerValue(Task.detached(priority: .utility) {
-            let context = ModelContext(container)
-            context.autosaveEnabled = false
-            let start = interval.start, end = interval.end
-            let south = max(-90, region.center.latitude - region.span.latitudeDelta * 0.65)
-            let north = min(90, region.center.latitude + region.span.latitudeDelta * 0.65)
-            let centerLon = region.center.longitude
-            let halfWidth = region.span.longitudeDelta * 0.65
-            var query = FetchDescriptor<LocationSample>(predicate: #Predicate {
-                $0.timestamp >= start && $0.timestamp < end && $0.latitude >= south && $0.latitude <= north
-            }, sortBy: [SortDescriptor(\.timestamp), SortDescriptor(\.dedupeKey)])
-            query.fetchLimit = 1000
-            query.relationshipKeyPathsForPrefetching = [\.moveSegment]
-            let width = max(1, Double(FogRasterV1.globalCellDimension) * region.span.longitudeDelta / 360)
-            var factor: UInt32 = 1
-            while Double(factor) * 160 < width { factor *= 2 }
-            var cells = Set<ExplorationDisplayCell>()
-            var offset = 0
-            func add(_ latitude: Double, _ longitude: Double) {
-                guard latitude.isFinite, longitude.isFinite, latitude >= south, latitude <= north else { return }
-                let delta = abs(FogRasterV1.normalizedLongitude(longitude - centerLon))
-                guard halfWidth >= 180 || delta <= halfWidth,
-                      let address = try? FogRasterV1.address(for: .init(latitude: latitude, longitude: longitude)) else { return }
-                let point = address.cell.coordinate
-                cells.insert(.init(x: point.x / factor * factor, y: point.y / factor * factor, factor: factor))
-            }
-            while true {
-                try Task.checkCancellation()
-                query.fetchOffset = offset
-                let count = try autoreleasepool {
-                    let page = try context.fetch(query)
-                    for sample in page {
-                        // A flight trace or photo is evidence of travel, not ground exploration.
-                        guard sample.moveSegment?.transportMode != .plane, sample.source != .photoLibrary,
-                              CLLocationCoordinate2DIsValid(sample.coordinate) else { continue }
-                        add(sample.latitude, sample.longitude)
-                    }
-                    return page.count
-                }
-                if count < 1000 { break }
-                offset += count
-            }
-            if includeUndated {
-                for block in try FogCoverageArchive.load() {
-                    try Task.checkCancellation()
-                    let tileX = block.tileID % 512, tileY = block.tileID / 512
-                    let x0 = UInt32((tileX * 128 + block.localX) * 64)
-                    let y0 = UInt32((tileY * 128 + block.localY) * 64)
-                    let corner = FogRaster.coordinate(x: x0, y: y0)
-                    let opposite = FogRaster.coordinate(x: x0 + 63, y: y0 + 63)
-                    guard corner.latitude >= south, opposite.latitude <= north else { continue }
-                    for y in 0..<64 { for x in 0..<64 where block.bitmap.contains(x: x, y: y) {
-                        let coordinate = FogRaster.coordinate(x: x0 + UInt32(x), y: y0 + UInt32(y))
-                        add(coordinate.latitude, coordinate.longitude)
-                    } }
-                }
-            }
-            return cells.sorted { $0.y == $1.y ? $0.x < $1.x : $0.y < $1.y }
-        })
-    }
-}
-
+/// The Map tab's Fog layer draws from `MapActivityIndex` (routes and stays) plus the undated
+/// coverage kept here; see `MapCoverageRenderer`. Undated imported coverage never creates visits.
 /// Imported Fog coverage is user data, stored separately from disposable map caches and dated history.
 enum FogCoverageArchive {
     struct Record: Codable { let tileID: Int; let x: Int; let y: Int; let bytes: Data }
@@ -119,37 +36,6 @@ enum FogCoverageArchive {
         }
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try JSONEncoder().encode(Array(merged.values)).write(to: url, options: .atomic)
-    }
-}
-
-/// Fog shares the existing Map layer, using fine cells at street zoom and bounded coarse cells at world zoom.
-struct DetailedFogCanvas: View {
-    let cells: [ExplorationDisplayCell]
-    let region: MKCoordinateRegion
-    var body: some View {
-        Canvas { context, size in
-            guard region.span.latitudeDelta > 0, region.span.longitudeDelta > 0 else { return }
-            context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(.black.opacity(0.72)))
-            context.blendMode = .destinationOut
-            let center = MKMapPoint(region.center)
-            let top = MKMapPoint(CLLocationCoordinate2D(latitude: min(85, region.center.latitude + region.span.latitudeDelta / 2), longitude: region.center.longitude))
-            let bottom = MKMapPoint(CLLocationCoordinate2D(latitude: max(-85, region.center.latitude - region.span.latitudeDelta / 2), longitude: region.center.longitude))
-            let mapWidth = MKMapSize.world.width * region.span.longitudeDelta / 360
-            let mapHeight = max(bottom.y - top.y, 1)
-            func point(_ latitude: Double, _ longitude: Double) -> CGPoint {
-                let p = MKMapPoint(CLLocationCoordinate2D(latitude: latitude, longitude: longitude))
-                var dx = p.x - center.x
-                if dx > MKMapSize.world.width / 2 { dx -= MKMapSize.world.width }
-                if dx < -MKMapSize.world.width / 2 { dx += MKMapSize.world.width }
-                return CGPoint(x: (dx / mapWidth + 0.5) * size.width, y: (p.y - top.y) / mapHeight * size.height)
-            }
-            for cell in cells {
-                let b = cell.bounds
-                let a = point(b.north, b.west), z = point(b.south, b.east)
-                let rect = CGRect(x: min(a.x,z.x), y: min(a.y,z.y), width: max(abs(z.x-a.x),1), height: max(abs(z.y-a.y),1))
-                context.fill(Path(rect), with: .color(.white))
-            }
-        }.allowsHitTesting(false)
     }
 }
 

@@ -402,9 +402,69 @@ struct ContentView: View {
     @State private var selectedDay: DayTimeline?
     @State private var todayTimeline: DayTimeline?
 
-    private var visiblePageIndices: [Int] {
-        guard !dayTimelines.isEmpty else { return [] }
-        return Array(max(0, selectedPageIndex - 1)...min(dayTimelines.count - 1, selectedPageIndex + 1))
+    /// The page the horizontal pager is showing or scrolling towards. It follows the finger;
+    /// `selectedPageIndex` only changes once the pager comes to rest, so a page never
+    /// activates (or swaps in its live map) halfway through a swipe.
+    @State private var pagerDayKey: String?
+    @State private var isPagerMoving = false
+    /// Set once the pager has been placed on the selected day, so the scroll view's first
+    /// report (its leading page) is not mistaken for a swipe.
+    @State private var isPagerPositioned = false
+
+    /// Every calendar day, keyed by its stable day key. The set of pages never changes
+    /// while a swipe is in flight, so the pager always settles on exactly one page.
+    private var dayPager: some View {
+        ScrollView(.horizontal) {
+            LazyHStack(spacing: 0) {
+                ForEach(dayTimelines, id: \.dayKey) { day in
+                    DayTimelinePage(
+                        dayKey: day.dayKey,
+                        isActive: day.dayKey == selectedDayKey
+                    )
+                    .containerRelativeFrame(.horizontal)
+                    .id(day.dayKey)
+                }
+            }
+            .scrollTargetLayout()
+        }
+        // Days added before the first one (demo seeding, an import) would leave the scroll
+        // view unable to page back to them, so it is rebuilt on the selected day instead.
+        .id(dayTimelines.first?.dayKey)
+        .onAppear { syncPagerToSelection(animated: false) }
+        .scrollTargetBehavior(.paging)
+        .scrollPosition(id: $pagerDayKey, anchor: .center)
+        .scrollIndicators(.hidden)
+        .onScrollPhaseChange { _, phase in
+            isPagerMoving = phase != .idle
+            if phase == .idle { commitPagerPosition() }
+        }
+        .onChange(of: pagerDayKey) { _, _ in
+            // The position can arrive just after the pager reports that it is idle.
+            if !isPagerMoving { commitPagerPosition() }
+        }
+    }
+
+    /// Adopts the page the pager settled on.
+    private func commitPagerPosition() {
+        guard isPagerPositioned,
+              let key = pagerDayKey,
+              let index = dayTimelines.firstIndex(where: { $0.dayKey == key }) else { return }
+        if index != selectedPageIndex {
+            selectedPageIndex = index
+        }
+    }
+
+    /// Moves the pager to the selected day when something other than a swipe chose it.
+    private func syncPagerToSelection(animated: Bool) {
+        guard !isPagerMoving, dayTimelines.indices.contains(selectedPageIndex) else { return }
+        let key = dayTimelines[selectedPageIndex].dayKey
+        defer { isPagerPositioned = true }
+        guard pagerDayKey != key else { return }
+        if animated {
+            withAnimation(.snappy(duration: 0.3)) { pagerDayKey = key }
+        } else {
+            pagerDayKey = key
+        }
     }
 
     private func refreshVisibleDays() {
@@ -475,17 +535,7 @@ struct ContentView: View {
                     }
 
                     if !dayTimelines.isEmpty {
-                        TabView(selection: $selectedPageIndex) {
-                            ForEach(visiblePageIndices, id: \.self) { index in
-                                DayTimelinePage(
-                                    dayKey: dayTimelines[index].dayKey,
-                                    isActive: index == selectedPageIndex
-                                )
-                                    .tag(index)
-                                    
-                            }
-                        }
-                        .tabViewStyle(.page(indexDisplayMode: .never))
+                        dayPager
                     }
                 }
                 
@@ -509,6 +559,11 @@ struct ContentView: View {
                         Image(systemName: "gearshape")
                     }
                     .help("Settings")
+                }
+
+                // Shows itself only when something is waiting for a look.
+                ToolbarItem(placement: .principal) {
+                    ReviewEntryButton()
                 }
 
                 ToolbarItem(placement: .topBarTrailing) {
@@ -579,6 +634,7 @@ struct ContentView: View {
         }
         .onChange(of: dayTimelines.map(\.dayKey)) { _, _ in
             syncSelectedDayIfNeeded()
+            syncPagerToSelection(animated: false)
             publishWidgetSnapshot()
         }
         .onChange(of: todayTimeline?.moves.count ?? 0) { _, _ in
@@ -616,6 +672,7 @@ struct ContentView: View {
             guard dayTimelines.indices.contains(newIndex) else { return }
             refreshVisibleDays()
             selectedDayKey = dayTimelines[newIndex].dayKey
+            syncPagerToSelection(animated: false)
         }
         .onChange(of: selectedDayKey) { _, newKey in
             if rootController.selectedDayKey != newKey {
@@ -870,12 +927,14 @@ struct ContentView: View {
         let nextIndex = selectedPageIndex - 1
         guard dayTimelines.indices.contains(nextIndex) else { return }
         selectedPageIndex = nextIndex
+        syncPagerToSelection(animated: true)
     }
 
     private func selectNewerDay() {
         let nextIndex = selectedPageIndex + 1
         guard dayTimelines.indices.contains(nextIndex) else { return }
         selectedPageIndex = nextIndex
+        syncPagerToSelection(animated: true)
     }
 
     /// Holds a launch or deep-link jump until demo days (or imported days) exist.
@@ -1850,6 +1909,7 @@ struct ContentView_Previews: PreviewProvider {
             .environmentObject(AppUndoController())
             .environmentObject(MovesCloudDataPresencePublisher(modelContainer: container))
             .environmentObject(MovesRootController())
+            .environmentObject(HealthSummaryStore())
     }
 }
 

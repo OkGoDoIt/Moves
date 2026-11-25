@@ -314,7 +314,7 @@ struct RouteFileImportSettingsView: View {
                     }
 
 
-                    Text("Supports GPX, TCX, KML, and GeoJSON. Select one or several files at once. Timestamped logs from other tracking apps are split into places and trips, transport modes are inferred from speed, and new places are named from the map. Points you already have are skipped, so re-importing is safe.")
+                    Text("Choose one or more GPX, TCX, KML, or GeoJSON files. Moves turns them into places and trips.")
                         .font(.system(size: 12, weight: .medium, design: .rounded))
                         .foregroundStyle(.secondary)
                 }

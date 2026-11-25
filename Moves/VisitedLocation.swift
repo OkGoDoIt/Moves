@@ -85,6 +85,8 @@ enum LocationSampleSource: String, Codable, CaseIterable {
     case googleTimelineImport
     /// Reserved for a future Arc Timeline importer; stored as a string so existing rows stay valid.
     case arcImport
+    /// Fixes recorded automatically while following a trip (Balanced or Detailed capture).
+    case continuous
 }
 
 extension LocationSampleSource {
@@ -95,7 +97,8 @@ extension LocationSampleSource {
         case .fileRouteImport, .googleTimelineImport, .arcImport:
             return true
         case .visit, .significantChange, .routeTracking, .watchRouteTracking, .watchSignificantChange,
-             .healthWorkoutRoute, .launchBackfill, .authorizationGrant, .lastMile, .photoLibrary, .cameraPhoto:
+             .healthWorkoutRoute, .launchBackfill, .authorizationGrant, .lastMile, .photoLibrary, .cameraPhoto,
+             .continuous:
             return false
         }
     }
@@ -112,12 +115,13 @@ extension LocationSampleSource {
         case .authorizationGrant, .photoLibrary: return 1
         case .launchBackfill: return 0
         case .lastMile: return 4
+        case .continuous: return 4
         }
     }
 
     var isRouteTrack: Bool {
         switch self {
-        case .routeTracking, .watchRouteTracking, .healthWorkoutRoute, .fileRouteImport, .lastMile, .googleTimelineImport, .arcImport:
+        case .routeTracking, .watchRouteTracking, .healthWorkoutRoute, .fileRouteImport, .lastMile, .continuous, .googleTimelineImport, .arcImport:
             return true
         case .visit, .significantChange, .watchSignificantChange, .launchBackfill, .authorizationGrant, .photoLibrary, .cameraPhoto:
             return false
@@ -126,7 +130,7 @@ extension LocationSampleSource {
 
     var preservesRouteResolution: Bool {
         switch self {
-        case .healthWorkoutRoute, .watchRouteTracking, .fileRouteImport, .lastMile, .googleTimelineImport, .arcImport:
+        case .healthWorkoutRoute, .watchRouteTracking, .fileRouteImport, .lastMile, .continuous, .googleTimelineImport, .arcImport:
             return true
         case .routeTracking, .visit, .significantChange, .watchSignificantChange, .launchBackfill, .authorizationGrant, .photoLibrary, .cameraPhoto:
             return false
@@ -960,6 +964,9 @@ protocol TimelineRepository {
         samples: [LocationSample]
     ) throws -> MoveSegment
     func setAutomaticLabel(_ label: String, for placeID: UUID) throws
+    /// The label earlier stays at the same spot already carry, so a new stay there does
+    /// not get a fresh geocode with another house number.
+    func reusableAutomaticLabel(for placeID: UUID) throws -> String?
     func saveIfNeeded() throws
 
     func dissolveVisit(_ visit: VisitPlace) throws -> DissolveVisitResult
@@ -1610,7 +1617,10 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         if let existing {
             if let departure, existing.origin == .sensor {
                 existing.departureDate = departure
-                if visit.horizontalAccuracy <= existing.horizontalAccuracy {
+                if let center = try robustStayCenter(from: existing.arrivalDate, to: departure) {
+                    existing.latitude = center.latitude
+                    existing.longitude = center.longitude
+                } else if visit.horizontalAccuracy <= existing.horizontalAccuracy {
                     existing.latitude = visit.coordinate.latitude
                     existing.longitude = visit.coordinate.longitude
                 }
@@ -1630,6 +1640,10 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             longitude: visit.coordinate.longitude,
             horizontalAccuracy: visit.horizontalAccuracy
         )
+        if let departure, let center = try robustStayCenter(from: arrival, to: departure) {
+            place.latitude = center.latitude
+            place.longitude = center.longitude
+        }
         place.dayTimeline = try timeline(for: arrival)
         modelContext.insert(place)
         let canonical = try collapseDuplicatePlaces(around: place)
@@ -2627,7 +2641,8 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             if place.departureDate == nil || (place.departureDate ?? .distantFuture) > next.arrivalDate {
                 place.departureDate = min(stay.lastInsideDate, next.arrivalDate)
             }
-        } else if stay.lastInsideDate > (place.departureDate ?? .distantPast) {
+        } else if place.departureDate != nil, stay.lastInsideDate > (place.departureDate ?? .distantPast) {
+            // Guarded: writing nil over nil still dirties the row and saved every pass.
             place.departureDate = nil
         }
 
@@ -2793,10 +2808,25 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                 continue
             }
 
-            // Keep whichever centre the system was surer of, with the name found there.
+            // The centre comes from the joined stay's own fixes, so one indoor fix that
+            // claims to be precise cannot drag it down the street. Without enough good
+            // fixes, keep whichever centre the system was surer of. The name follows the
+            // surer report either way.
+            let joinedStart = min(current.arrivalDate, next.arrivalDate)
+            let joinedEnd = max(
+                current.departureDate ?? current.arrivalDate,
+                next.departureDate ?? next.arrivalDate
+            )
+            let robust = Self.robustStayCenter(in: samples, from: joinedStart, to: joinedEnd)
+            if let robust {
+                current.latitude = robust.latitude
+                current.longitude = robust.longitude
+            }
             if next.horizontalAccuracy < current.horizontalAccuracy {
-                current.latitude = next.latitude
-                current.longitude = next.longitude
+                if robust == nil {
+                    current.latitude = next.latitude
+                    current.longitude = next.longitude
+                }
                 if let label = next.autoLabel, !label.isEmpty {
                     current.autoLabel = label
                 }
@@ -2887,7 +2917,10 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             guard let lastOnSite else { continue }
             let walkDuration = next.arrivalDate.timeIntervalSince(lastOnSite)
             guard LastBlockWalk.isShape(distance: separation, duration: walkDuration) else { continue }
-            current.departureDate = max(lastOnSite, current.arrivalDate)
+            let walkStart = max(lastOnSite, current.arrivalDate)
+            if current.departureDate != walkStart {
+                current.departureDate = walkStart
+            }
         }
     }
 
@@ -2940,14 +2973,13 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         // Merging two stops leaves the trip between them going nowhere.
         if let start = move.startPlace?.id, start == move.endPlace?.id { return true }
 
-        let interior = places.contains { place in
-            guard place.id != move.startPlace?.id, place.id != move.endPlace?.id else { return false }
-            let placeEnd = place.departureDate ?? place.arrivalDate
-            let overlapsStart = placeEnd > move.startDate.addingTimeInterval(60)
-            let overlapsEnd = place.arrivalDate < move.endDate.addingTimeInterval(-60)
-            return overlapsStart && overlapsEnd
-        }
-        if interior { return true }
+        if anotherPlaceOverlaps(
+            from: move.startDate,
+            to: move.endDate,
+            startPlaceID: move.startPlace?.id,
+            endPlaceID: move.endPlace?.id,
+            among: places
+        ) { return true }
 
         if let departure = move.startPlace?.departureDate,
            move.startDate.addingTimeInterval(5 * 60) < departure {
@@ -2976,6 +3008,30 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         return false
     }
 
+    /// True when a stop other than the trip's own ends covers part of the trip's middle.
+    /// Shared by the cleanup above and `moveLegs`, so a pass never builds a trip that the
+    /// next pass would delete: that loop deleted and recreated the same trip on every batch.
+    private func anotherPlaceOverlaps(
+        from start: Date,
+        to end: Date,
+        startPlaceID: UUID?,
+        endPlaceID: UUID?,
+        among places: [VisitPlace]
+    ) -> Bool {
+        places.contains { place in
+            guard place.id != startPlaceID, place.id != endPlaceID else { return false }
+            let placeEnd = place.departureDate ?? place.arrivalDate
+            let overlapsStart = placeEnd > start.addingTimeInterval(60)
+            let overlapsEnd = place.arrivalDate < end.addingTimeInterval(-60)
+            return overlapsStart && overlapsEnd
+        }
+    }
+
+    /// How long after a trip ends a pass may still retry an unknown mode. Motion history
+    /// for a trip settles within minutes; past this, retrying only rewrote the same rows
+    /// on every batch (a mode the person turned off reads as unknown forever).
+    static let unknownModeRetryWindow: TimeInterval = 24 * 60 * 60
+
     private func moveLegs(
         among places: [VisitPlace],
         samples: [LocationSample],
@@ -2989,11 +3045,22 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         for index in ordered.indices.dropLast() {
             let origin = ordered[index]
             let destination = ordered[index + 1]
-            let legStart = origin.departureDate ?? origin.arrivalDate
+            // A stop whose arrival was clamped past its departure has not left before it
+            // arrived: the trip starts no earlier than the arrival.
+            let legStart = max(origin.departureDate ?? origin.arrivalDate, origin.arrivalDate)
             let legEnd = destination.arrivalDate
             guard legEnd.timeIntervalSince(legStart) > 60 else { continue }
             guard legEnd >= start, legStart <= end else { continue }
-            if try existingConsistentMove(from: origin, to: destination, start: legStart, end: legEnd) != nil {
+            if try existingConsistentMove(from: origin, to: destination, start: legStart, end: legEnd, now: end) != nil {
+                continue
+            }
+            if anotherPlaceOverlaps(
+                from: legStart,
+                to: legEnd,
+                startPlaceID: origin.id,
+                endPlaceID: destination.id,
+                among: ordered
+            ) {
                 continue
             }
             if wasRemoved(tripFrom: legStart, to: legEnd, spans: removedSpans) {
@@ -3043,7 +3110,8 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         from origin: VisitPlace,
         to destination: VisitPlace,
         start: Date,
-        end: Date
+        end: Date,
+        now: Date
     ) throws -> MoveSegment? {
         guard let existing = try findMove(startPlaceID: origin.id, endPlaceID: destination.id) else {
             return nil
@@ -3052,7 +3120,10 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         let startDelta = abs(existing.startDate.timeIntervalSince(start))
         let endDelta = abs(existing.endDate.timeIntervalSince(end))
         guard startDelta <= 5 * 60, endDelta <= 5 * 60 else { return nil }
-        guard existing.transportMode != .unknown else { return nil }
+        if existing.transportMode == .unknown,
+           now.timeIntervalSince(existing.endDate) < Self.unknownModeRetryWindow {
+            return nil
+        }
         return existing
     }
 
@@ -3090,15 +3161,16 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                 return existing
             }
             move = existing
-            move.dedupeKey = dedupeKey
-            if move.permitsAutomaticModeChanges {
+            // Writes only what differs, so re-applying the same trip leaves nothing to save.
+            if move.dedupeKey != dedupeKey { move.dedupeKey = dedupeKey }
+            if move.permitsAutomaticModeChanges, move.transportMode != transportMode {
                 move.transportMode = transportMode
             }
-            move.distanceMeters = distanceMeters
+            if move.distanceMeters != distanceMeters { move.distanceMeters = distanceMeters }
             // A later source without pedometer data must not erase recorded steps.
-            move.stepCount = stepCount ?? move.stepCount
-            move.startDate = startDate
-            move.endDate = endDate
+            if let stepCount, move.stepCount != stepCount { move.stepCount = stepCount }
+            if move.startDate != startDate { move.startDate = startDate }
+            if move.endDate != endDate { move.endDate = endDate }
         } else {
             move = MoveSegment(
                 dedupeKey: dedupeKey,
@@ -3112,11 +3184,11 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             modelContext.insert(move)
         }
 
-        move.startPlace = startPlace
-        move.endPlace = endPlace
-        move.dayTimeline = timeline
+        if move.startPlace?.persistentModelID != startPlace.persistentModelID { move.startPlace = startPlace }
+        if move.endPlace?.persistentModelID != endPlace.persistentModelID { move.endPlace = endPlace }
+        if move.dayTimeline?.persistentModelID != timeline.persistentModelID { move.dayTimeline = timeline }
 
-        for sample in samples {
+        for sample in samples where sample.moveSegment?.persistentModelID != move.persistentModelID {
             sample.moveSegment = move
         }
 
@@ -3154,11 +3226,13 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             near: place.coordinate,
             within: PlaceLearningEngine.rejectedLabelSearchRadius
         )
-        if PlaceLearningEngine.shouldSuppress(trimmed, nearbyPlaces: nearby) {
+        let readable = PlaceDisplayNamer.normalizedAutomaticLabel(trimmed)
+        if PlaceLearningEngine.shouldSuppress(trimmed, nearbyPlaces: nearby)
+            || PlaceLearningEngine.shouldSuppress(readable, nearbyPlaces: nearby) {
             return
         }
 
-        place.autoLabel = trimmed
+        place.autoLabel = readable
         try saveIfNeeded()
     }
 
@@ -3469,6 +3543,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                     visit.userLabel = trimmed
                 }
                 PlaceLearningEngine.learn(from: visit, onto: place)
+                try adoptPastVisits(into: place, around: visit, seedsFootprint: false)
             }
         }
     }
@@ -3476,6 +3551,12 @@ final class SwiftDataTimelineRepository: TimelineRepository {
     func createKnownPlace(from visit: VisitPlace, name: String) throws -> KnownPlace {
         try performingUndoableChange(named: "Add Place") {
             let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            // A place with this name already here is the same place: naming it twice
+            // must not make a twin the Review inbox then calls ambiguous.
+            if !trimmed.isEmpty, let existing = try sameNamedKnownPlace(trimmed, near: visit.coordinate) {
+                try assign(visit, to: existing, source: .user, confidence: 1)
+                return existing
+            }
             let place = KnownPlace(
                 name: trimmed.isEmpty ? visit.displayTitle : trimmed,
                 latitude: visit.latitude,
@@ -3497,8 +3578,164 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                 visit.userLabel = trimmed
             }
             PlaceLearningEngine.learn(from: visit, onto: place)
+            try adoptPastVisits(into: place, around: visit, seedsFootprint: true)
             return place
         }
+    }
+
+    // MARK: Name once, fixed everywhere
+
+    /// Assigns the earlier stays at the spot the person just named to that place, in the
+    /// same Undo step as the naming.
+    ///
+    /// Only stays nobody placed are taken: no `KnownPlace`, no assignment, and no name of
+    /// the person's own unless it is this one. A stay the person once moved away from
+    /// this place stays where they put it. The cluster grows stay by stay with the
+    /// same-spot rule and never past 150 m from the named stay. Adopted stays are
+    /// automatic assignments, so they never count as confirmations.
+    ///
+    /// A new place takes its footprint from the whole cluster; an existing place keeps
+    /// its centre and only grows enough to hold what joined.
+    @discardableResult
+    func adoptPastVisits(
+        into place: KnownPlace,
+        around seed: VisitPlace,
+        seedsFootprint: Bool
+    ) throws -> [VisitPlace] {
+        let placeID = place.id
+        let nameKey = PlaceDisplayNamer.labelComparisonKey(place.name)
+        let movedAway = Set(
+            try modelContext.fetch(FetchDescriptor<PlaceCorrectionEvent>())
+                .filter { $0.fromKnownPlaceID == placeID }
+                .map(\.visitPlaceID)
+        )
+        let reach = PlaceLearningEngine.clusterRadius + PlaceLearningEngine.sameSpotMaximumDistance
+        let candidates = try visitsInBox(around: seed.coordinate, meters: reach).filter { visit in
+            guard visit.id != seed.id,
+                  visit.knownPlace == nil,
+                  visit.assignmentSource == .none,
+                  !movedAway.contains(visit.id)
+            else { return false }
+            guard let own = PlaceDisplayNamer.meaningful(visit.userLabel) else { return true }
+            return PlaceDisplayNamer.labelComparisonKey(own) == nameKey
+        }
+        let byID = Dictionary(candidates.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let members = PlaceLearningEngine.cluster(
+            around: PlaceLearningEngine.StaySnapshot(seed, label: nil),
+            among: candidates.map { PlaceLearningEngine.StaySnapshot($0, label: nil) }
+        )
+        .compactMap { byID[$0.id] }
+        guard !members.isEmpty else { return [] }
+
+        for visit in members {
+            visit.knownPlace = place
+            visit.assignmentSource = .auto
+            visit.assignmentConfidence = 1
+        }
+
+        let adopted = members.map { PlaceLearningEngine.VisitSnapshot($0) }
+        if seedsFootprint {
+            let confirmed = place.visits
+                .filter { $0.assignmentSource == .user }
+                .map(PlaceLearningEngine.VisitSnapshot.init)
+            let footprint = PlaceLearningEngine.learnedFootprint(from: confirmed + adopted)
+            let confirmedCount = place.confirmedVisitCount
+            PlaceLearningEngine.apply(footprint, to: place)
+            place.confirmedVisitCount = confirmedCount
+        } else {
+            let farthest = adopted
+                .map { PlaceLearningEngine.distance(from: place.coordinate, to: $0.coordinate) }
+                .max() ?? 0
+            place.footprintRadius = PlaceLearningEngine.clampRadius(
+                max(place.footprintRadius, farthest * PlaceLearningEngine.radiusGrowthFactor)
+            )
+            if let latest = members.map(\.arrivalDate).max(), latest > (place.lastVisitAt ?? .distantPast) {
+                place.lastVisitAt = latest
+            }
+        }
+        return members
+    }
+
+    /// A learned place with this name, folded, whose centre is within the naming search
+    /// radius of `coordinate`.
+    func sameNamedKnownPlace(_ name: String, near coordinate: CLLocationCoordinate2D) throws -> KnownPlace? {
+        let key = PlaceDisplayNamer.labelComparisonKey(name)
+        guard !key.isEmpty else { return nil }
+        return try knownPlaces(near: coordinate, within: NearbyPlaceSuggester.searchRadius)
+            .first { PlaceDisplayNamer.labelComparisonKey($0.name) == key }
+    }
+
+    func reusableAutomaticLabel(for placeID: UUID) throws -> String? {
+        guard let place = try findPlace(byID: placeID) else { return nil }
+        let reach = PlaceLearningEngine.sameSpotMaximumDistance
+        let others = try visitsInBox(around: place.coordinate, meters: reach)
+            .filter { $0.id != placeID && $0.knownPlace == nil && $0.assignmentSource == .none }
+            .compactMap { visit -> PlaceLearningEngine.StaySnapshot? in
+                guard PlaceDisplayNamer.meaningful(visit.userLabel) == nil,
+                      let label = PlaceDisplayNamer.meaningful(visit.autoLabel)
+                else { return nil }
+                return PlaceLearningEngine.StaySnapshot(visit, label: label)
+            }
+        guard !others.isEmpty else { return nil }
+        let nearbyPlaces = try knownPlaces(
+            near: place.coordinate,
+            within: PlaceLearningEngine.rejectedLabelSearchRadius
+        )
+        return PlaceLearningEngine.reusableLabel(
+            for: PlaceLearningEngine.StaySnapshot(place, label: nil),
+            among: others,
+            isSuppressed: { PlaceLearningEngine.shouldSuppress($0, nearbyPlaces: nearbyPlaces) }
+        )
+    }
+
+    /// Visits whose centre falls in a square `meters` either side of `coordinate`.
+    private func visitsInBox(around coordinate: CLLocationCoordinate2D, meters: CLLocationDistance) throws -> [VisitPlace] {
+        let latitudeSpan = meters / 111_320
+        let longitudeSpan = meters / max(111_320 * cos(coordinate.latitude * .pi / 180), 1)
+        let minLatitude = coordinate.latitude - latitudeSpan
+        let maxLatitude = coordinate.latitude + latitudeSpan
+        let minLongitude = coordinate.longitude - longitudeSpan
+        let maxLongitude = coordinate.longitude + longitudeSpan
+        return try modelContext.fetch(FetchDescriptor<VisitPlace>(
+            predicate: #Predicate { visit in
+                visit.latitude >= minLatitude && visit.latitude <= maxLatitude
+                    && visit.longitude >= minLongitude && visit.longitude <= maxLongitude
+            }
+        ))
+    }
+
+    /// Robust centre of a CLVisit stay from the fixes stored while it lasted.
+    private func robustStayCenter(from start: Date, to end: Date) throws -> CLLocationCoordinate2D? {
+        guard end > start else { return nil }
+        let fixes = try samples(from: start, to: end)
+            .filter { $0.source != .photoLibrary && $0.moveSegment == nil }
+            .map { (latitude: $0.latitude, longitude: $0.longitude, accuracy: $0.horizontalAccuracy) }
+        return PlaceLearningEngine.robustCenter(of: fixes)
+    }
+
+    /// Robust centre from `samples`, which must be sorted by time.
+    private static func robustStayCenter(
+        in samples: [LocationSample],
+        from start: Date,
+        to end: Date
+    ) -> CLLocationCoordinate2D? {
+        guard end > start, !samples.isEmpty else { return nil }
+        var low = 0
+        var high = samples.count
+        while low < high {
+            let middle = (low + high) / 2
+            if samples[middle].timestamp < start { low = middle + 1 } else { high = middle }
+        }
+        var fixes: [(latitude: Double, longitude: Double, accuracy: Double)] = []
+        var index = low
+        while index < samples.count, samples[index].timestamp <= end {
+            let sample = samples[index]
+            if sample.source != .photoLibrary {
+                fixes.append((sample.latitude, sample.longitude, sample.horizontalAccuracy))
+            }
+            index += 1
+        }
+        return PlaceLearningEngine.robustCenter(of: fixes)
     }
 
     func knownPlaces(
