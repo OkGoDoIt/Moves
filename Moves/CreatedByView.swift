@@ -8,42 +8,59 @@
 import SwiftUI
 
 struct CreatedByView: View {
-    @Environment(\.openURL) private var openURL
-
-    private let websiteURL = URL(string: "https://extremelysuccessfulapps.com")!
-    private let sourceCodeURL = URL(string: "https://github.com/holgerkrupp/Moves")!
+    private let websiteURL = URL(string: "https://rogerpincombe.com")!
+    private let sourceCodeURL = URL(string: "https://github.com/OkGoDoIt/Moves")!
+    private let originalAppURL = URL(string: "https://extremelysuccessfulapps.com/moves/")!
 
     var body: some View {
-        VStack(alignment: .center, spacing: 10) {
-            Text("Created in Buxtehude by")
+        VStack(spacing: 0) {
+            Text("This version by")
 
-            linkButton(
-                title: "Extremely Successful Apps",
-                image: "extremelysuccessfullogo",
-                url: websiteURL
-            )
+            Link(destination: websiteURL) {
+                Label {
+                    Text(verbatim: "Roger Pincombe")
+                } icon: {
+                    Image(systemName: "globe")
+                }
+                .creditLink()
+            }
 
-            Divider()
-
-            linkButton(
-                title: "Get the source code",
-                image: "githublogo",
-                url: sourceCodeURL
-            )
+            Link(destination: sourceCodeURL) {
+                Label("Get the source code", image: "githublogo")
+                    .creditLink()
+            }
 
             VersionNumberView()
                 .font(.caption)
-        }
-    }
+                .padding(.top, 2)
 
-    private func linkButton(title: String, image: String, url: URL) -> some View {
-        Button {
-            openURL(url)
-        } label: {
-            Label(title, image: image)
-                .foregroundStyle(.accent)
+            Divider()
+                .padding(.vertical, 14)
+
+            Text("Based on the original Moves by")
+
+            Link(destination: originalAppURL) {
+                Label {
+                    Text(verbatim: "Extremely Successful Apps")
+                } icon: {
+                    Image("extremelysuccessfullogo")
+                }
+                .creditLink()
+            }
         }
-        .buttonStyle(.plain)
+        .multilineTextAlignment(.center)
+        .padding(.top, 4)
+    }
+}
+
+private extension View {
+    /// Keeps each credit at a full-size touch target.
+    func creditLink() -> some View {
+        foregroundStyle(.accent)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.vertical, 8)
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
     }
 }
 
