@@ -718,9 +718,16 @@ final class PhotoLibraryController: ObservableObject {
     }
 
     /// Off screen the system ends an app that keeps the processor busy for more than 80% of
-    /// a minute, so the work takes breaks there.
+    /// a minute, so the work takes breaks there. A hot phone gets longer ones anywhere: it
+    /// slows down everything else on the screen.
     private func restIfOffScreen(after worked: TimeInterval) async {
-        guard !grants.contains(.scene), worked > 0.2 else { return }
+        guard worked > 0.2 else { return }
+        let thermal = ProcessInfo.processInfo.thermalState
+        if thermal == .serious || thermal == .critical {
+            try? await Task.sleep(for: .seconds(min(worked * 3, 20)))
+            return
+        }
+        guard !grants.contains(.scene) else { return }
         try? await Task.sleep(for: .seconds(min(worked * 0.6, 8)))
     }
 
