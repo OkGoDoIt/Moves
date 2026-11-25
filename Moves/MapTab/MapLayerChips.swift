@@ -26,7 +26,7 @@ struct MapLayerChips: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             layerPicker
-            if !presentModes.isEmpty, layer == .routes {
+            if !presentModes.isEmpty {
                 modeChips
             }
         }
