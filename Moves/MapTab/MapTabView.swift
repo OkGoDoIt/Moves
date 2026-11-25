@@ -173,6 +173,17 @@ struct MapTabView: View {
                     .padding(.horizontal, 14)
                     .padding(.top, 8)
 
+                if coverage.isCatchingUp {
+                    Text(String(localized: "Catching up on your history"))
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(.regularMaterial, in: Capsule())
+                        .padding(.top, 6)
+                        .transition(.opacity)
+                }
+
                 Spacer(minLength: 0)
 
                 HStack(alignment: .bottom) {
@@ -206,7 +217,9 @@ struct MapTabView: View {
                 modelContext: modelContext,
                 cameraRegion: visibleRegion,
                 includeRoutes: !rangeIsLarge,
-                calendar: calendar
+                calendar: calendar,
+                summaries: MapCoverageController.usesTiles && coverage.summariesCover(selection.interval)
+                    ? (coverage.summaries, coverage.indexGeneration) : nil
             )
             MapPerformanceProbe.shared.mark("routes load (\(loader.routes.count) routes, \(loader.visits.count) stays)", since: started)
             syncEnabledModes()
@@ -217,7 +230,10 @@ struct MapTabView: View {
         .task {
             await followUserLocation()
         }
-        .onReceive(Self.coverageChanges) { _ in coverageRevision += 1 }
+        .onReceive(Self.coverageChanges) { _ in
+            coverageRevision += 1
+            coverage.noteRevision(coverageRevision, container: modelContext.container)
+        }
         .onAppear { coverageRevision += 1 }
         .onChange(of: loader.cameraFitKey) { _, _ in
             fitCamera()
@@ -245,6 +261,12 @@ struct MapTabView: View {
         }
         .onChange(of: coverage.latestActivity?.latitude) { _, _ in
             fitCamera()
+        }
+        .onChange(of: coverage.indexGeneration) { _, generation in
+            // New months on disk: the scrubber's bars follow without reloading routes.
+            guard MapCoverageController.usesTiles, coverage.summariesCover(selection.interval) else { return }
+            loader.refreshHistogram(selection: selection, modelContext: modelContext, calendar: calendar,
+                                    summaries: (coverage.summaries, generation))
         }
         .onChange(of: selection.granularity) { _, granularity in
             if granularity != .allTime { hasFramedAllTime = false }
@@ -406,7 +428,8 @@ struct MapTabView: View {
             ),
             interval: selection.focus,
             modes: modes,
-            includeUndated: selection.granularity == .allTime
+            includeUndated: selection.granularity == .allTime,
+            isAllTime: selection.granularity == .allTime && !selection.isCustom && selection.focus == selection.interval
         ))
     }
 
@@ -587,13 +610,17 @@ struct MapTabView: View {
         }
     }
 
-    /// Bitmap mode: hit-test the tap against the activity index, within about 22 points.
+    /// Bitmap mode: hit-test the tap against the tiles, within about 22 points, then load that
+    /// trip by id. Off the main thread.
     private func selectTrack(near coordinate: CLLocationCoordinate2D) {
         guard let rect = cameraState.rect, mapSize.width > 0 else { return }
-        let tolerance = 22 * rect.width / Double(mapSize.width)
-        let found = coverage.track(near: MercatorPoint(coordinate), tolerance: tolerance)
-        withAnimation(.easeInOut(duration: 0.18)) {
-            selectedTrack = found
+        let mapPointsPerPoint = rect.width / Double(mapSize.width)
+        let tolerance = 22 * mapPointsPerPoint
+        Task {
+            let found = await coverage.trip(near: MercatorPoint(coordinate), tolerance: tolerance, mapPointsPerPoint: mapPointsPerPoint)
+            withAnimation(.easeInOut(duration: 0.18)) {
+                selectedTrack = found
+            }
         }
     }
 

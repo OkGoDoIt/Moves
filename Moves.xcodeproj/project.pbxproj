@@ -191,6 +191,10 @@
 		F61000013060000100000001 /* MapTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F61000013060000100000000 /* MapTabView.swift */; };
 		A7C3E1000000000000000A02 /* MapActivityIndex.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7C3E1000000000000000A01 /* MapActivityIndex.swift */; };
 		A7C3E1000000000000000A04 /* MapCoverageRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7C3E1000000000000000A03 /* MapCoverageRenderer.swift */; };
+		A7C3E1000000000000000B02 /* MapTileModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7C3E1000000000000000B01 /* MapTileModel.swift */; };
+		A7C3E1000000000000000B04 /* MapTileDatabase.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7C3E1000000000000000B03 /* MapTileDatabase.swift */; };
+		A7C3E1000000000000000B06 /* MapTileBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7C3E1000000000000000B05 /* MapTileBuilder.swift */; };
+		A7C3E1000000000000000B08 /* MapTileCompositor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7C3E1000000000000000B07 /* MapTileCompositor.swift */; };
 		A7C3E1000000000000000A08 /* MapPerformance.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7C3E1000000000000000A07 /* MapPerformance.swift */; };
 		F61000013060000100000003 /* MapRangeSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = F61000013060000100000002 /* MapRangeSelection.swift */; };
 		F61000013060000100000005 /* MapRangePill.swift in Sources */ = {isa = PBXBuildFile; fileRef = F61000013060000100000004 /* MapRangePill.swift */; };
@@ -202,6 +206,7 @@
 		F61000013060000100000011 /* MapRangeSelectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F61000013060000100000010 /* MapRangeSelectionTests.swift */; };
 		F61000013060000100000013 /* VisitedCellStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F61000013060000100000012 /* VisitedCellStoreTests.swift */; };
 		A7C3E1000000000000000A06 /* MapCoverageRendererTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7C3E1000000000000000A05 /* MapCoverageRendererTests.swift */; };
+		A7C3E1000000000000000B0A /* MapTileTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7C3E1000000000000000B09 /* MapTileTests.swift */; };
 		F70000013070000100000001 /* PlacesTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F70000013070000100000000 /* PlacesTabView.swift */; };
 		F70000013070000100000003 /* PlaceDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F70000013070000100000002 /* PlaceDetailView.swift */; };
 		F70000013070000100000005 /* OccupancyChartView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F70000013070000100000004 /* OccupancyChartView.swift */; };
@@ -517,6 +522,10 @@
 		F61000013060000100000000 /* MapTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapTabView.swift; sourceTree = "<group>"; };
 		A7C3E1000000000000000A01 /* MapActivityIndex.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapActivityIndex.swift; sourceTree = "<group>"; };
 		A7C3E1000000000000000A03 /* MapCoverageRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapCoverageRenderer.swift; sourceTree = "<group>"; };
+		A7C3E1000000000000000B01 /* MapTileModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tiles/MapTileModel.swift; sourceTree = "<group>"; };
+		A7C3E1000000000000000B03 /* MapTileDatabase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tiles/MapTileDatabase.swift; sourceTree = "<group>"; };
+		A7C3E1000000000000000B05 /* MapTileBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tiles/MapTileBuilder.swift; sourceTree = "<group>"; };
+		A7C3E1000000000000000B07 /* MapTileCompositor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tiles/MapTileCompositor.swift; sourceTree = "<group>"; };
 		A7C3E1000000000000000A07 /* MapPerformance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapPerformance.swift; sourceTree = "<group>"; };
 		F61000013060000100000002 /* MapRangeSelection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapRangeSelection.swift; sourceTree = "<group>"; };
 		F61000013060000100000004 /* MapRangePill.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapRangePill.swift; sourceTree = "<group>"; };
@@ -528,6 +537,7 @@
 		F61000013060000100000010 /* MapRangeSelectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapRangeSelectionTests.swift; sourceTree = "<group>"; };
 		F61000013060000100000012 /* VisitedCellStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisitedCellStoreTests.swift; sourceTree = "<group>"; };
 		A7C3E1000000000000000A05 /* MapCoverageRendererTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapCoverageRendererTests.swift; sourceTree = "<group>"; };
+		A7C3E1000000000000000B09 /* MapTileTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapTileTests.swift; sourceTree = "<group>"; };
 		F70000013070000100000000 /* PlacesTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlacesTabView.swift; sourceTree = "<group>"; };
 		F70000013070000100000002 /* PlaceDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaceDetailView.swift; sourceTree = "<group>"; };
 		F70000013070000100000004 /* OccupancyChartView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OccupancyChartView.swift; sourceTree = "<group>"; };
@@ -869,6 +879,7 @@
 				F61000013060000100000010 /* MapRangeSelectionTests.swift */,
 				F61000013060000100000012 /* VisitedCellStoreTests.swift */,
 				A7C3E1000000000000000A05 /* MapCoverageRendererTests.swift */,
+				A7C3E1000000000000000B09 /* MapTileTests.swift */,
 				F7000001307000010000000A /* PlacesIndexTests.swift */,
 				F8000001308000010000000A /* InsightsSnapshotTests.swift */,
 				F8000001308000010000000C /* SearchQueryParserTests.swift */,
@@ -943,6 +954,10 @@
 				F61000013060000100000000 /* MapTabView.swift */,
 				A7C3E1000000000000000A01 /* MapActivityIndex.swift */,
 				A7C3E1000000000000000A03 /* MapCoverageRenderer.swift */,
+				A7C3E1000000000000000B01 /* MapTileModel.swift */,
+				A7C3E1000000000000000B03 /* MapTileDatabase.swift */,
+				A7C3E1000000000000000B05 /* MapTileBuilder.swift */,
+				A7C3E1000000000000000B07 /* MapTileCompositor.swift */,
 				A7C3E1000000000000000A07 /* MapPerformance.swift */,
 				F61000013060000100000002 /* MapRangeSelection.swift */,
 				F61000013060000100000004 /* MapRangePill.swift */,
@@ -1388,6 +1403,10 @@
 				F61000013060000100000001 /* MapTabView.swift in Sources */,
 				A7C3E1000000000000000A02 /* MapActivityIndex.swift in Sources */,
 				A7C3E1000000000000000A04 /* MapCoverageRenderer.swift in Sources */,
+				A7C3E1000000000000000B02 /* MapTileModel.swift in Sources */,
+				A7C3E1000000000000000B04 /* MapTileDatabase.swift in Sources */,
+				A7C3E1000000000000000B06 /* MapTileBuilder.swift in Sources */,
+				A7C3E1000000000000000B08 /* MapTileCompositor.swift in Sources */,
 				A7C3E1000000000000000A08 /* MapPerformance.swift in Sources */,
 				F61000013060000100000003 /* MapRangeSelection.swift in Sources */,
 				F61000013060000100000005 /* MapRangePill.swift in Sources */,
@@ -1504,6 +1523,7 @@
 				F61000013060000100000011 /* MapRangeSelectionTests.swift in Sources */,
 				F61000013060000100000013 /* VisitedCellStoreTests.swift in Sources */,
 				A7C3E1000000000000000A06 /* MapCoverageRendererTests.swift in Sources */,
+				A7C3E1000000000000000B0A /* MapTileTests.swift in Sources */,
 				F7000001307000010000000B /* PlacesIndexTests.swift in Sources */,
 				F8000001308000010000000B /* InsightsSnapshotTests.swift in Sources */,
 				F8000001308000010000000D /* SearchQueryParserTests.swift in Sources */,
@@ -1614,7 +1634,7 @@
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_ENTITLEMENTS = QuickLookThumbnails/QuickLookThumbnails.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 59;
+				CURRENT_PROJECT_VERSION = 60;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = QuickLookThumbnails/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
@@ -1637,7 +1657,7 @@
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_ENTITLEMENTS = QuickLookThumbnails/QuickLookThumbnails.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 59;
+				CURRENT_PROJECT_VERSION = 60;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = QuickLookThumbnails/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
@@ -1785,7 +1805,7 @@
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_ENTITLEMENTS = Moves/Moves.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 59;
+				CURRENT_PROJECT_VERSION = 60;
 				DEVELOPMENT_ASSET_PATHS = "\"Moves/Preview Content\"";
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
@@ -1834,7 +1854,7 @@
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_ENTITLEMENTS = Moves/Moves.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 59;
+				CURRENT_PROJECT_VERSION = 60;
 				DEVELOPMENT_ASSET_PATHS = "\"Moves/Preview Content\"";
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
@@ -1882,7 +1902,7 @@
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_ENTITLEMENTS = QuickLookPreview/QuickLookPreview.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 59;
+				CURRENT_PROJECT_VERSION = 60;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = QuickLookPreview/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
@@ -1954,7 +1974,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = "Moves Watch App/MovesWatch.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 59;
+				CURRENT_PROJECT_VERSION = 60;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Moves Watch App/Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1980,7 +2000,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = "Moves Watch App/MovesWatch.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 59;
+				CURRENT_PROJECT_VERSION = 60;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Moves Watch App/Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -2006,7 +2026,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = "Moves Widgets/MovesWidgets.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 59;
+				CURRENT_PROJECT_VERSION = 60;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Moves Widgets/MovesWidgets-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -2032,7 +2052,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = "Moves Widgets/MovesWidgets.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 59;
+				CURRENT_PROJECT_VERSION = 60;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Moves Widgets/MovesWidgets-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -2058,7 +2078,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = "Moves Widgets/MovesWidgets.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 59;
+				CURRENT_PROJECT_VERSION = 60;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Moves Widgets/MovesWidgets-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -2085,7 +2105,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = "Moves Widgets/MovesWidgets.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 59;
+				CURRENT_PROJECT_VERSION = 60;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Moves Widgets/MovesWidgets-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -2113,7 +2133,7 @@
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_ENTITLEMENTS = QuickLookPreview/QuickLookPreview.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 59;
+				CURRENT_PROJECT_VERSION = 60;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = QuickLookPreview/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;

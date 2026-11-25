@@ -473,6 +473,11 @@ enum MapCoverageRenderer {
     static func renderHeat(_ subset: MapActivitySubset, geometry: MapRasterGeometry, isDark: Bool) throws -> CGImage? {
         let density = try heatDensity(subset, geometry: geometry)
         try Task.checkCancellation()
+        return heatImage(density: density, geometry: geometry, isDark: isDark)
+    }
+
+    /// Colours a blurred, normalised density grid.
+    static func heatImage(density: [Float], geometry: MapRasterGeometry, isDark: Bool) -> CGImage? {
         let reference = heatReference(density)
         let lut = heatLUT(isDark: isDark)
         let scale = 255 / log1p(reference)
@@ -520,7 +525,7 @@ enum MapCoverageRenderer {
     // MARK: Fog
 
     /// A white-on-black 8-bit canvas, y down, for one reveal pass.
-    private static func revealCanvas(width: Int, height: Int, radius: Double) -> CGContext? {
+    static func revealCanvas(width: Int, height: Int, radius: Double) -> CGContext? {
         guard let context = CGContext(
             data: nil,
             width: width,
@@ -544,7 +549,7 @@ enum MapCoverageRenderer {
     }
 
     /// The canvas as 0…1 floats, feathered by `sigma` pixels.
-    private static func feathered(_ context: CGContext, sigma: Double) -> [Float] {
+    static func feathered(_ context: CGContext, sigma: Double) -> [Float] {
         let width = context.width, height = context.height
         var mask = [Float](repeating: 0, count: width * height)
         guard let data = context.data else { return mask }
@@ -691,6 +696,11 @@ enum MapCoverageRenderer {
     ) throws -> CGImage? {
         let mask = try fogMask(subset, geometry: geometry, radiusPoints: radiusPoints, undatedRadiusPoints: undatedRadiusPoints)
         try Task.checkCancellation()
+        return fogImage(mask: mask, geometry: geometry, isDark: isDark)
+    }
+
+    /// The veil over a 0…1 reveal mask.
+    static func fogImage(mask: [Float], geometry: MapRasterGeometry, isDark: Bool) -> CGImage? {
         let veil = veilColor(isDark: isDark)
         // 256 veil strengths, from full fog to fully revealed.
         let lut: [UInt32] = (0..<256).map { index in
@@ -847,9 +857,234 @@ final class MapCoverageController {
         var interval: DateInterval
         var modes: Set<TransportMode>?
         var includeUndated: Bool
+        /// The All Time preset, which reads the all-time tiles.
+        var isAllTime = false
     }
 
-    init() {
+    // MARK: Tiles
+
+    /// Draw from the tile pyramid. `MOVES_MAP_TILES=0` draws from the in-memory index instead,
+    /// for measuring one against the other.
+    static let usesTiles = ProcessInfo.processInfo.environment["MOVES_MAP_TILES"] != "0"
+
+    /// Months built so far, and whether a first build is still catching up.
+    private(set) var buildProgress = MapTileBuildProgress()
+    /// Per-month counts, bounds, and minutes, for range sizes and the scrubber.
+    private(set) var summaries: [MapMonthSummary] = []
+    /// Each summary's month, worked out once so a scrubber tick does no calendar arithmetic.
+    @ObservationIgnored private var summarySpans: [DateInterval] = []
+    @ObservationIgnored private var tileStores: (reader: MapTileDatabase, writer: MapTileDatabase)?
+    @ObservationIgnored private var tileStoreFailed = false
+    @ObservationIgnored private var syncTask: Task<Void, Never>?
+    @ObservationIgnored private var syncedRevision: Int?
+    @ObservationIgnored private var lastSyncFinished: Date?
+    @ObservationIgnored private var loose: (key: LooseKey, data: MapTileLooseData)?
+    @ObservationIgnored private var commitRedraw: Task<Void, Never>?
+    @ObservationIgnored private var lastCommitRedraw: Date = .distantPast
+    @ObservationIgnored private let tileDirectory: URL
+
+    private struct LooseKey: Equatable {
+        let partial: [DateInterval]
+        let revision: Int
+    }
+
+    /// Shows the quiet catch-up line: a first build with more than a couple of months to go.
+    var isCatchingUp: Bool {
+        !buildProgress.isFinished && buildProgress.monthsToBuild - buildProgress.monthsBuilt > 2
+    }
+
+    /// Where the pyramid lives and which store it is for. An in-memory store (the simulator's demo
+    /// data, tests) gets a file of its own that no other launch reuses.
+    nonisolated static func tileStoreLocation(for container: ModelContainer, directory: URL) -> (url: URL, identity: String) {
+        if let configuration = container.configurations.first, !configuration.isStoredInMemoryOnly,
+           configuration.url.isFileURL, configuration.url.path != "/dev/null" {
+            return (directory.appendingPathComponent("tiles.sqlite"), configuration.url.path)
+        }
+        return (directory.appendingPathComponent("memory-\(ObjectIdentifier(container).hashValue).sqlite"), "memory-\(UUID().uuidString)")
+    }
+
+    private func openTiles(container: ModelContainer) async {
+        guard tileStores == nil, !tileStoreFailed else { return }
+        let directory = tileDirectory
+        let opened = await Task.detached(priority: .userInitiated) { () -> (MapTileDatabase, MapTileDatabase, [MapMonthSummary])? in
+            let location = MapCoverageController.tileStoreLocation(for: container, directory: directory)
+            guard let writer = try? MapTileDatabase(url: location.url, storeIdentity: location.identity),
+                  let reader = try? MapTileDatabase(url: location.url, storeIdentity: location.identity) else { return nil }
+            return (reader, writer, reader.summaries())
+        }.value
+        guard tileStores == nil else { return }
+        guard let opened else {
+            tileStoreFailed = true
+            loadFailed = true
+            Self.log.error("tile store could not be opened")
+            return
+        }
+        tileStores = (opened.0, opened.1)
+        adoptSummaries(opened.2)
+    }
+
+    private func adoptSummaries(_ summaries: [MapMonthSummary]) {
+        self.summaries = summaries
+        let calendar = Calendar.autoupdatingCurrent
+        summarySpans = summaries.map { MapTileBucket.interval(ofMonth: $0.bucket, calendar: calendar) }
+        indexGeneration += 1
+        subsetCache = nil
+        countsCache = nil
+        rasterCache.removeAll()
+        if let latest = summaries.reversed().lazy.compactMap(\.latest).first {
+            let coordinate = MercatorPoint(x: latest[0], y: latest[1]).coordinate
+            if latestActivity?.latitude != coordinate.latitude || latestActivity?.longitude != coordinate.longitude {
+                latestActivity = coordinate
+            }
+        }
+    }
+
+    /// Starts bringing the tiles up to date for the newest revision, unless one is running, the
+    /// last finished moments ago, or the app is leaving.
+    private func startSyncIfNeeded(container: ModelContainer) {
+        guard Self.usesTiles, !isSuspended, syncTask == nil, syncedRevision != wantedRevision, let stores = tileStores else { return }
+        if let finished = lastSyncFinished, Date().timeIntervalSince(finished) < Self.minimumRebuildInterval {
+            scheduleDeferredBuild(container: container, after: Self.minimumRebuildInterval - Date().timeIntervalSince(finished))
+            return
+        }
+        let revision = wantedRevision
+        if !hasCheckedVisitedCells {
+            hasCheckedVisitedCells = true
+            Task { try? await VisitedCellStore.ensureBuilt(container: container) }
+        }
+        let writer = stores.writer
+        syncTask = Task.detached(priority: .utility) { [weak self] in
+            await TimelineSchemaUpgrader.waitUntilFinished()
+            do {
+                _ = try await MapTileBuilder.sync(
+                    container: container,
+                    database: writer,
+                    onProgress: { [weak self] progress in await self?.setBuildProgress(progress) },
+                    onCommit: { [weak self] summaries in await self?.tilesCommitted(summaries) }
+                )
+                await self?.syncFinished(revision: revision, container: container, failed: false)
+            } catch is CancellationError {
+                await self?.syncFinished(revision: nil, container: container, failed: false)
+            } catch {
+                MapCoverageController.log.error("tile sync failed: \(String(describing: error), privacy: .public)")
+                await self?.syncFinished(revision: nil, container: container, failed: true)
+            }
+        }
+    }
+
+    private func setBuildProgress(_ progress: MapTileBuildProgress) {
+        if buildProgress != progress { buildProgress = progress }
+    }
+
+    private func syncFinished(revision: Int?, container: ModelContainer, failed: Bool) {
+        syncTask = nil
+        guard let revision else { return }
+        syncedRevision = revision
+        lastSyncFinished = Date()
+        if revision != wantedRevision, !isSuspended {
+            // The store moved on while this ran; catch up after the usual breather.
+            startSyncIfNeeded(container: container)
+        }
+    }
+
+    /// New months are on disk: redraw what's on screen, at most about once a second while a long
+    /// build commits month after month.
+    private func tilesCommitted(_ summaries: [MapMonthSummary]) {
+        adoptSummaries(summaries)
+        guard !isSuspended, commitRedraw == nil else { return }
+        let wait = max(0, 1.0 - Date().timeIntervalSince(lastCommitRedraw))
+        commitRedraw = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(wait))
+            guard let self, !Task.isCancelled else { return }
+            self.commitRedraw = nil
+            self.lastCommitRedraw = Date()
+            if let last = self.lastUpdate, !self.isSuspended { self.update(last, delay: .zero) }
+        }
+    }
+
+    /// Plain values for a range's loose days, read once per range and store revision.
+    private func looseData(for partial: [DateInterval], container: ModelContainer) async -> MapTileLooseData? {
+        guard !partial.isEmpty else { return nil }
+        let key = LooseKey(partial: partial, revision: wantedRevision)
+        if let loose, loose.key == key { return loose.data }
+        let data = await Task.detached(priority: .userInitiated) { () -> MapTileLooseData? in
+            var values = MapTileSourceValues()
+            for interval in partial {
+                guard let part = try? MapTileSource.values(in: interval, overlapping: true, container: container) else { return nil }
+                values.tracks += part.tracks
+                values.stays += part.stays
+            }
+            return MapTileLooseData(values: values)
+        }.value
+        if let data { loose = (key, data) }
+        return data
+    }
+
+    private func tileInput(for update: Update) async -> MapTileCompositor.Input? {
+        await openTiles(container: update.container)
+        guard let stores = tileStores else { return nil }
+        let plan = MapTileRangePlan.make(interval: update.interval, isAllTime: update.isAllTime, includeUndated: update.includeUndated)
+        let loose = await looseData(for: plan.partial, container: update.container)
+        return MapTileCompositor.Input(database: stores.reader, plan: plan, loose: loose, modes: update.modes)
+    }
+
+    /// Whether every month a range touches has been built, so its counts can be trusted.
+    func summariesCover(_ interval: DateInterval) -> Bool {
+        guard !summaries.isEmpty else { return false }
+        if buildProgress.isFinished || buildProgress.monthsToBuild <= buildProgress.monthsBuilt { return true }
+        let calendar = Calendar.autoupdatingCurrent
+        let built = Set(summaries.map(\.bucket))
+        var month = MapTileBucket.month(containing: interval.start, calendar: calendar)
+        let last = MapTileBucket.month(containing: min(interval.end, .now), calendar: calendar)
+        while month <= last {
+            if !built.contains(month) { return false }
+            month = MapTileBucket.nextMonth(month)
+        }
+        return true
+    }
+
+    /// Trips and stays a range holds, from the month summaries: whole months exactly, loose days
+    /// by their day counts. Cheap enough for every scrubber tick.
+    private func summaryCounts(interval: DateInterval, modes: Set<TransportMode>?) -> (tracks: Int, stays: Int) {
+        let calendar = Calendar.autoupdatingCurrent
+        let allowed = MapTileCompositor.allowedModes(modes)
+        var tracks = 0.0, stays = 0
+        for (summary, span) in zip(summaries, summarySpans) {
+            guard span.end > interval.start, span.start < interval.end else { continue }
+            let trips = summary.tripsByMode.enumerated().reduce(0) { $0 + (allowed[$1.offset] ? $1.element : 0) }
+            if interval.start <= span.start, interval.end >= span.end {
+                tracks += Double(trips)
+                stays += summary.stays
+                continue
+            }
+            let share = summary.trips > 0 ? Double(trips) / Double(summary.trips) : 0
+            for day in 0..<31 {
+                guard let start = calendar.date(byAdding: .day, value: day, to: span.start), start < span.end else { break }
+                let end = min(calendar.date(byAdding: .day, value: 1, to: start) ?? start, span.end)
+                guard end > interval.start, start < interval.end else { continue }
+                tracks += Double(summary.dayTrips[day]) * share
+                stays += summary.dayStays[day]
+            }
+        }
+        return (Int(tracks.rounded()), stays)
+    }
+
+    /// The trip drawn closest to a tap, loaded by id with its full route.
+    func trip(near point: MercatorPoint, tolerance: Double, mapPointsPerPoint: Double) async -> MapActivityTrack? {
+        guard let update = lastUpdate else { return nil }
+        guard Self.usesTiles else { return track(near: point, tolerance: tolerance) }
+        guard let input = await tileInput(for: update) else { return nil }
+        let container = update.container
+        return await Task.detached(priority: .userInitiated) { () -> MapActivityTrack? in
+            guard let id = MapTileCompositor.trip(near: point, tolerance: tolerance, mapPointsPerPoint: mapPointsPerPoint, input: input),
+                  let track = try? MapTileSource.track(id: id, container: container) else { return nil }
+            return MapActivityTrack(id: track.id, start: track.start, end: track.end, mode: track.mode,
+                                    distanceMeters: track.distanceMeters, chunks: MapActivityIndex.chunks(for: track.points))
+        }.value
+    }
+
+    init(tileDirectory: URL = MapTileDatabase.defaultDirectory) {
+        self.tileDirectory = tileDirectory
         memoryWarning = NotificationCenter.default.addObserver(
             forName: UIApplication.didReceiveMemoryWarningNotification,
             object: nil,
@@ -876,7 +1111,7 @@ final class MapCoverageController {
     /// A finished bitmap for this layer, range, modes, zoom level, and appearance that already
     /// covers the viewport, if one is cached.
     func cachedRaster(for update: Update) -> MapCoverageRaster? {
-        guard index != nil else { return nil }
+        guard index != nil || tileStores != nil else { return nil }
         let key = rasterKey(for: update)
         let viewport = update.request.viewport
         guard let position = rasterCache.lastIndex(where: { entry in
@@ -912,6 +1147,9 @@ final class MapCoverageController {
         deferredBuild?.cancel()
         deferredBuild = nil
         indexTask?.cancel()
+        syncTask?.cancel()
+        commitRedraw?.cancel()
+        commitRedraw = nil
     }
 
     /// Back in the foreground; the next update draws again.
@@ -938,7 +1176,9 @@ final class MapCoverageController {
             }
             // A store change alone doesn't redraw: if the rebuilt index differs, adopting it
             // clears this cache and asks for a fresh bitmap.
-            if builtRevision != wantedRevision, indexTask == nil, deferredBuild == nil {
+            if Self.usesTiles {
+                startSyncIfNeeded(container: update.container)
+            } else if builtRevision != wantedRevision, indexTask == nil, deferredBuild == nil {
                 Task { [weak self] in _ = await self?.currentIndex(container: update.container) }
             }
             return
@@ -961,9 +1201,15 @@ final class MapCoverageController {
 
     /// How many trips and stays a range draws, once the index is ready.
     func counts(interval: DateInterval, modes: Set<TransportMode>?) -> (tracks: Int, stays: Int)? {
-        guard let index else { return nil }
         let key = SubsetKey(generation: indexGeneration, interval: interval, modes: modes, includeUndated: false)
         if let countsCache, countsCache.key == key { return countsCache.counts }
+        if Self.usesTiles {
+            guard summariesCover(interval) else { return nil }
+            let counts = summaryCounts(interval: interval, modes: modes)
+            countsCache = (key, counts)
+            return counts
+        }
+        guard let index else { return nil }
         var tracks = 0, stays = 0
         for track in index.tracks where track.start < interval.end && track.end > interval.start && (modes?.contains(track.mode) ?? true) {
             tracks += 1
@@ -977,6 +1223,17 @@ final class MapCoverageController {
 
     /// A region framing everything a range draws, from the index's chunk bounds.
     func region(interval: DateInterval, modes: Set<TransportMode>?) -> MKCoordinateRegion? {
+        if Self.usesTiles {
+            var bounds = MercatorRect.empty
+            for (summary, span) in zip(summaries, summarySpans) {
+                guard span.end > interval.start, span.start < interval.end, let b = summary.bounds, b.count == 4 else { continue }
+                bounds.include(MercatorPoint(x: b[0], y: b[1]))
+                bounds.include(MercatorPoint(x: b[2], y: b[3]))
+            }
+            guard !bounds.isEmpty else { return nil }
+            return MapRegionFactory.region(for: [MercatorPoint(x: bounds.minX, y: bounds.minY).coordinate,
+                                                 MercatorPoint(x: bounds.maxX, y: bounds.maxY).coordinate])
+        }
         guard let index else { return nil }
         let subset = index.subset(interval: interval, modes: modes, includeUndated: false)
         var coordinates: [CLLocationCoordinate2D] = []
@@ -998,6 +1255,10 @@ final class MapCoverageController {
     }
 
     private func render(_ update: Update) async {
+        if Self.usesTiles {
+            await renderTiles(update)
+            return
+        }
         guard let index = await currentIndex(container: update.container) else { return }
         guard !Task.isCancelled, !isSuspended else { return }
         let subset = subset(for: update, in: index)
@@ -1019,10 +1280,43 @@ final class MapCoverageController {
         Self.log.notice("\(request.layer.rawValue, privacy: .public) render \(result.renderMilliseconds, format: .fixed(precision: 1), privacy: .public) ms, \(subset.tracks.count, privacy: .public) tracks, \(subset.stays.count, privacy: .public) stays")
     }
 
+    private func renderTiles(_ update: Update) async {
+        guard let input = await tileInput(for: update) else { return }
+        startSyncIfNeeded(container: update.container)
+        guard !Task.isCancelled, !isSuspended else { return }
+        let key = rasterKey(for: update)
+        let request = update.request
+        let work = Task.detached(priority: .userInitiated) {
+            try MapTileCompositor.render(request, input: input)
+        }
+        let result = await withTaskCancellationHandler {
+            try? await work.value
+        } onCancel: {
+            work.cancel()
+        }
+        guard !Task.isCancelled, !isSuspended, let result else { return }
+        raster = result
+        rasterGeneration += 1
+        MapPerformanceProbe.shared.layerDrawn(request.layer)
+        if key.indexGeneration == indexGeneration { remember(result, for: key) }
+        Self.log.notice("\(request.layer.rawValue, privacy: .public) tile render \(result.renderMilliseconds, format: .fixed(precision: 1), privacy: .public) ms, buckets \(input.plan.buckets.count, privacy: .public), loose \(input.plan.partial.count, privacy: .public)")
+    }
+
     /// Makes sure an index is available before the tab decides how to draw a range: the saved
     /// copy if there is one, otherwise the first build. Off the main thread either way.
     func prepare(container: ModelContainer) async {
+        if Self.usesTiles {
+            await openTiles(container: container)
+            startSyncIfNeeded(container: container)
+            return
+        }
         _ = await currentIndex(container: container)
+    }
+
+    /// Records a store change, so the next update brings the tiles up to date.
+    func noteRevision(_ revision: Int, container: ModelContainer) {
+        wantedRevision = revision
+        startSyncIfNeeded(container: container)
     }
 
     /// The index for the newest revision if it is ready; otherwise the saved copy from the last
@@ -1082,7 +1376,10 @@ final class MapCoverageController {
             try? await Task.sleep(for: .seconds(max(delay, 0.1)))
             guard let self, !Task.isCancelled else { return }
             self.deferredBuild = nil
-            if self.builtRevision != self.wantedRevision, self.indexTask == nil {
+            if Self.usesTiles {
+                self.lastSyncFinished = nil
+                self.startSyncIfNeeded(container: container)
+            } else if self.builtRevision != self.wantedRevision, self.indexTask == nil {
                 self.startIndexBuild(container: container)
             }
         }

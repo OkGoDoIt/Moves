@@ -69,12 +69,19 @@ final class MapWindowLoader {
     private var histogramSource: HistogramSource?
     @ObservationIgnored
     private var filteredHistogram: (hidden: Set<TransportMode>, buckets: [MapHistogramBucket])?
+    /// Moving minutes per scrubber bucket per mode, when the histogram came from month summaries.
+    @ObservationIgnored
+    private var minutesByBucketAndMode: [[Double]]?
+    @ObservationIgnored
+    private var histogramSummaries: [MapMonthSummary] = []
 
     /// What `histogram` was built from. Scrubbing the handles leaves all of this alone.
     private struct HistogramSource: Equatable {
         let interval: DateInterval
         let granularity: MapGranularity
         let moveCount: Int
+        /// Changes when the month summaries do; -1 when the histogram reads moves.
+        var summaryGeneration = -1
     }
 
     /// Leaving the app: whatever a load in flight finds afterwards is dropped.
@@ -87,7 +94,8 @@ final class MapWindowLoader {
         modelContext: ModelContext,
         cameraRegion: MKCoordinateRegion,
         includeRoutes: Bool = true,
-        calendar: Calendar = .autoupdatingCurrent
+        calendar: Calendar = .autoupdatingCurrent,
+        summaries: (months: [MapMonthSummary], generation: Int)? = nil
     ) async {
         loadGeneration += 1
         let generation = loadGeneration
@@ -98,16 +106,21 @@ final class MapWindowLoader {
             }
         }
 
-        refreshHistogram(selection: selection, modelContext: modelContext, calendar: calendar)
+        refreshHistogram(selection: selection, modelContext: modelContext, calendar: calendar, summaries: summaries)
 
         guard includeRoutes else {
-            // A large range is drawn from the activity index as a bitmap; building a polyline
-            // and annotation for each trip and stay on the main thread would only be thrown away.
+            // A large range is drawn from the tiles as a bitmap; building a polyline and
+            // annotation for each trip and stay on the main thread would only be thrown away.
             let focus = selection.focus
             routes = []
             visits = []
-            presentModes = TransportMode.allCases.filter { mode in
-                mode != .stationary && histogramSpans.contains { $0.mode == mode && $0.end > focus.start && $0.start < focus.end }
+            if minutesByBucketAndMode != nil {
+                let present = Self.modesWithMinutes(in: focus, summaries: histogramSummaries, calendar: calendar)
+                presentModes = TransportMode.allCases.filter { $0 != .stationary && present.contains($0) }
+            } else {
+                presentModes = TransportMode.allCases.filter { mode in
+                    mode != .stationary && histogramSpans.contains { $0.mode == mode && $0.end > focus.start && $0.start < focus.end }
+                }
             }
             cameraFitKey = "\(focus.start.timeIntervalSinceReferenceDate)|\(focus.end.timeIntervalSinceReferenceDate)|index"
             return
@@ -146,8 +159,27 @@ final class MapWindowLoader {
     func refreshHistogram(
         selection: MapRangeSelection,
         modelContext: ModelContext,
-        calendar: Calendar
+        calendar: Calendar,
+        summaries: (months: [MapMonthSummary], generation: Int)? = nil
     ) {
+        // A day's bars are hours, finer than the summaries; longer ranges add up whole days, so
+        // years of history cost the same as one month and nothing is fetched on the main thread.
+        if let summaries, selection.granularity != .day {
+            let source = HistogramSource(interval: selection.interval, granularity: selection.granularity,
+                                         moveCount: 0, summaryGeneration: summaries.generation)
+            guard source != histogramSource else { return }
+            histogramSource = source
+            filteredHistogram = nil
+            histogramSpans = []
+            histogramSummaries = summaries.months
+            let buckets = selection.scrubberBuckets(calendar: calendar)
+            let perMode = Self.minutes(in: buckets, summaries: summaries.months, calendar: calendar)
+            minutesByBucketAndMode = perMode
+            histogram = zip(buckets, perMode).map { MapHistogramBucket(interval: $0, movingMinutes: $1.reduce(0, +)) }
+            return
+        }
+        minutesByBucketAndMode = nil
+        histogramSummaries = []
         let source = HistogramSource(
             interval: selection.interval,
             granularity: selection.granularity,
@@ -179,6 +211,15 @@ final class MapWindowLoader {
         guard !hidden.isEmpty else { return histogram }
         if let filteredHistogram, filteredHistogram.hidden == hidden {
             return filteredHistogram.buckets
+        }
+        if let perMode = minutesByBucketAndMode {
+            let shown = TransportMode.allCases.map { !hidden.contains($0) }
+            let buckets = zip(histogram, perMode).map { bucket, minutes in
+                MapHistogramBucket(interval: bucket.interval,
+                                   movingMinutes: minutes.enumerated().reduce(0) { $0 + (shown[$1.offset] ? $1.element : 0) })
+            }
+            filteredHistogram = (hidden, buckets)
+            return buckets
         }
         let buckets = Self.makeHistogram(
             spans: histogramSpans.filter { !hidden.contains($0.mode) },
@@ -368,6 +409,61 @@ final class MapWindowLoader {
             }
             return MapHistogramBucket(interval: bucket, movingMinutes: seconds / 60)
         }
+    }
+
+    /// Moving minutes per bucket per mode from month summaries, each move counted on its start day.
+    static func minutes(in buckets: [DateInterval], summaries: [MapMonthSummary], calendar: Calendar) -> [[Double]] {
+        let modeCount = TransportMode.allCases.count
+        var result = buckets.map { _ in [Double](repeating: 0, count: modeCount) }
+        guard !buckets.isEmpty else { return result }
+        for summary in summaries {
+            let span = MapTileBucket.interval(ofMonth: summary.bucket, calendar: calendar)
+            guard span.end > buckets[0].start, span.start < buckets[buckets.count - 1].end else { continue }
+            // Year and all-time bars hold whole months: no day arithmetic.
+            if let whole = buckets.firstIndex(where: { $0.start <= span.start && $0.end >= span.end }) {
+                for mode in 0..<modeCount {
+                    result[whole][mode] += summary.dayMinutesByMode[mode].reduce(0, +)
+                }
+                continue
+            }
+            for day in 0..<31 {
+                guard let start = calendar.date(byAdding: .day, value: day, to: span.start), start < span.end else { break }
+                // Buckets are sorted; find the one holding this day.
+                var low = 0, high = buckets.count - 1
+                while low < high {
+                    let mid = (low + high + 1) / 2
+                    if buckets[mid].start <= start { low = mid } else { high = mid - 1 }
+                }
+                guard buckets[low].start <= start, start < buckets[low].end else { continue }
+                for mode in 0..<modeCount {
+                    result[low][mode] += summary.dayMinutesByMode[mode][day]
+                }
+            }
+        }
+        return result
+    }
+
+    /// Modes with any moving time in `interval`, by day, from month summaries.
+    static func modesWithMinutes(in interval: DateInterval, summaries: [MapMonthSummary], calendar: Calendar) -> Set<TransportMode> {
+        var present = Set<TransportMode>()
+        for summary in summaries {
+            let span = MapTileBucket.interval(ofMonth: summary.bucket, calendar: calendar)
+            guard span.end > interval.start, span.start < interval.end else { continue }
+            if interval.start <= span.start, interval.end >= span.end {
+                for (index, mode) in TransportMode.allCases.enumerated() where summary.dayMinutesByMode[index].contains(where: { $0 > 0 }) {
+                    present.insert(mode)
+                }
+                continue
+            }
+            for day in 0..<31 {
+                guard let start = calendar.date(byAdding: .day, value: day, to: span.start), start < span.end else { break }
+                guard start < interval.end, start.addingTimeInterval(86_400) > interval.start else { continue }
+                for (index, mode) in TransportMode.allCases.enumerated() where summary.dayMinutesByMode[index][day] > 0 {
+                    present.insert(mode)
+                }
+            }
+        }
+        return present
     }
 
     static func overlap(_ a: DateInterval, _ b: DateInterval) -> TimeInterval {
