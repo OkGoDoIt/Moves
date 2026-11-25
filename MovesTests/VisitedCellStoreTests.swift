@@ -185,11 +185,19 @@ final class VisitedCellStoreTests: XCTestCase {
             timestamp: date(9, 0)
         )
 
+        // Live capture no longer writes cells (nothing reads them); imports still do.
         _ = try repository.appendSamples(from: [location], source: .significantChange)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<VisitedCell>()), 0)
+
+        let imported = CLLocation(
+            coordinate: location.coordinate, altitude: 0, horizontalAccuracy: 10, verticalAccuracy: -1,
+            course: -1, speed: 1.2, timestamp: date(10, 0)
+        )
+        _ = try repository.appendSamples(from: [imported], source: .googleTimelineImport)
 
         let cells = try context.fetch(FetchDescriptor<VisitedCell>())
         XCTAssertEqual(cells.count, 1)
-        XCTAssertEqual(cells[0].cellKey, VisitedCellStore.cellKey(latitude: 52.52, longitude: 13.405))
+        XCTAssertEqual(cells.first?.cellKey, VisitedCellStore.cellKey(latitude: 52.52, longitude: 13.405))
     }
 
     func testEveryImporterKeepsTheCellsCurrent() throws {

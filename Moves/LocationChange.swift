@@ -147,7 +147,10 @@ protocol TimelineAssembler {
     /// Stores fixes. With `reconcile` false the stops are not rebuilt; the caller
     /// coalesces that work (continuous capture delivers a batch every few seconds).
     func ingestLocations(_ locations: [CLLocation], source: LocationSampleSource, reconcile: Bool) async
-    func reconcileSampleStays() async
+    /// Writes fixes synchronously. Only for the moment the app is about to end.
+    func storeImmediately(_ locations: [CLLocation], source: LocationSampleSource)
+    /// Rebuilds stops and trips from stored fixes over `scope`.
+    func reconcile(_ scope: CaptureRebuildScope) async
     func approachWasAutomotive(before date: Date) async -> Bool
     func recentlyWalking(at date: Date) async -> Bool
 }
@@ -155,6 +158,11 @@ protocol TimelineAssembler {
 extension TimelineAssembler {
     func ingestLocations(_ locations: [CLLocation], source: LocationSampleSource) async {
         await ingestLocations(locations, source: source, reconcile: true)
+    }
+
+    /// Rebuilds the last week.
+    func reconcileSampleStays() async {
+        await reconcile(.week)
     }
 }
 
@@ -469,9 +477,21 @@ final class DefaultTimelineAssembler: TimelineAssembler {
     private let motionClassifier: MotionClassifier
     private let placeNameResolver: PlaceNameResolver
     private let automaticModes: () -> AutomaticTransportModes
-    /// One rebuild at a time. Location callbacks and foreground refresh overlap.
-    private var reconcileTask: Task<Void, Never>?
-    private var reconcileAgain = false
+    /// One rebuild at a time. Callers that overlap wait for the running one.
+    private var reconcileDriver: Task<Void, Never>?
+    /// What callers asked for while a rebuild ran, if it still needs doing.
+    private var pendingScope: CaptureRebuildScope?
+    /// The scope of the pass in progress.
+    private var activeScope: CaptureRebuildScope?
+    /// Bumped when new fixes or a visit reach the store.
+    private var storeGeneration = 0
+    /// The generation and scope the running rebuild read its inputs at.
+    private var runningInputs: (generation: Int, scope: CaptureRebuildScope)?
+    /// When the last full-week rebuild read its inputs. Capture narrows later rebuilds to it.
+    private(set) var lastWeekRebuildReadAt: Date?
+    /// Rebuilds actually run, and the stops and trips the last one changed. For tests and logs.
+    private(set) var rebuildCount = 0
+    private(set) var lastRebuildChanges = (stops: 0, trips: 0)
 
     init(
         repository: TimelineRepository,
@@ -489,16 +509,25 @@ final class DefaultTimelineAssembler: TimelineAssembler {
         guard !locations.isEmpty else { return }
 
         await withStoreWriteTime {
-            do {
-                _ = try repository.appendSamples(from: locations, source: source)
-                try repository.saveIfNeeded()
-            } catch {
-                Self.timelineLog.error("Failed to persist \(locations.count) location samples: \(error.localizedDescription, privacy: .public)")
-            }
-
+            storeImmediately(locations, source: source)
             if reconcile {
                 await reconcileSampleStays()
             }
+        }
+    }
+
+    func storeImmediately(_ locations: [CLLocation], source: LocationSampleSource) {
+        guard !locations.isEmpty else { return }
+        let writeStarted = Date.now
+        do {
+            let samples = try repository.appendSamples(from: locations, source: source)
+            try repository.saveIfNeeded()
+            // A fix the store already had changes nothing a rebuild would read.
+            if samples.contains(where: { $0.createdAt >= writeStarted }) {
+                storeGeneration += 1
+            }
+        } catch {
+            Self.timelineLog.error("Failed to persist \(locations.count) location samples: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -519,6 +548,7 @@ final class DefaultTimelineAssembler: TimelineAssembler {
                     return
                 }
                 let visitPlace = try repository.addOrUpdateVisit(from: visit)
+                storeGeneration += 1
                 try repository.applyPlaceLearning(to: visitPlace)
                 await fillAutomaticPlaceLabelIfNeeded(for: visitPlace)
                 try repository.saveIfNeeded()
@@ -564,40 +594,68 @@ final class DefaultTimelineAssembler: TimelineAssembler {
 
     /// Rebuilds stops from the fixes already on disk, then classifies each new trip.
     ///
-    /// Called after every batch of fixes and whenever the app comes forward.
-    /// The work is local and, once a trip has a mode, later passes leave it.
-    func reconcileSampleStays() async {
-        if reconcileTask != nil {
-            reconcileAgain = true
-            await reconcileTask?.value
+    /// The work is local and, once a trip has a mode, later passes leave it. One pass runs
+    /// at a time. A request that arrives during a pass waits for it, and a second pass runs
+    /// only if new fixes or a visit arrived after the running pass read its inputs, or the
+    /// request reads further back than the running pass does.
+    func reconcile(_ scope: CaptureRebuildScope) async {
+        if let reconcileDriver {
+            let covered: Bool
+            if let running = runningInputs {
+                // Nothing new since that pass read the store: its result is this one's.
+                covered = running.generation == storeGeneration && running.scope.covers(scope)
+            } else {
+                // That pass has not read the store yet, so it will see everything so far.
+                covered = activeScope?.covers(scope) ?? false
+            }
+            if !covered {
+                pendingScope = pendingScope.map { $0.merged(with: scope) } ?? scope
+            }
+            await reconcileDriver.value
             return
         }
 
-        let task = Task { @MainActor in
-            await self.withStoreWriteTime {
-                await self.performSampleStayReconciliation()
+        pendingScope = scope
+        let driver = Task { @MainActor in
+            while let next = self.pendingScope {
+                self.pendingScope = nil
+                self.activeScope = next
+                await self.withStoreWriteTime {
+                    await self.performSampleStayReconciliation(next)
+                }
+                self.activeScope = nil
             }
+            // Same actor turn as the empty check: no request can slip in unserved.
+            self.reconcileDriver = nil
         }
-        reconcileTask = task
-        await task.value
-        reconcileTask = nil
-
-        if reconcileAgain {
-            reconcileAgain = false
-            await reconcileSampleStays()
-        }
+        reconcileDriver = driver
+        await driver.value
     }
 
-    private func performSampleStayReconciliation() async {
+    private func performSampleStayReconciliation(_ scope: CaptureRebuildScope) async {
         await TimelineSchemaUpgrader.waitUntilFinished()
         do {
+            let now = Date.now
             let started = ContinuousClock.now
-            let result = try repository.reconcileSampleStays(now: .now)
+            // Read synchronously with the generation recorded: no write can interleave.
+            runningInputs = (storeGeneration, scope)
+            defer { runningInputs = nil }
+            let result: SampleStayReconciliationResult
+            switch scope {
+            case .week:
+                lastWeekRebuildReadAt = now
+                result = try repository.reconcileSampleStays(now: now)
+            case .recentTrip(let since):
+                // A clock set back can put `since` after now.
+                let start = min(since, now)
+                result = try repository.reconcileSampleStays(covering: DateInterval(start: start, end: now))
+            }
+            rebuildCount += 1
             let rebuilt = ContinuousClock.now - started
             try await apply(result)
             let total = ContinuousClock.now - started
             Self.timelineLog.debug(
-                "Reconciled the last week in \(Self.milliseconds(rebuilt)) ms (\(Self.milliseconds(total)) ms with classification)"
+                "Rebuilt \(scope, privacy: .public) in \(Self.milliseconds(rebuilt)) ms (\(Self.milliseconds(total)) ms with classification)"
             )
         } catch {
             Self.timelineLog.error("Failed to rebuild stops from fixes: \(error.localizedDescription, privacy: .public)")
@@ -626,8 +684,27 @@ final class DefaultTimelineAssembler: TimelineAssembler {
         }
     }
 
+    /// What a trip looked like before a pass wrote it, to tell a change from a rewrite.
+    private struct TripShape: Equatable {
+        var mode: TransportMode
+        var startDate: Date
+        var endDate: Date
+        var distanceMeters: Int
+
+        init(_ move: MoveSegment) {
+            mode = move.transportMode
+            startDate = move.startDate
+            endDate = move.endDate
+            distanceMeters = Int(move.distanceMeters.rounded())
+        }
+    }
+
     private func apply(_ result: SampleStayReconciliationResult, asksForReview: Bool = true) async throws {
+        var changedTrips = 0
         for leg in result.moveLegs {
+            let before = leg.startPlace.outgoingMoves
+                .first { $0.endPlace?.id == leg.endPlace.id }
+                .map(TripShape.init)
             let classification = await motionClassifier.classifyTransport(
                 start: leg.startDate,
                 end: leg.endDate,
@@ -679,6 +756,9 @@ final class DefaultTimelineAssembler: TimelineAssembler {
                     move.speedProfileData = nil
                 }
             }
+            if before != TripShape(move) {
+                changedTrips += 1
+            }
             // Ask only about what the rules left unsure, and never ask twice. A ride read
             // as a walk is one of those: the steps rule it out, but not which vehicle.
             let unsureOfMode = transportMode == classification.mode
@@ -704,9 +784,11 @@ final class DefaultTimelineAssembler: TimelineAssembler {
         }
         try repository.saveIfNeeded()
 
-        if !result.newPlaces.isEmpty || !result.moveLegs.isEmpty {
+        // A pass that only rewrote the same trips (an unknown mode retried) changed nothing.
+        lastRebuildChanges = (result.newPlaces.count, changedTrips)
+        if !result.newPlaces.isEmpty || changedTrips > 0 {
             Self.timelineLog.info(
-                "Rebuilt \(result.newPlaces.count) stops and \(result.moveLegs.count) trips from stored fixes"
+                "Rebuilt \(result.newPlaces.count) stops and \(changedTrips) trips from stored fixes"
             )
         }
     }
@@ -764,6 +846,8 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
     @Published private(set) var temporaryRouteTrackingStopsInLowPowerMode = false
     @Published private(set) var temporaryRouteTrackingStopNotificationEnabled = false
     @Published private(set) var captureDetailLevel: CaptureDetailLevel = .defaultLevel
+    /// Location is allowed, but only approximately. Trips cannot be followed then.
+    @Published private(set) var isPreciseLocationOff = false
 
     private static let captureLog = Logger(subsystem: MovesAppIdentity.bundleIdentifier, category: "Capture")
     private static let departureRegionIdentifier = "Moves.capture.departure"
@@ -775,7 +859,16 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
     #else
     let isDemoMode = false
     #endif
-    private let assembler: TimelineAssembler
+    private let assembler: DefaultTimelineAssembler
+    /// Every capture write goes through here, so fixes, visits, and rebuilds stay in order.
+    private let pipeline: CaptureIngestPipeline
+    private var lifecycleObserverTokens: [NSObjectProtocol] = []
+    /// Route tracking ran out while the app was not running; its final rebuild is owed.
+    private var routeTrackingExpiredWhileAway = false
+    /// A departure circle iOS refused. Not registered again until the person settles elsewhere.
+    private var failedDepartureAnchor: CaptureAnchor?
+    /// This process removed the departure circle and has not registered one since.
+    private var departureRegionKnownAbsent = false
     private let routeTrackingLiveActivity = RouteTrackingLiveActivityCoordinator()
     private var oneShotRequestGate = OneShotLocationRequestGate()
     private var pendingTemporaryRouteTrackingDuration: TemporaryRouteTrackingDuration?
@@ -827,12 +920,14 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
     init(modelContainer: ModelContainer, userDefaults: UserDefaults = .standard) {
         self.userDefaults = userDefaults
         let repository = SwiftDataTimelineRepository(modelContainer: modelContainer)
-        self.assembler = DefaultTimelineAssembler(
+        let assembler = DefaultTimelineAssembler(
             repository: repository,
             motionClassifier: CoreMotionTransportClassifier(defaults: userDefaults),
             placeNameResolver: CLGeocoderPlaceNameResolver(),
             automaticModes: { .load(from: userDefaults) }
         )
+        self.assembler = assembler
+        self.pipeline = CaptureIngestPipeline(assembler: assembler)
 
         super.init()
 
@@ -851,15 +946,17 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         restoreTemporaryRouteTrackingState()
         restoreBackgroundLocationListeningState()
         captureDetailLevel = CaptureDetailLevel.load(from: userDefaults)
+        isPreciseLocationOff = isAuthorizedForTracking && !hasFullAccuracy
+        let storedAnchor = shouldSkipLiveTracking ? nil : storedDepartureAnchor()
         captureMachine = CaptureStateMachine(
             level: captureDetailLevel,
-            isListening: isBackgroundLocationListeningEnabled && !shouldSkipLiveTracking,
-            departureAnchor: shouldSkipLiveTracking ? nil : storedDepartureAnchor(),
+            isListening: machineIsListening,
+            departureAnchor: storedAnchor,
             now: .now
         )
         if !shouldSkipLiveTracking {
             Self.captureLog.notice(
-                "Capture launched at \(self.captureDetailLevel.rawValue, privacy: .public), phase \(self.captureMachine.phase.rawValue, privacy: .public)"
+                "Capture launched at \(self.captureDetailLevel.rawValue, privacy: .public), phase \(self.captureMachine.phase.rawValue, privacy: .public), departure circle \(storedAnchor == nil ? "none" : "kept", privacy: .public), authorization \(self.authorizationStatus.rawValue), precise \(self.hasFullAccuracy)"
             )
         }
         if captureMachine.phase == .moving {
@@ -867,6 +964,14 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
             fixFilter.beginSession(at: .now)
         }
         updateBackgroundLocationAllowance()
+        if !shouldSkipLiveTracking {
+            installLifecycleObservers()
+            if routeTrackingExpiredWhileAway {
+                // The rebuild that ending it would have run.
+                Self.captureLog.notice("Route tracking ended while Moves was not running; rebuilding")
+                pipeline.rebuild(.week)
+            }
+        }
     }
 
     var trackingStatusText: String {
@@ -885,6 +990,11 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
             @unknown default:
                 return "Real route tracking on"
             }
+        }
+
+        if isPreciseLocationOff, isBackgroundLocationListeningEnabled {
+            // Approximate fixes are kilometres wide: places only, no trips.
+            return "Precise Location off"
         }
 
         switch authorizationStatus {
@@ -955,6 +1065,7 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
     func stop() {
         guard !shouldSkipLiveTracking else { return }
 
+        storePendingContinuousFixes(reason: "capture stopped", rebuild: .none)
         manager.stopMonitoringVisits()
         manager.stopMonitoringSignificantLocationChanges()
         manager.stopUpdatingLocation()
@@ -977,7 +1088,7 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         guard !shouldSkipLiveTracking else { return }
 
         Self.captureLog.notice("Background listening \(isEnabled ? "on" : "off", privacy: .public)")
-        handle(captureMachine.configure(level: captureDetailLevel, isListening: isEnabled, now: .now))
+        syncCaptureMachine()
         applyTrackingConfiguration()
     }
 
@@ -993,15 +1104,33 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         Self.captureLog.notice(
             "Tracking detail \(previous.rawValue, privacy: .public) -> \(level.rawValue, privacy: .public)"
         )
-        handle(captureMachine.configure(level: level, isListening: isBackgroundLocationListeningEnabled, now: .now))
+        syncCaptureMachine()
         applyTrackingConfiguration()
+    }
+
+    /// Whether balanced and detailed capture can follow trips right now. Approximate
+    /// location fixes are kilometres wide, so the battery-saver behaviour is all that works.
+    private var machineIsListening: Bool {
+        !shouldSkipLiveTracking && isBackgroundLocationListeningEnabled && isAuthorizedForTracking && hasFullAccuracy
+    }
+
+    private var hasFullAccuracy: Bool {
+        manager.accuracyAuthorization == .fullAccuracy
+    }
+
+    /// Tells the state machine about the level, listening, and permissions. Turning back on
+    /// looks first: the old settled point may be stale.
+    private func syncCaptureMachine(now: Date = .now) {
+        handle(captureMachine.configure(level: captureDetailLevel, isListening: machineIsListening, now: now), now: now)
     }
 
     /// Fixes from photos taken with this phone's camera. They are stored like any other
     /// fix, and stops and trips are rebuilt with them.
     func ingestPhotoFixes(_ locations: [CLLocation]) async {
         guard !locations.isEmpty else { return }
-        await assembler.ingestLocations(locations, source: .cameraPhoto)
+        pipeline.store(locations, source: .cameraPhoto)
+        pipeline.rebuild(.week)
+        await pipeline.drain()
     }
 
     func refreshHistoricalBackfill() async {
@@ -1013,10 +1142,10 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         // One current fix bridges a short silence, and the fixes already stored
         // are re-read so a missed visit does not stay a single multi-hour trip.
         requestOneShotLocation(source: .launchBackfill)
-        // The app came forward: write what is buffered and rebuild now.
-        storePendingContinuousFixes(reconcile: false)
-        reconcileThrottle.recordRun(at: .now)
-        await assembler.reconcileSampleStays()
+        // The app came forward: write what is buffered and rebuild the week, after
+        // anything already queued.
+        storePendingContinuousFixes(reason: "foreground", rebuild: .now(.week))
+        await pipeline.drain()
     }
 
     func enableTemporaryRouteTracking(duration: TemporaryRouteTrackingDuration) {
@@ -1110,11 +1239,21 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         temporaryRouteTrackingEndsAt = nil
         persistTemporaryRouteTrackingState()
         notifyTemporaryRouteTrackingStoppedImmediatelyIfNeeded()
-        applyTrackingConfiguration()
+        routeTrackingDidEnd(reason: "stopped")
+    }
+
+    /// After manual route tracking: automatic capture resumes looking, as at launch, since
+    /// the point it last settled at may be far away, and the stops get their final rebuild.
+    private func routeTrackingDidEnd(reason: String) {
+        Self.captureLog.notice("Route tracking ended (\(reason, privacy: .public))")
         Task {
             await routeTrackingLiveActivity.end()
-            await assembler.reconcileSampleStays()
         }
+        pipeline.rebuild(.week)
+        if isFollowingTrips {
+            handle(captureMachine.restartLooking(now: .now))
+        }
+        applyTrackingConfiguration()
     }
 
     private var isAuthorizedForTracking: Bool {
@@ -1122,9 +1261,21 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
     }
 
     private func handleAuthorization(_ status: CLAuthorizationStatus) {
+        let previous = (authorizationStatus, isPreciseLocationOff)
         authorizationStatus = status
+        isPreciseLocationOff = isAuthorizedForTracking && !hasFullAccuracy
+        if previous != (status, isPreciseLocationOff), !shouldSkipLiveTracking {
+            Self.captureLog.notice(
+                "Authorization \(previous.0.rawValue) -> \(status.rawValue), precise \(!self.isPreciseLocationOff)"
+            )
+            // Capture may be about to stop: write what is buffered first.
+            storePendingContinuousFixes(reason: "authorization changed", rebuild: .none)
+        }
         updateBackgroundLocationAllowance()
         refreshTemporaryRouteTrackingStateIfNeeded()
+        if !shouldSkipLiveTracking {
+            syncCaptureMachine()
+        }
 
         switch status {
         case .notDetermined:
@@ -1228,12 +1379,13 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
             // Automatic capture never shows the location indicator or a Live Activity.
             applyLocationConfiguration(configuration, showsIndicator: false)
             updateSettleChecks()
+            ensureDepartureRegion()
             return
         }
 
-        // Battery saver, or listening off: the original behaviour.
+        // Battery saver, listening off, or approximate location: the original behaviour.
         stopMotionUpdates()
-        removeDepartureRegion()
+        ensureDepartureRegion()
         updateSettleChecks()
         if isLastMileActive {
             // Visits stay on so a real stop still closes. Continuous fixes are
@@ -1259,6 +1411,10 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         let isRunningAsWanted = isStandardLocationRunning == configuration.usesStandardLocationUpdates
         if configuration == appliedConfiguration, showsIndicator == appliedShowsIndicator, isRunningAsWanted {
             return
+        }
+        if configuration.mode != .continuous, !pendingContinuousFixes.isEmpty {
+            // Route tracking, battery saver, or settling took over from following a trip.
+            storePendingContinuousFixes(reason: "left continuous capture", rebuild: .none)
         }
 
         if !configuration.usesStandardLocationUpdates, isStandardLocationRunning {
@@ -1294,7 +1450,7 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
             Self.captureLog.notice(
                 "Following a trip: started by \(trigger.rawValue, privacy: .public), motion \(self.captureMachine.motion.rawValue, privacy: .public)"
             )
-            removeDepartureRegion()
+            storePendingContinuousFixes(reason: "trip started", rebuild: .none, now: now)
             fixFilter.beginSession(at: now)
             continuousSessionStartedAt = now
         case .settled(let anchor, let verdict):
@@ -1302,20 +1458,24 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
             Self.captureLog.notice(
                 "Settled (\(String(describing: verdict), privacy: .public)) after \(minutes) min: stored \(self.fixFilter.acceptedCount) fixes, dropped \(self.fixFilter.droppedCount) [\(self.fixFilter.dropSummary, privacy: .public)]"
             )
+            if verdict.isMotionFalseAlarm, let until = captureMachine.motionTriggersSuppressedUntil {
+                Self.captureLog.notice(
+                    "Motion alone ignored for \(Int(until.timeIntervalSince(now) / 60)) min (\(self.captureMachine.motionFalseAlarms) false alarms in a row)"
+                )
+            }
             continuousSessionStartedAt = nil
             lastStoredSettledFixAt = now
-            storePendingContinuousFixes(reconcile: true, now: now)
-            if let anchor, anchor.supportsDepartureRegion {
-                registerDepartureRegion(around: anchor)
-            } else {
+            failedDepartureAnchor = nil
+            storePendingContinuousFixes(reason: "settled", rebuild: .now(.week), now: now)
+            if anchor?.supportsDepartureRegion != true {
                 Self.captureLog.notice("Settled without a precise point; relying on motion, visits, and significant changes")
             }
         case .turnedOff:
             Self.captureLog.notice("Trip following off")
             continuousSessionStartedAt = nil
-            storePendingContinuousFixes(reconcile: true, now: now)
-            removeDepartureRegion()
+            storePendingContinuousFixes(reason: "following off", rebuild: .now(.week), now: now)
         }
+        // Registers or removes the departure circle to match the new phase.
         applyTrackingConfiguration()
     }
 
@@ -1338,7 +1498,11 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
             switch phaseBefore {
             case .moving:
                 let minimumInterval = appliedConfiguration?.minimumInterval ?? 0
-                let accepted = fixFilter.accept([location], minimumInterval: minimumInterval)
+                let accepted = fixFilter.accept(
+                    [location],
+                    minimumInterval: minimumInterval,
+                    straightSegmentInterval: appliedConfiguration?.straightSegmentInterval
+                )
                 if !accepted.isEmpty {
                     if pendingContinuousFixes.isEmpty { pendingContinuousSince = now }
                     pendingContinuousFixes.append(contentsOf: accepted)
@@ -1363,9 +1527,8 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         }
 
         if !departureFixes.isEmpty {
-            Task {
-                await assembler.ingestLocations(departureFixes, source: .significantChange)
-            }
+            // The trip's first rebuild comes with its first buffered fixes.
+            pipeline.store(departureFixes, source: .significantChange)
         }
 
         if CapturePolicy.shouldFlush(
@@ -1373,39 +1536,65 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
             oldestPendingAt: pendingContinuousSince,
             now: now
         ) {
-            storePendingContinuousFixes(reconcile: false, now: now)
+            storePendingContinuousFixes(reason: "batch", rebuild: .throttled, now: now)
         }
 
         // Speed can change the travel kind (motion lags when boarding a bus).
         if captureMachine.phase == .moving {
             applyTrackingConfiguration()
+        } else if captureMachine.phase == .settled {
+            // A settled fix can sharpen the point the departure circle is drawn around.
+            ensureDepartureRegion()
         }
     }
 
-    /// Writes buffered continuous fixes. Stops are rebuilt when `reconcile` is true,
-    /// otherwise at most every few minutes.
-    private func storePendingContinuousFixes(reconcile forceReconcile: Bool, now: Date = .now) {
+    private enum RebuildRequest {
+        case none
+        /// The trip so far, at most every `reconcileInterval`, when fixes were written.
+        case throttled
+        case now(CaptureRebuildScope)
+    }
+
+    /// Writes buffered continuous fixes through the pipeline, then rebuilds if asked.
+    /// Called on every sign that the process may stop, so a kill loses as little as possible.
+    private func storePendingContinuousFixes(reason: String, rebuild: RebuildRequest, now: Date = .now) {
         let fixes = pendingContinuousFixes
         pendingContinuousFixes.removeAll()
         pendingContinuousSince = nil
 
-        let reconcile: Bool
-        if forceReconcile {
+        let scope: CaptureRebuildScope?
+        switch rebuild {
+        case .none:
+            scope = nil
+        case .throttled:
+            scope = !fixes.isEmpty && reconcileThrottle.shouldRun(at: now)
+                ? tripRebuildScope(movingSince: captureMachine.movingSince, now: now)
+                : nil
+        case .now(let requested):
             reconcileThrottle.recordRun(at: now)
-            reconcile = true
-        } else {
-            reconcile = !fixes.isEmpty && reconcileThrottle.shouldRun(at: now)
+            scope = requested
         }
-        guard !fixes.isEmpty || reconcile else { return }
+        guard !fixes.isEmpty || scope != nil else { return }
 
-        Self.captureLog.debug("Writing \(fixes.count) continuous fixes, rebuild \(reconcile)")
-        Task {
-            if fixes.isEmpty {
-                await assembler.reconcileSampleStays()
-            } else {
-                await assembler.ingestLocations(fixes, source: .continuous, reconcile: reconcile)
-            }
+        if fixes.isEmpty {
+            Self.captureLog.debug("Rebuild \(scope?.description ?? "-", privacy: .public) (\(reason, privacy: .public))")
+        } else if reason == "batch" {
+            Self.captureLog.debug("Writing \(fixes.count) continuous fixes, rebuild \(scope?.description ?? "-", privacy: .public)")
+        } else {
+            Self.captureLog.notice("Wrote \(fixes.count) buffered fixes (\(reason, privacy: .public)), rebuild \(scope?.description ?? "-", privacy: .public)")
         }
+        pipeline.store(fixes, source: .continuous)
+        if let scope {
+            pipeline.rebuild(scope)
+        }
+    }
+
+    private func tripRebuildScope(movingSince: Date?, now: Date) -> CaptureRebuildScope {
+        CapturePolicy.tripRebuildScope(
+            movingSince: movingSince,
+            lastFullRebuildAt: assembler.lastWeekRebuildReadAt,
+            now: now
+        )
     }
 
     private func updateSettleChecks() {
@@ -1438,7 +1627,7 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
             oldestPendingAt: pendingContinuousSince,
             now: now
         ) {
-            storePendingContinuousFixes(reconcile: false, now: now)
+            storePendingContinuousFixes(reason: "batch", rebuild: .throttled, now: now)
         }
         handle(captureMachine.tick(now: now), now: now)
     }
@@ -1477,7 +1666,8 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         )
         let previous = captureMachine.motion
         guard isFollowingTrips, !isTemporaryRouteTrackingActive else {
-            _ = captureMachine.handleMotion(state, now: .now)
+            // Route tracking is in charge: remember the motion, but start nothing.
+            captureMachine.noteMotion(state)
             return
         }
         let transition = captureMachine.handleMotion(state, now: .now)
@@ -1504,15 +1694,46 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         )
     }
 
-    /// Leaving this circle wakes or relaunches the app, even when it is suspended.
-    private func registerDepartureRegion(around anchor: CaptureAnchor) {
-        guard authorizationStatus == .authorizedAlways,
-              CLLocationManager.isMonitoringAvailable(for: CLCircularRegion.self)
-        else {
-            Self.captureLog.notice("Departure circle unavailable (authorization \(self.authorizationStatus.rawValue))")
+    /// Registers, moves, or removes the one departure circle so it matches the phase,
+    /// the settled point, and the permissions. Never more than one; never left behind.
+    private func ensureDepartureRegion() {
+        guard !shouldSkipLiveTracking else { return }
+        // While route tracking runs, a circle from before stays: leaving it relaunches
+        // the app if iOS ends it, and route tracking then resumes.
+        guard !isTemporaryRouteTrackingActive else { return }
+
+        let monitoringAvailable = CLLocationManager.isMonitoringAvailable(for: CLCircularRegion.self)
+        let wanted = CapturePolicy.departureRegion(
+            followsTrips: isFollowingTrips,
+            phase: captureMachine.phase,
+            anchor: captureMachine.departureAnchor,
+            isAlwaysAuthorized: authorizationStatus == .authorizedAlways,
+            hasFullAccuracy: hasFullAccuracy,
+            maximumMonitoringDistance: monitoringAvailable ? manager.maximumRegionMonitoringDistance : -1
+        )
+        guard let wanted, wanted.anchor != failedDepartureAnchor else {
+            // Called on every batch while following a trip; skip the lookup once gone.
+            if !departureRegionKnownAbsent {
+                removeDepartureRegion()
+            }
             return
         }
-        let radius = min(CapturePolicy.Tuning.departureRegionRadius, manager.maximumRegionMonitoringDistance)
+
+        let existing = manager.monitoredRegions
+            .filter { $0.identifier == Self.departureRegionIdentifier }
+            .compactMap { $0 as? CLCircularRegion }
+        let center = CLLocation(latitude: wanted.anchor.latitude, longitude: wanted.anchor.longitude)
+        if existing.count == 1, let region = existing.first,
+           abs(region.radius - wanted.radius) < 1,
+           CLLocation(latitude: region.center.latitude, longitude: region.center.longitude).distance(from: center) < 1 {
+            return
+        }
+        registerDepartureRegion(around: wanted.anchor, radius: wanted.radius)
+    }
+
+    /// Leaving this circle wakes or relaunches the app, even when it is suspended.
+    /// Registering under the same identifier replaces the previous circle.
+    private func registerDepartureRegion(around anchor: CaptureAnchor, radius: CLLocationDistance) {
         let region = CLCircularRegion(
             center: CLLocationCoordinate2D(latitude: anchor.latitude, longitude: anchor.longitude),
             radius: radius,
@@ -1521,14 +1742,16 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         region.notifyOnEntry = false
         region.notifyOnExit = true
         manager.startMonitoring(for: region)
+        departureRegionKnownAbsent = false
         Self.captureLog.notice("Watching for departure: \(Int(radius)) m circle, point accuracy \(Int(anchor.horizontalAccuracy)) m")
     }
 
     private func removeDepartureRegion() {
         for region in manager.monitoredRegions where region.identifier == Self.departureRegionIdentifier {
             manager.stopMonitoring(for: region)
-            Self.captureLog.info("Departure circle removed")
+            Self.captureLog.notice("Departure circle removed")
         }
+        departureRegionKnownAbsent = true
     }
 
     // MARK: Battery saver's burst
@@ -1706,6 +1929,7 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
 
         temporaryRouteTrackingEndsAt = nil
         persistTemporaryRouteTrackingState()
+        routeTrackingExpiredWhileAway = true
     }
 
     private func scheduleTemporaryRouteTrackingExpiryTask() {
@@ -1776,11 +2000,7 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         if notifyImmediately {
             notifyTemporaryRouteTrackingStoppedImmediatelyIfNeeded()
         }
-        applyTrackingConfiguration()
-        Task {
-            await routeTrackingLiveActivity.end()
-            await assembler.reconcileSampleStays()
-        }
+        routeTrackingDidEnd(reason: notifyImmediately ? "battery or Low Power Mode rule" : "time up")
     }
 
     private func expireTemporaryRouteTrackingIfStillCurrent(expectedEndDate: Date) {
@@ -1843,6 +2063,65 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
                 }
             }
         )
+    }
+
+    /// Signs that the process may stop soon, and clock jumps. Buffered fixes are written on
+    /// each; the pipeline holds a background task until the write lands.
+    private func installLifecycleObservers() {
+        let center = NotificationCenter.default
+        let flushOn: [(Notification.Name, String)] = [
+            (UIApplication.didEnterBackgroundNotification, "background"),
+            (UIApplication.didReceiveMemoryWarningNotification, "memory warning"),
+        ]
+        for (name, reason) in flushOn {
+            lifecycleObserverTokens.append(
+                center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated {
+                        self?.storePendingContinuousFixes(reason: reason, rebuild: .none)
+                    }
+                }
+            )
+        }
+        lifecycleObserverTokens.append(
+            center.addObserver(forName: UIApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.writeEverythingBeforeTermination()
+                }
+            }
+        )
+        lifecycleObserverTokens.append(
+            center.addObserver(forName: .NSSystemClockDidChange, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.systemClockDidChange()
+                }
+            }
+        )
+    }
+
+    /// Nothing async runs after this returns, so the writes happen here, on this thread.
+    private func writeEverythingBeforeTermination() {
+        let queued = pipeline.writeQueuedFixesBeforeTermination()
+        let buffered = pendingContinuousFixes
+        pendingContinuousFixes.removeAll()
+        pendingContinuousSince = nil
+        assembler.storeImmediately(buffered, source: .continuous)
+        Self.captureLog.notice("Terminating: wrote \(queued) queued and \(buffered.count) buffered fixes")
+    }
+
+    /// The clock was set by hand or by the network. Fix timestamps follow the new clock,
+    /// so timers that compare them with older ones start over.
+    private func systemClockDidChange() {
+        let now = Date.now
+        Self.captureLog.notice("System clock changed; capture timers restart")
+        captureMachine.clockDidChange(now: now)
+        fixFilter.restartClock(at: now)
+        reconcileThrottle = ReconcileThrottle()
+        if !pendingContinuousFixes.isEmpty {
+            pendingContinuousSince = now
+        }
+        if continuousSessionStartedAt != nil {
+            continuousSessionStartedAt = now
+        }
     }
 
     /// Balanced capture thins out in Low Power Mode or on a low battery.
@@ -1977,23 +2256,23 @@ extension MovesLocationCaptureManager: @preconcurrency CLLocationManagerDelegate
             if departedRecently, !isTemporaryRouteTrackingActive {
                 handle(captureMachine.handleWake(.visitDeparture, location: nil, now: .now))
             }
-            // The visit rebuilds stops; write buffered fixes first so it sees them.
-            storePendingContinuousFixes(reconcile: false)
+            // The visit rebuilds the week; the pipeline writes buffered fixes before it.
+            storePendingContinuousFixes(reason: "visit", rebuild: .none)
             reconcileThrottle.recordRun(at: .now)
-            Task {
-                await assembler.ingestLocations([visitLocation], source: .visit, reconcile: false)
-                await assembler.ingestVisit(visit)
-            }
+            pipeline.store([visitLocation], source: .visit)
+            pipeline.visit(visit)
             return
         }
 
-        Task {
-            await assembler.ingestLocations([visitLocation], source: .visit)
-            await assembler.ingestVisit(visit)
+        // Storing the visit rebuilds the week, with its fix already written.
+        pipeline.store([visitLocation], source: .visit)
+        pipeline.visit(visit)
+        pipeline.run("last-mile check after a visit") { [weak self] in
+            guard let self else { return }
             // Getting off a bus is a visit. The walk to the door happens in
             // the next few minutes, and significant-change will not see it.
-            if await assembler.approachWasAutomotive(before: visitTimestamp) {
-                startLastMileTracking()
+            if await self.assembler.approachWasAutomotive(before: visitTimestamp) {
+                self.startLastMileTracking()
             }
         }
     }
@@ -2039,25 +2318,33 @@ extension MovesLocationCaptureManager: @preconcurrency CLLocationManagerDelegate
         }
 
         // Route tracking delivers a fix every few metres. Rebuilding a week of stops
-        // for each one is wasted work; do it every few minutes and when tracking ends.
-        let reconcile = source != .routeTracking || reconcileThrottle.shouldRun(at: .now)
-        let followsTrips = isFollowingTrips
-
-        Task {
-            if source == .routeTracking {
-                await routeTrackingLiveActivity.record(
-                    locations,
-                    endsAt: temporaryRouteTrackingEndsAt
-                )
+        // for each one is wasted work; rebuild the tracked stretch every few minutes,
+        // and the week when tracking ends.
+        let rebuild: CaptureRebuildScope?
+        if source == .routeTracking {
+            rebuild = reconcileThrottle.shouldRun(at: .now)
+                ? tripRebuildScope(movingSince: temporaryRouteTrackingStartedAt, now: .now)
+                : nil
+            // The Live Activity is not a store write; it updates as before.
+            Task {
+                await routeTrackingLiveActivity.record(locations, endsAt: temporaryRouteTrackingEndsAt)
             }
-            await assembler.ingestLocations(locations, source: source, reconcile: reconcile)
-            // Left somewhere on foot after a long pause. Catch the rest of
-            // the walk; a ride keeps the cheaper significant-change stream.
-            if !followsTrips,
-               source == .significantChange,
-               let idleFor, idleFor >= 8 * 60,
-               await assembler.recentlyWalking(at: Date()) {
-                startLastMileTracking()
+        } else {
+            rebuild = .week
+        }
+        pipeline.store(locations, source: source)
+        if let rebuild {
+            pipeline.rebuild(rebuild)
+        }
+
+        // Left somewhere on foot after a long pause. Catch the rest of
+        // the walk; a ride keeps the cheaper significant-change stream.
+        if !isFollowingTrips, source == .significantChange, let idleFor, idleFor >= 8 * 60 {
+            pipeline.run("last-mile check after a pause") { [weak self] in
+                guard let self else { return }
+                if await self.assembler.recentlyWalking(at: Date()) {
+                    self.startLastMileTracking()
+                }
             }
         }
 
@@ -2079,7 +2366,20 @@ extension MovesLocationCaptureManager: @preconcurrency CLLocationManagerDelegate
 
     func locationManager(_ manager: CLLocationManager, monitoringDidFailFor region: CLRegion?, withError error: Error) {
         guard region?.identifier == Self.departureRegionIdentifier else { return }
-        Self.captureLog.error("Departure circle failed: \((error as NSError).code)")
+        Self.captureLog.error("Departure circle failed: \((error as NSError).code); relying on motion, visits, and significant changes")
+        // Not retried at this point: the same request would fail the same way. A new
+        // settled point gets a new attempt.
+        failedDepartureAnchor = captureMachine.departureAnchor
+        removeDepartureRegion()
+    }
+
+    func locationManagerDidPauseLocationUpdates(_ manager: CLLocationManager) {
+        Self.captureLog.notice("Location updates paused by iOS")
+        storePendingContinuousFixes(reason: "updates paused", rebuild: .none)
+    }
+
+    func locationManagerDidResumeLocationUpdates(_ manager: CLLocationManager) {
+        Self.captureLog.notice("Location updates resumed by iOS")
     }
 
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
@@ -2094,5 +2394,7 @@ extension MovesLocationCaptureManager: @preconcurrency CLLocationManagerDelegate
 
         Self.captureLog.error("Location error \(nsError.code)")
         lastErrorMessage = error.localizedDescription
+        // Denied, or the session broke: nothing more may arrive, so keep what came.
+        storePendingContinuousFixes(reason: "location error", rebuild: .none)
     }
 }

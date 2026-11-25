@@ -16,6 +16,7 @@
 		489A763E2C4FC6F500F43B69 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 489A763D2C4FC6F500F43B69 /* Preview Assets.xcassets */; };
 		489A76452C4FC70D00F43B69 /* LocationChange.swift in Sources */ = {isa = PBXBuildFile; fileRef = 489A76442C4FC70D00F43B69 /* LocationChange.swift */; };
 		C4A7E0012F00000100000001 /* CapturePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4A7E0012F00000100000002 /* CapturePolicy.swift */; };
+		CA9E11E02F00000100000001 /* CaptureIngestPipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA9E11E02F00000100000002 /* CaptureIngestPipeline.swift */; };
 		489A76492C4FDE1E00F43B69 /* VisitedLocation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 489A76482C4FDE1E00F43B69 /* VisitedLocation.swift */; };
 		48A8FACF2F85166D000EAECA /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48A8FACE2F85166D000EAECA /* AppIcon.icon */; };
 		48A8FC0F2F8CCC7E000EAECA /* CreatedByView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48A8FC0E2F8CCC7E000EAECA /* CreatedByView.swift */; };
@@ -89,6 +90,7 @@
 		911A2BED555FF9765B760A93 /* AutomaticTransportModes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2315871CE5DE54E235C2D2D2 /* AutomaticTransportModes.swift */; };
 		9A1B00012F00000100000004 /* TimelineAssemblerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A1B00012F00000100000002 /* TimelineAssemblerTests.swift */; };
 		C4A7E0012F00000100000003 /* CapturePolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4A7E0012F00000100000004 /* CapturePolicyTests.swift */; };
+		CA9E11E02F00000100000003 /* CaptureHardeningTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA9E11E02F00000100000004 /* CaptureHardeningTests.swift */; };
 		9A81B863A560033BAB3A3409 /* ExplorationRaster.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD93D3D502BFDC02C6A30566 /* ExplorationRaster.swift */; };
 		A10000012F00000100000002 /* MovesRouteSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012F00000100000001 /* MovesRouteSupport.swift */; };
 		A10000012F00000100000004 /* MovesTimelineViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012F00000100000003 /* MovesTimelineViews.swift */; };
@@ -347,6 +349,7 @@
 		489A763D2C4FC6F500F43B69 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		489A76442C4FC70D00F43B69 /* LocationChange.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationChange.swift; sourceTree = "<group>"; };
 		C4A7E0012F00000100000002 /* CapturePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapturePolicy.swift; sourceTree = "<group>"; };
+		CA9E11E02F00000100000002 /* CaptureIngestPipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureIngestPipeline.swift; sourceTree = "<group>"; };
 		489A76462C4FCF1300F43B69 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		489A76472C4FD1A500F43B69 /* Moves.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Moves.entitlements; sourceTree = "<group>"; };
 		489A76482C4FDE1E00F43B69 /* VisitedLocation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisitedLocation.swift; sourceTree = "<group>"; };
@@ -408,6 +411,7 @@
 		9A1B00012F00000100000001 /* MovesTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MovesTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		9A1B00012F00000100000002 /* TimelineAssemblerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineAssemblerTests.swift; sourceTree = "<group>"; };
 		C4A7E0012F00000100000004 /* CapturePolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapturePolicyTests.swift; sourceTree = "<group>"; };
+		CA9E11E02F00000100000004 /* CaptureHardeningTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureHardeningTests.swift; sourceTree = "<group>"; };
 		A10000012F00000100000001 /* MovesRouteSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesRouteSupport.swift; sourceTree = "<group>"; };
 		A10000012F00000100000003 /* MovesTimelineViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesTimelineViews.swift; sourceTree = "<group>"; };
 		A10000012F00000100000005 /* MovesDetailViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesDetailViews.swift; sourceTree = "<group>"; };
@@ -729,6 +733,7 @@
 				A30000012FB0000100000000 /* TimelineWidgetSnapshot.swift */,
 				489A76442C4FC70D00F43B69 /* LocationChange.swift */,
 				C4A7E0012F00000100000002 /* CapturePolicy.swift */,
+				CA9E11E02F00000100000002 /* CaptureIngestPipeline.swift */,
 				489A76482C4FDE1E00F43B69 /* VisitedLocation.swift */,
 				489A763A2C4FC6F500F43B69 /* Assets.xcassets */,
 				489A763C2C4FC6F500F43B69 /* Preview Content */,
@@ -836,6 +841,7 @@
 				F10000013040000100000006 /* SampleStayInferenceTests.swift */,
 				9A1B00012F00000100000002 /* TimelineAssemblerTests.swift */,
 				C4A7E0012F00000100000004 /* CapturePolicyTests.swift */,
+				CA9E11E02F00000100000004 /* CaptureHardeningTests.swift */,
 				F20000013040000100000006 /* TimelineEditingTests.swift */,
 				F20000013040000100000008 /* TimelineLocatorTests.swift */,
 				F21100013051000100000002 /* TimelineTabTests.swift */,
@@ -1434,6 +1440,7 @@
 				A10000012F00000100000208 /* GeneratedAppIcons.swift in Sources */,
 				489A76452C4FC70D00F43B69 /* LocationChange.swift in Sources */,
 				C4A7E0012F00000100000001 /* CapturePolicy.swift in Sources */,
+				CA9E11E02F00000100000001 /* CaptureIngestPipeline.swift in Sources */,
 				A50000012FD0000100000001 /* CloudDataPresencePublisher.swift in Sources */,
 				A60000012FE0000100000001 /* DailyTimelineBackup.swift in Sources */,
 				48A8FC0F2F8CCC7E000EAECA /* CreatedByView.swift in Sources */,
@@ -1463,6 +1470,7 @@
 				F10000013040000100000007 /* SampleStayInferenceTests.swift in Sources */,
 				9A1B00012F00000100000004 /* TimelineAssemblerTests.swift in Sources */,
 				C4A7E0012F00000100000003 /* CapturePolicyTests.swift in Sources */,
+				CA9E11E02F00000100000003 /* CaptureHardeningTests.swift in Sources */,
 				F20000013040000100000007 /* TimelineEditingTests.swift in Sources */,
 				F20000013040000100000009 /* TimelineLocatorTests.swift in Sources */,
 				F21100013051000100000003 /* TimelineTabTests.swift in Sources */,

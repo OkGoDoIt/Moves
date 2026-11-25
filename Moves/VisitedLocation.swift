@@ -1693,8 +1693,12 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             try saveIfNeeded()
             NotificationCenter.default.post(name: .movesLocationSamplesDidChange, object: nil)
         }
-        // WS6: incremental fog / heat cells. Keep this hook tiny — WS5 edits inferredUserLabel elsewhere in this file.
-        VisitedCellStore.ingest(newlyInserted, in: modelContext)
+        // Live capture no longer writes visited cells: nothing reads them since the Map tab
+        // moved to `MapActivityIndex`, and every few seconds of a trip was another write to
+        // the CloudKit mirror. Imports still keep them, as their tests expect.
+        if !source.isLiveCapture {
+            VisitedCellStore.ingest(newlyInserted, in: modelContext)
+        }
         return inserted
     }
 
