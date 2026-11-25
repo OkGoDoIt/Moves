@@ -491,8 +491,12 @@ extension VisitPlace {
     }
 }
 
-fileprivate extension VisitPlace {
-    var locationKey: String {
+extension VisitPlace {
+    fileprivate var locationKey: String {
+        Self.locationKey(latitude: latitude, longitude: longitude)
+    }
+
+    static func locationKey(latitude: Double, longitude: Double) -> String {
         // Round into ~10m buckets so repeat visits to the same spot count once.
         let latitudeBucket = Int((latitude * 10_000).rounded())
         let longitudeBucket = Int((longitude * 10_000).rounded())

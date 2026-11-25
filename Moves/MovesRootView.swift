@@ -170,10 +170,11 @@ struct MovesRootView: View {
             RouteTrackingSettingsSheet(captureManager: captureManager)
         }
         .sheet(isPresented: $controller.isShowingDatePicker) {
-            TimelineHistorySheet { days in
+            // Not inside `TimelineHistorySheet`: that fetches every day again after each save,
+            // which made the calendar unusable while anything was recording or importing.
             MovesJumpToDateView(
-                dayTimelines: days,
-                selectedDate: days.first(where: { $0.dayKey == controller.selectedDayKey })?.dayStart ?? controller.requestedJumpMoment ?? .now,
+                earliestDayStart: earliestDays.first?.dayStart,
+                selectedDate: TimelineDeepLink.parseTimestamp(controller.selectedDayKey) ?? controller.requestedJumpMoment ?? .now,
                 onSelectDate: { date in
                     controller.requestedJumpDate = date
                 },
@@ -184,7 +185,6 @@ struct MovesRootView: View {
                 includesTime: true,
                 onDismiss: { controller.isShowingDatePicker = false }
             )
-            }
         }
         .onOpenURL(perform: handleDeepLink)
         .sheet(isPresented: $controller.isShowingReviewInbox) {

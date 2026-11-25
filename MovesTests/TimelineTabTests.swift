@@ -440,6 +440,43 @@ final class TimelineTabTests: XCTestCase {
         XCTAssertLessThanOrEqual(expanded.stops.count, RouteGradientRendering.maximumStopCount)
     }
 
+    /// The date picker's busiest days, from the values it reads off the main thread.
+    func testActiveDayRankingOrdersEveryFilterAndOffersOnlyUsedWaysOfMoving() {
+        let first = date(0, 0)
+        func day(_ offset: Int, moves: [(TransportMode, Double)], places: [(Double, Double)] = []) -> InsightsDayRecord {
+            let start = first.addingTimeInterval(Double(offset) * 86_400)
+            return InsightsDayRecord(
+                dayStart: start,
+                moves: moves.map {
+                    InsightsMoveRecord(startDate: start, endDate: start, duration: 0, distanceMeters: $0.1, mode: $0.0)
+                },
+                visits: places.map {
+                    var visit = InsightsVisitRecord()
+                    visit.latitude = $0.0
+                    visit.longitude = $0.1
+                    return visit
+                }
+            )
+        }
+        let records = [
+            day(0, moves: [(.walking, 2_000), (.running, 3_000)], places: [(1, 1), (1.000_01, 1), (2, 2)]),
+            day(1, moves: [(.automotive, 90_000)], places: [(1, 1)]),
+            day(2, moves: [(.walking, 8_000), (.boat, 0)], places: [(1, 1), (2, 2), (3, 3)]),
+            day(3, moves: []),
+        ] + (4..<10).map { day($0, moves: [(.walking, 100)]) }
+
+        let ranking = ActiveDayRanking(records)
+
+        XCTAssertEqual(ranking.filters, [.overall, .placeCount, .onFoot, .automotive])
+        XCTAssertEqual(ranking.days(for: .overall).first?.dayStart, records[1].dayStart)
+        XCTAssertEqual(ranking.days(for: .placeCount).map(\.placeCount), [3, 2, 1], "stops a few meters apart are one place")
+        XCTAssertEqual(ranking.days(for: .onFoot).prefix(2).map(\.dayStart), [records[2].dayStart, records[0].dayStart])
+        XCTAssertEqual(ranking.days(for: .onFoot)[1].distanceMeters, 5_000)
+        XCTAssertEqual(ranking.days(for: .onFoot).count, ActiveDayRanking.dayLimit)
+        XCTAssertFalse(ranking.days(for: .overall).contains { $0.dayStart == records[3].dayStart })
+        XCTAssertTrue(ranking.days(for: .cycling).isEmpty)
+    }
+
     private func date(_ hour: Int, _ minute: Int) -> Date {
         var components = DateComponents()
         components.year = 2026

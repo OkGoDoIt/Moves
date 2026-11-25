@@ -145,7 +145,7 @@ struct DayHeaderView: View {
 
                     HStack(spacing: 6) {
                         if isToday {
-                            liveNowBadge
+                            LiveNowBadge()
                         }
                         // Steps are the first thing to go when the line is tight.
                         ViewThatFits(in: .horizontal) {
@@ -193,29 +193,44 @@ struct DayHeaderView: View {
             .lineLimit(1)
     }
 
-    private var liveNowBadge: some View {
-        TimelineView(.periodic(from: .now, by: 30)) { context in
-            HStack(spacing: 5) {
-                Circle()
-                    .fill(MovesPalette.routeTracking)
-                    .frame(width: 7, height: 7)
-                    .accessibilityHidden(true)
+}
 
-                Text(String(localized: "Now"))
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.secondary)
+/// "Now 5:18 PM" beside today's totals.
+///
+/// Not a `TimelineView`: inside the day header one kept the whole screen laying itself out on
+/// every frame for as long as today was showing (about 75% of the main thread, iOS 27), which
+/// also made sheets over it drop touches. It changes once a minute, so it keeps its own time.
+private struct LiveNowBadge: View {
+    @State private var now = Date.now
 
-                Text(context.date, format: .dateTime.hour().minute())
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
-            .padding(.horizontal, 7)
-            .padding(.vertical, 1)
-            .background(.thinMaterial, in: Capsule())
+    var body: some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(MovesPalette.routeTracking)
+                .frame(width: 7, height: 7)
+                .accessibilityHidden(true)
+
+            Text(String(localized: "Now"))
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+
+            Text(now, format: .dateTime.hour().minute())
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
         }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 1)
+        .background(.thinMaterial, in: Capsule())
         .accessibilityElement(children: .combine)
         .accessibilityLabel(String(localized: "Live now"))
+        .task {
+            while !Task.isCancelled {
+                now = .now
+                let untilNextMinute = 60 - now.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 60)
+                try? await Task.sleep(for: .seconds(untilNextMinute))
+            }
+        }
     }
 }
 
@@ -493,7 +508,15 @@ struct TimelineMapCallout: View {
 /// Lightweight navigation over every calendar day, including gaps with no stored timeline.
 struct TimelineBrowsingDay: Equatable, Sendable {
     let dayStart: Date
-    var dayKey: String { DayTimeline.makeDayKey(for: dayStart) }
+    /// Stored: the pager reads the key of every day on each redraw, and working one out takes
+    /// a calendar and a formatted string.
+    let dayKey: String
+
+    init(dayStart: Date) {
+        self.dayStart = dayStart
+        dayKey = DayTimeline.makeDayKey(for: dayStart)
+    }
+
     static func days(from start: Date, through end: Date, calendar: Calendar = .current) -> [Self] {
         var result: [Self] = []
         var date = calendar.startOfDay(for: start)
