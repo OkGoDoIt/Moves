@@ -2631,7 +2631,8 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             if place.departureDate == nil || (place.departureDate ?? .distantFuture) > next.arrivalDate {
                 place.departureDate = min(stay.lastInsideDate, next.arrivalDate)
             }
-        } else if stay.lastInsideDate > (place.departureDate ?? .distantPast) {
+        } else if place.departureDate != nil, stay.lastInsideDate > (place.departureDate ?? .distantPast) {
+            // Guarded: writing nil over nil still dirties the row and saved every pass.
             place.departureDate = nil
         }
 
@@ -2891,7 +2892,10 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             guard let lastOnSite else { continue }
             let walkDuration = next.arrivalDate.timeIntervalSince(lastOnSite)
             guard LastBlockWalk.isShape(distance: separation, duration: walkDuration) else { continue }
-            current.departureDate = max(lastOnSite, current.arrivalDate)
+            let walkStart = max(lastOnSite, current.arrivalDate)
+            if current.departureDate != walkStart {
+                current.departureDate = walkStart
+            }
         }
     }
 
@@ -2944,14 +2948,13 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         // Merging two stops leaves the trip between them going nowhere.
         if let start = move.startPlace?.id, start == move.endPlace?.id { return true }
 
-        let interior = places.contains { place in
-            guard place.id != move.startPlace?.id, place.id != move.endPlace?.id else { return false }
-            let placeEnd = place.departureDate ?? place.arrivalDate
-            let overlapsStart = placeEnd > move.startDate.addingTimeInterval(60)
-            let overlapsEnd = place.arrivalDate < move.endDate.addingTimeInterval(-60)
-            return overlapsStart && overlapsEnd
-        }
-        if interior { return true }
+        if anotherPlaceOverlaps(
+            from: move.startDate,
+            to: move.endDate,
+            startPlaceID: move.startPlace?.id,
+            endPlaceID: move.endPlace?.id,
+            among: places
+        ) { return true }
 
         if let departure = move.startPlace?.departureDate,
            move.startDate.addingTimeInterval(5 * 60) < departure {
@@ -2980,6 +2983,30 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         return false
     }
 
+    /// True when a stop other than the trip's own ends covers part of the trip's middle.
+    /// Shared by the cleanup above and `moveLegs`, so a pass never builds a trip that the
+    /// next pass would delete: that loop deleted and recreated the same trip on every batch.
+    private func anotherPlaceOverlaps(
+        from start: Date,
+        to end: Date,
+        startPlaceID: UUID?,
+        endPlaceID: UUID?,
+        among places: [VisitPlace]
+    ) -> Bool {
+        places.contains { place in
+            guard place.id != startPlaceID, place.id != endPlaceID else { return false }
+            let placeEnd = place.departureDate ?? place.arrivalDate
+            let overlapsStart = placeEnd > start.addingTimeInterval(60)
+            let overlapsEnd = place.arrivalDate < end.addingTimeInterval(-60)
+            return overlapsStart && overlapsEnd
+        }
+    }
+
+    /// How long after a trip ends a pass may still retry an unknown mode. Motion history
+    /// for a trip settles within minutes; past this, retrying only rewrote the same rows
+    /// on every batch (a mode the person turned off reads as unknown forever).
+    static let unknownModeRetryWindow: TimeInterval = 24 * 60 * 60
+
     private func moveLegs(
         among places: [VisitPlace],
         samples: [LocationSample],
@@ -2993,11 +3020,22 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         for index in ordered.indices.dropLast() {
             let origin = ordered[index]
             let destination = ordered[index + 1]
-            let legStart = origin.departureDate ?? origin.arrivalDate
+            // A stop whose arrival was clamped past its departure has not left before it
+            // arrived: the trip starts no earlier than the arrival.
+            let legStart = max(origin.departureDate ?? origin.arrivalDate, origin.arrivalDate)
             let legEnd = destination.arrivalDate
             guard legEnd.timeIntervalSince(legStart) > 60 else { continue }
             guard legEnd >= start, legStart <= end else { continue }
-            if try existingConsistentMove(from: origin, to: destination, start: legStart, end: legEnd) != nil {
+            if try existingConsistentMove(from: origin, to: destination, start: legStart, end: legEnd, now: end) != nil {
+                continue
+            }
+            if anotherPlaceOverlaps(
+                from: legStart,
+                to: legEnd,
+                startPlaceID: origin.id,
+                endPlaceID: destination.id,
+                among: ordered
+            ) {
                 continue
             }
             if wasRemoved(tripFrom: legStart, to: legEnd, spans: removedSpans) {
@@ -3047,7 +3085,8 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         from origin: VisitPlace,
         to destination: VisitPlace,
         start: Date,
-        end: Date
+        end: Date,
+        now: Date
     ) throws -> MoveSegment? {
         guard let existing = try findMove(startPlaceID: origin.id, endPlaceID: destination.id) else {
             return nil
@@ -3056,7 +3095,10 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         let startDelta = abs(existing.startDate.timeIntervalSince(start))
         let endDelta = abs(existing.endDate.timeIntervalSince(end))
         guard startDelta <= 5 * 60, endDelta <= 5 * 60 else { return nil }
-        guard existing.transportMode != .unknown else { return nil }
+        if existing.transportMode == .unknown,
+           now.timeIntervalSince(existing.endDate) < Self.unknownModeRetryWindow {
+            return nil
+        }
         return existing
     }
 
@@ -3094,15 +3136,16 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                 return existing
             }
             move = existing
-            move.dedupeKey = dedupeKey
-            if move.permitsAutomaticModeChanges {
+            // Writes only what differs, so re-applying the same trip leaves nothing to save.
+            if move.dedupeKey != dedupeKey { move.dedupeKey = dedupeKey }
+            if move.permitsAutomaticModeChanges, move.transportMode != transportMode {
                 move.transportMode = transportMode
             }
-            move.distanceMeters = distanceMeters
+            if move.distanceMeters != distanceMeters { move.distanceMeters = distanceMeters }
             // A later source without pedometer data must not erase recorded steps.
-            move.stepCount = stepCount ?? move.stepCount
-            move.startDate = startDate
-            move.endDate = endDate
+            if let stepCount, move.stepCount != stepCount { move.stepCount = stepCount }
+            if move.startDate != startDate { move.startDate = startDate }
+            if move.endDate != endDate { move.endDate = endDate }
         } else {
             move = MoveSegment(
                 dedupeKey: dedupeKey,
@@ -3116,11 +3159,11 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             modelContext.insert(move)
         }
 
-        move.startPlace = startPlace
-        move.endPlace = endPlace
-        move.dayTimeline = timeline
+        if move.startPlace?.persistentModelID != startPlace.persistentModelID { move.startPlace = startPlace }
+        if move.endPlace?.persistentModelID != endPlace.persistentModelID { move.endPlace = endPlace }
+        if move.dayTimeline?.persistentModelID != timeline.persistentModelID { move.dayTimeline = timeline }
 
-        for sample in samples {
+        for sample in samples where sample.moveSegment?.persistentModelID != move.persistentModelID {
             sample.moveSegment = move
         }
 

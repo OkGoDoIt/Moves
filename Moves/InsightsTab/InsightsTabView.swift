@@ -1,4 +1,5 @@
 import Charts
+import Combine
 import SwiftData
 import SwiftUI
 
@@ -6,7 +7,6 @@ import SwiftUI
 struct InsightsTabView: View {
     @EnvironmentObject private var rootController: MovesRootController
     @Environment(\.modelContext) private var modelContext
-    @Query(sort: \DayTimeline.dayStart, order: .forward) private var dayTimelines: [DayTimeline]
     @State private var store = InsightsStore()
     @State private var path = NavigationPath()
     @State private var isShowingYearReview = false
@@ -17,7 +17,10 @@ struct InsightsTabView: View {
     var body: some View {
         NavigationStack(path: $path) {
             Group {
-                if dayTimelines.contains(where: \.hasRecordedActivity) {
+                if !store.hasLoaded {
+                    ProgressView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if store.hasRecordedActivity {
                     insightsScroll
                 } else {
                     emptyState
@@ -47,9 +50,12 @@ struct InsightsTabView: View {
                         rows: store.snapshot.cities
                     )
                 case .connections:
-                    InsightsConnectionsView(
-                        snapshot: connectionsSnapshot ?? MovesStatisticsSnapshot(dayTimelines: dayTimelines)
-                    )
+                    if let connectionsSnapshot {
+                        InsightsConnectionsView(snapshot: connectionsSnapshot)
+                    } else {
+                        ProgressView()
+                            .task { await loadConnections() }
+                    }
                 case .trips:
                     TripListView()
                 }
@@ -63,9 +69,8 @@ struct InsightsTabView: View {
             applyRequestedTrip()
             openTripsListIfRequested()
         }
-        .onChange(of: dataSignature) { _, _ in reload() }
+        .onReceive(timelineChanges) { _ in reload() }
         .onChange(of: store.period) { _, _ in store.reloadCurrentPeriod(now: .now, calendar: calendar) }
-        .onReceive(NotificationCenter.default.publisher(for: .NSUndoManagerDidUndoChange)) { _ in reload() }
         .onChange(of: rootController.requestedTripID) { _, _ in applyRequestedTrip() }
         .onChange(of: rootController.shouldOpenTripsList) { _, _ in
             openTripsListIfRequested()
@@ -286,7 +291,7 @@ struct InsightsTabView: View {
                 .font(.system(.footnote, design: .rounded))
                 .foregroundStyle(.secondary)
             Button {
-                connectionsSnapshot = MovesStatisticsSnapshot(dayTimelines: dayTimelines)
+                connectionsSnapshot = nil
                 path.append(InsightsRoute.connections)
             } label: {
                 HStack {
@@ -372,21 +377,18 @@ struct InsightsTabView: View {
     }
 
     private var yearReviewSheet: some View {
-        NavigationStack {
-            MovesShareGalleryView(
-                dayTimelines: dayTimelines,
-                initialDate: yearReviewDate,
-                initialPeriod: .year,
-                showsDismissButton: true
-            )
-        }
+        InsightsYearReviewSheet(initialDate: yearReviewDate)
     }
 
-    private var dataSignature: String {
-        let last = dayTimelines.last?.dayKey ?? ""
-        let moves = (try? modelContext.fetchCount(FetchDescriptor<MoveSegment>())) ?? 0
-        let visits = (try? modelContext.fetchCount(FetchDescriptor<VisitPlace>())) ?? 0
-        return "\(dayTimelines.count)|\(last)|\(moves)|\(visits)"
+    /// A save on any context that touched trips, stops, or days, read after it committed.
+    /// Readers start from a fresh context, so they never depend on the main context's merge.
+    private var timelineChanges: AnyPublisher<Notification, Never> {
+        NotificationCenter.default.publisher(for: ModelContext.didSave)
+            .filter(TimelineSaveFilter.touchesTimeline)
+            .merge(with: NotificationCenter.default.publisher(for: .NSPersistentStoreRemoteChange))
+            .merge(with: NotificationCenter.default.publisher(for: .NSUndoManagerDidUndoChange))
+            .debounce(for: .milliseconds(350), scheduler: DispatchQueue.main)
+            .eraseToAnyPublisher()
     }
 
     private var isAllPeriod: Bool {
@@ -406,7 +408,11 @@ struct InsightsTabView: View {
     }
 
     private func reload() {
-        store.reload(days: dayTimelines, now: .now, calendar: calendar)
+        store.reload(container: modelContext.container, now: .now, calendar: calendar)
+    }
+
+    private func loadConnections() async {
+        connectionsSnapshot = try? await MovesStatisticsSnapshot.load(from: modelContext.container)
     }
 
     /// Deep links `moves://trip/{uuid}` land on Insights, then push the trip.
@@ -441,7 +447,7 @@ struct InsightsTabView: View {
 
     private func waitForSeededDays() async {
         for _ in 0..<60 {
-            if dayTimelines.contains(where: { !$0.places.isEmpty || !$0.moves.isEmpty }) {
+            if store.hasLoaded, store.hasRecordedActivity {
                 return
             }
             try? await Task.sleep(for: .milliseconds(500))
@@ -462,6 +468,23 @@ struct InsightsTabView: View {
     }
 }
 
+/// Owns the day query the share gallery takes, so the Insights tab itself holds no rows.
+private struct InsightsYearReviewSheet: View {
+    let initialDate: Date
+    @Query(sort: \DayTimeline.dayStart, order: .forward) private var dayTimelines: [DayTimeline]
+
+    var body: some View {
+        NavigationStack {
+            MovesShareGalleryView(
+                dayTimelines: dayTimelines,
+                initialDate: initialDate,
+                initialPeriod: .year,
+                showsDismissButton: true
+            )
+        }
+    }
+}
+
 enum InsightsRoute: Hashable {
     case countries
     case cities
@@ -469,18 +492,24 @@ enum InsightsRoute: Hashable {
     case trips
 }
 
-/// Copies SwiftData days, then builds snapshots off-main and memoizes by year until the rows change.
+/// Reads the store on a private context off the main actor, builds snapshots there, and
+/// memoizes by year until the rows change. The last snapshot stays up while a reload runs.
 @MainActor
 @Observable
 final class InsightsStore {
     var period: InsightsPeriod
     private(set) var snapshot: InsightsSnapshot
     private(set) var isComputing = false
+    /// False until the first read finishes, so the tab shows neither zeros nor the empty state.
+    private(set) var hasLoaded = false
+    private(set) var hasRecordedActivity = false
 
     @ObservationIgnored
     private var cache: [String: InsightsSnapshot] = [:]
     @ObservationIgnored
     private var generation = 0
+    @ObservationIgnored
+    private var loadGeneration = 0
     @ObservationIgnored
     private var records: [InsightsDayRecord] = []
 
@@ -491,10 +520,35 @@ final class InsightsStore {
         snapshot = .empty(period: initial, availableYears: [year])
     }
 
-    func reload(days: [DayTimeline], now: Date = .now, calendar: Calendar = .autoupdatingCurrent) {
-        let latest = days.map(InsightsDayRecord.init)
-        if latest != records {
-            records = latest
+    /// Re-reads the store. Never touches a model on the main actor.
+    func reload(container: ModelContainer, now: Date = .now, calendar: Calendar = .autoupdatingCurrent) {
+        loadGeneration += 1
+        let load = loadGeneration
+        isComputing = true
+        Task.detached(priority: .userInitiated) {
+            let source: InsightsSource
+            do {
+                source = try InsightsSourceLoader.load(from: container)
+            } catch {
+                await MainActor.run {
+                    guard load == self.loadGeneration else { return }
+                    self.isComputing = false
+                }
+                return
+            }
+            await MainActor.run {
+                guard load == self.loadGeneration else { return }
+                self.apply(source, now: now, calendar: calendar)
+            }
+        }
+    }
+
+    /// Takes values already read off the store; tests and the loader both end here.
+    func apply(_ source: InsightsSource, now: Date = .now, calendar: Calendar = .autoupdatingCurrent) {
+        hasLoaded = true
+        hasRecordedActivity = source.hasRecordedActivity
+        if source.days != records {
+            records = source.days
             cache.removeAll()
         }
         reloadCurrentPeriod(now: now, calendar: calendar)

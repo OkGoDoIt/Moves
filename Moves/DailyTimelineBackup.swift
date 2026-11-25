@@ -98,9 +98,16 @@ enum DailyTimelineBackup {
         )
         log.info("Destination directory: \(destinationDirectory.path, privacy: .public)")
         let context = ModelContext(modelContainer)
-        let descriptor = FetchDescriptor<DayTimeline>(
+        // The exporter walks the day's trips, stops, and fixes. Load them all now, so a
+        // reconcile deleting a row on another context cannot leave a lazy fault behind.
+        var descriptor = FetchDescriptor<DayTimeline>(
             predicate: #Predicate { $0.dayKey == dayKey }
         )
+        descriptor.relationshipKeyPathsForPrefetching = [\.placesStorage, \.movesStorage, \.samplesStorage]
+        var moves = FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.dayTimeline?.dayKey == dayKey })
+        moves.relationshipKeyPathsForPrefetching = [\.startPlace, \.endPlace, \.samplesStorage]
+        let prefetchedMoves = try context.fetch(moves)
+        defer { withExtendedLifetime(prefetchedMoves) {} }
         guard let day = try context.fetch(descriptor).first else {
             log.error("No DayTimeline stored for \(dayKey, privacy: .public)")
             throw DailyTimelineBackupError.noTimeline(for: yesterday)

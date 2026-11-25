@@ -4,7 +4,7 @@ import SwiftData
 import SwiftUI
 
 /// The calendar copy contains a name and times, never coordinates, notes, or photos.
-struct CalendarVisit: Equatable {
+struct CalendarVisit: Equatable, Sendable {
     let id: UUID
     let title: String
     let start: Date
@@ -172,8 +172,11 @@ final class MovesCalendarSync: ObservableObject {
             let now = Date.now
             let start = since
             let context = ModelContext(container)
-            let rows = try context.fetch(FetchDescriptor<VisitPlace>(predicate: #Predicate { $0.arrivalDate >= start }))
-            let visits = rows.compactMap { CalendarVisit(visit: $0, since: start, now: now) }
+            // Copied out at once with the learned place prefetched: the reconciler deletes
+            // visits on its own context, and a lazy fault on a deleted row aborts.
+            var fetch = FetchDescriptor<VisitPlace>(predicate: #Predicate { $0.arrivalDate >= start })
+            fetch.relationshipKeyPathsForPrefetching = [\.knownPlace]
+            let visits = try context.fetch(fetch).compactMap { CalendarVisit(visit: $0, since: start, now: now) }
             let wanted = Dictionary(visits.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
             var events: [EKEvent] = []
             var window = start
@@ -232,7 +235,8 @@ final class MovesCalendarSync: ObservableObject {
 /// Calendar setup uses the same cards and controls as the other integrations.
 struct CalendarSyncSettingsView: View {
     @EnvironmentObject private var sync: MovesCalendarSync
-    @Query(sort: \VisitPlace.arrivalDate, order: .reverse) private var visits: [VisitPlace]
+    @Environment(\.modelContext) private var modelContext
+    @State private var preview: CalendarVisit?
     @State private var sourceID = ""
     @State private var from = Calendar.current.startOfDay(for: Date.now)
     @State private var isConnecting = false
@@ -264,7 +268,7 @@ struct CalendarSyncSettingsView: View {
                                 }
                             }
                             DatePicker("Visits starting", selection: $from, in: ...Date.now, displayedComponents: .date)
-                            if let preview = visits.lazy.compactMap({ CalendarVisit(visit: $0, since: from, now: .now) }).first {
+                            if let preview {
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text("Preview").font(.caption).foregroundStyle(.secondary)
                                     Text(preview.title).font(.headline)
@@ -302,8 +306,24 @@ struct CalendarSyncSettingsView: View {
         .navigationTitle("Calendar")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { sync.refreshAccess(); from = sync.since; sourceID = sync.hasAccess ? sync.preferredSourceID : "" }
+        .task(id: from) { preview = await Self.latestCompletedVisit(since: from, in: modelContext.container) }
         .onChange(of: sync.hasAccess) { _, allowed in
             if allowed { sourceID = sync.preferredSourceID }
         }
+    }
+
+    /// The newest completed visit since `start`, read on a private context off the main actor.
+    private static func latestCompletedVisit(since start: Date, in container: ModelContainer) async -> CalendarVisit? {
+        await Task.detached(priority: .userInitiated) {
+            let context = ModelContext(container)
+            var fetch = FetchDescriptor<VisitPlace>(
+                predicate: #Predicate { $0.arrivalDate >= start },
+                sortBy: [SortDescriptor(\.arrivalDate, order: .reverse)]
+            )
+            fetch.fetchLimit = 50
+            fetch.relationshipKeyPathsForPrefetching = [\.knownPlace]
+            let now = Date.now
+            return ((try? context.fetch(fetch)) ?? []).lazy.compactMap { CalendarVisit(visit: $0, since: start, now: now) }.first
+        }.value
     }
 }

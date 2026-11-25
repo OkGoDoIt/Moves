@@ -220,15 +220,152 @@ final class InsightsSnapshotTests: XCTestCase {
         try context.save()
 
         let store = InsightsStore(now: now, calendar: calendar)
-        store.reload(days: [timeline], now: now, calendar: calendar)
+        store.reload(container: container, now: now, calendar: calendar)
         try await waitUntilSettled(store)
         XCTAssertEqual(store.snapshot.modes.map(\.modeRaw), [TransportMode.walking.rawValue])
 
         // Same counts as before: only the rows can tell these apart.
         move.transportMode = .cycling
-        store.reload(days: [timeline], now: now, calendar: calendar)
+        try context.save()
+        store.reload(container: container, now: now, calendar: calendar)
         try await waitUntilSettled(store)
         XCTAssertEqual(store.snapshot.modes.map(\.modeRaw), [TransportMode.cycling.rawValue])
+    }
+
+    /// Field crash (build 46): `MoveSegment.startPlace` aborted inside `InsightsDayRecord.init`
+    /// because the reconciler deleted moves on its own context while the main context still
+    /// listed them. The reload must read committed rows on its own context instead.
+    @MainActor
+    func testReloadSurvivesMovesDeletedOnAnotherContext() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("InsightsDelete-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let schema = Schema(MovesTimelineSchema.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(
+                schema: schema,
+                url: directory.appendingPathComponent("default.store"),
+                cloudKitDatabase: .none
+            )
+        )
+        let now = date(2026, 9, 17, 18, 0)
+        let seed = ModelContext(container)
+        for dayIndex in 0..<30 {
+            let dayStart = calendar.date(byAdding: .day, value: -dayIndex, to: calendar.startOfDay(for: now))!
+            let timeline = DayTimeline(dayStart: dayStart)
+            seed.insert(timeline)
+            var previous: VisitPlace?
+            for index in 0..<4 {
+                let arrival = dayStart.addingTimeInterval(Double(8 + index * 3) * 3_600)
+                let place = VisitPlace(arrivalDate: arrival, departureDate: arrival.addingTimeInterval(3_600),
+                                       latitude: 52.37, longitude: 4.89 + Double(index) * 0.01, horizontalAccuracy: 20)
+                place.countryCode = "NL"
+                place.locality = "Amsterdam"
+                place.dayTimeline = timeline
+                seed.insert(place)
+                if let previous {
+                    let move = MoveSegment(dedupeKey: UUID().uuidString, startDate: previous.departureDate!,
+                                           endDate: arrival, transportMode: .walking, distanceMeters: 1_000, stepCount: nil)
+                    move.startPlace = previous
+                    move.endPlace = place
+                    move.dayTimeline = timeline
+                    seed.insert(move)
+                }
+                previous = place
+            }
+        }
+        try seed.save()
+
+        // The view's side: the main context holds every day and move, as `@Query` did.
+        let main = container.mainContext
+        let heldDays = try main.fetch(FetchDescriptor<DayTimeline>())
+        let heldMoveCount = heldDays.reduce(0) { $0 + $1.moves.count }
+        XCTAssertEqual(heldMoveCount, 30 * 3)
+
+        // The reconciler's side: delete half the moves on another context and save.
+        let writer = ModelContext(container)
+        let doomed = try writer.fetch(FetchDescriptor<MoveSegment>()).enumerated().filter { $0.offset.isMultiple(of: 2) }.map(\.element)
+        for move in doomed { writer.delete(move) }
+        try writer.save()
+        let surviving = 30 * 3 - doomed.count
+
+        let store = InsightsStore(now: now, calendar: calendar)
+        store.reload(container: container, now: now, calendar: calendar)
+        try await waitUntilSettled(store)
+        XCTAssertTrue(store.hasLoaded)
+        XCTAssertTrue(store.hasRecordedActivity)
+        let walking = try XCTUnwrap(store.snapshot.modes.first { $0.mode == .walking })
+        XCTAssertEqual(walking.distanceMeters, Double(surviving) * 1_000, accuracy: 0.5)
+
+        // And while a writer keeps deleting, reloads keep finishing.
+        let stress = Task.detached(priority: .userInitiated) {
+            let context = ModelContext(container)
+            for _ in 0..<20 where !Task.isCancelled {
+                let moves = (try? context.fetch(FetchDescriptor<MoveSegment>())) ?? []
+                for move in moves.shuffled().prefix(3) { context.delete(move) }
+                try? context.save()
+                try? await Task.sleep(nanoseconds: 2_000_000)
+            }
+        }
+        for _ in 0..<10 {
+            store.reload(container: container, now: now, calendar: calendar)
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        _ = await stress.value
+        store.reload(container: container, now: now, calendar: calendar)
+        try await waitUntilSettled(store)
+        let remaining = try ModelContext(container).fetchCount(FetchDescriptor<MoveSegment>())
+        XCTAssertEqual(
+            store.snapshot.modes.first { $0.mode == .walking }?.distanceMeters ?? 0,
+            Double(remaining) * 1_000,
+            accuracy: 0.5
+        )
+    }
+
+    /// What the Insights reload relies on, measured rather than assumed: `ModelContext.didSave`
+    /// is posted after the save has committed, so a fresh context opened in its handler reads
+    /// the new rows, while the main context still lists the deleted ones until it merges.
+    @MainActor
+    func testDidSaveFiresAfterCommitWhileMainContextIsStillStale() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("InsightsMerge-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let schema = Schema(MovesTimelineSchema.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(schema: schema, url: directory.appendingPathComponent("default.store"), cloudKitDatabase: .none)
+        )
+        let seed = ModelContext(container)
+        let timeline = DayTimeline(dayStart: date(2026, 9, 17, 12, 0))
+        seed.insert(timeline)
+        for index in 0..<4 {
+            let move = MoveSegment(dedupeKey: "m\(index)", startDate: date(2026, 9, 17, 8 + index, 0),
+                                   endDate: date(2026, 9, 17, 8 + index, 30), transportMode: .walking,
+                                   distanceMeters: 100, stepCount: nil)
+            move.dayTimeline = timeline
+            seed.insert(move)
+        }
+        try seed.save()
+
+        let mainDay = try XCTUnwrap(container.mainContext.fetch(FetchDescriptor<DayTimeline>()).first)
+        XCTAssertEqual(mainDay.moves.count, 4)
+
+        var countSeenInHandler: Int?
+        let writer = ModelContext(container)
+        let observer = NotificationCenter.default.addObserver(forName: ModelContext.didSave, object: writer, queue: nil) { _ in
+            countSeenInHandler = try? ModelContext(container).fetchCount(FetchDescriptor<MoveSegment>())
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        for move in try writer.fetch(FetchDescriptor<MoveSegment>()).prefix(2) { writer.delete(move) }
+        try writer.save()
+
+        XCTAssertEqual(countSeenInHandler, 2, "A context opened from didSave reads the committed delete")
+        // Same turn of the main run loop: the main context has not merged, and its
+        // relationship still lists rows that are gone. Reading one of those would abort.
+        XCTAssertEqual(mainDay.moves.count, 4, "The main context is stale until it merges")
     }
 
     @MainActor

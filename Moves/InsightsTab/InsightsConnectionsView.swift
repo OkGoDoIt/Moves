@@ -1,4 +1,29 @@
+import SwiftData
 import SwiftUI
+
+/// Opens one trip by id when it is tapped, so the list never holds a model that the
+/// reconciler may delete while the person reads it.
+private struct ConnectionLegDestination: View {
+    @Query private var moves: [MoveSegment]
+
+    init(legID: UUID) {
+        var descriptor = FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.id == legID })
+        descriptor.fetchLimit = 1
+        _moves = Query(descriptor)
+    }
+
+    var body: some View {
+        if let move = moves.first {
+            MoveMapDetailView(segment: move)
+        } else {
+            ContentUnavailableView(
+                String(localized: "Trip Not Found"),
+                systemImage: "point.bottomleft.forward.to.point.topright.scurvepath",
+                description: Text(String(localized: "It was changed or removed."))
+            )
+        }
+    }
+}
 
 /// Journey finder moved here from the retired Statistics & Search sheet.
 struct InsightsConnectionsView: View {
@@ -340,17 +365,17 @@ private struct ConnectionJourneyDetailView: View {
                 SettingsCard(title: String(localized: "Route Legs")) {
                     ForEach(journey.legs) { leg in
                         NavigationLink {
-                            MoveMapDetailView(segment: leg)
+                            ConnectionLegDestination(legID: leg.id)
                         } label: {
                             HStack(spacing: 12) {
                                 Image(systemName: leg.transportMode.symbolName)
                                     .foregroundStyle(MovesPalette.transport(leg.transportMode))
                                     .frame(width: 24)
                                 VStack(alignment: .leading, spacing: 3) {
-                                    Text("\(leg.startPlace?.displayTitle ?? String(localized: "Unknown")) → \(leg.endPlace?.displayTitle ?? String(localized: "Unknown"))")
+                                    Text("\(leg.startTitle ?? String(localized: "Unknown")) → \(leg.endTitle ?? String(localized: "Unknown"))")
                                         .font(.system(size: 14, weight: .semibold, design: .rounded))
                                         .foregroundStyle(.primary)
-                                    Text("\(MovesStatisticsFormatting.duration(leg.timelineDuration)) · \(MovesStatisticsFormatting.distance(leg.distanceMeters)) · \(leg.transportMode.title)")
+                                    Text("\(MovesStatisticsFormatting.duration(leg.duration)) · \(MovesStatisticsFormatting.distance(leg.distanceMeters)) · \(leg.transportMode.title)")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }

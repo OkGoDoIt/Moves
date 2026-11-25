@@ -5,13 +5,17 @@ import SwiftUI
 struct MovesSearchView: View {
     @EnvironmentObject private var rootController: MovesRootController
     @Environment(\.dismiss) private var dismiss
-    @Query(sort: \KnownPlace.name) private var knownPlaces: [KnownPlace]
+    @Environment(\.modelContext) private var modelContext
 
-    let dayTimelines: [DayTimeline]
     @State private var query = ""
     @State private var sections: [MovesSearchSection] = []
     /// The query `sections` answers. Differs from `query` while a search is pending.
     @State private var searchedQuery = ""
+    /// Plain values read off the store once, then searched on every keystroke.
+    @State private var corpus: MovesSearchCorpus?
+
+    /// The days argument is no longer read: search loads its own values off the main actor.
+    init(dayTimelines: [DayTimeline] = []) {}
 
     private var calendar: Calendar { Calendar.autoupdatingCurrent }
 
@@ -63,17 +67,20 @@ struct MovesSearchView: View {
         }
     }
 
-    /// Walks every day on the main thread, so it waits for a pause in typing. The next
-    /// keystroke cancels this task.
+    /// Waits for a pause in typing; the next keystroke cancels this task. The first search
+    /// reads the store on a private context, so no main-context row is walked here.
     private func runSearch(for text: String) async {
         if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             try? await Task.sleep(for: .milliseconds(180))
             guard !Task.isCancelled else { return }
         }
+        if corpus == nil, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            corpus = try? await MovesSearchCorpus.load(from: modelContext.container)
+            guard !Task.isCancelled else { return }
+        }
         sections = MovesSearchIndex.results(
             parsed: SearchQueryParser.parse(text, now: .now, calendar: calendar),
-            knownPlaces: knownPlaces,
-            days: dayTimelines,
+            corpus: corpus ?? MovesSearchCorpus(),
             now: .now,
             calendar: calendar
         )
@@ -170,25 +177,125 @@ struct MovesSearchSection: Identifiable, Equatable {
     let hits: [MovesSearchHit]
 }
 
-/// Builds grouped search hits from the parsed query and live SwiftData rows.
+/// Everything search reads, copied off the store on a private context.
+struct MovesSearchCorpus: Sendable {
+    struct Place: Sendable {
+        let id: UUID
+        let name: String
+        let locality: String?
+        let category: String?
+        let countryCode: String?
+    }
+
+    struct Visit: Sendable {
+        let id: UUID
+        let title: String
+        let locality: String?
+        let comment: String?
+        let knownPlaceID: UUID?
+        let arrivalDate: Date
+        let departureDate: Date?
+    }
+
+    struct Move: Sendable {
+        let id: UUID
+        let comment: String?
+        let modeRaw: String
+        let startDate: Date
+        let duration: TimeInterval
+    }
+
+    struct Day: Sendable {
+        let dayKey: String
+        let dayStart: Date
+        let uniqueLocationCount: Int
+        var visits: [Visit] = []
+        var moves: [Move] = []
+    }
+
+    var knownPlaces: [Place] = []
+    /// Oldest first, as the timeline lists them.
+    var days: [Day] = []
+
+    /// Reads on a fresh context off the main actor, prefetching every relationship it
+    /// follows. The reconciler deletes trips on its own context, and a main-context row
+    /// read before the merge aborts the process.
+    static func load(from container: ModelContainer) async throws -> MovesSearchCorpus {
+        try await Task.detached(priority: .userInitiated) {
+            let context = ModelContext(container)
+            context.autosaveEnabled = false
+            var corpus = MovesSearchCorpus()
+            corpus.knownPlaces = try context.fetch(FetchDescriptor<KnownPlace>(sortBy: [SortDescriptor(\.name)]))
+                .map { Place(id: $0.id, name: $0.name, locality: $0.locality, category: $0.category, countryCode: $0.countryCode) }
+
+            var visitFetch = FetchDescriptor<VisitPlace>(sortBy: [SortDescriptor(\.arrivalDate)])
+            visitFetch.relationshipKeyPathsForPrefetching = [\.dayTimeline, \.knownPlace]
+            var visits: [PersistentIdentifier: [Visit]] = [:]
+            var buckets: [PersistentIdentifier: Set<String>] = [:]
+            for visit in try context.fetch(visitFetch) {
+                guard let day = visit.dayTimeline?.persistentModelID else { continue }
+                visits[day, default: []].append(Visit(
+                    id: visit.id,
+                    title: visit.displayTitle,
+                    locality: visit.locality,
+                    comment: visit.comment,
+                    knownPlaceID: visit.knownPlace?.id,
+                    arrivalDate: visit.arrivalDate,
+                    departureDate: visit.departureDate
+                ))
+                // Matches `DayTimeline.uniqueLocationCount`: ~10 m buckets.
+                buckets[day, default: []].insert(
+                    "\(Int((visit.latitude * 10_000).rounded()))|\(Int((visit.longitude * 10_000).rounded()))"
+                )
+            }
+
+            var moveFetch = FetchDescriptor<MoveSegment>(sortBy: [SortDescriptor(\.startDate)])
+            moveFetch.relationshipKeyPathsForPrefetching = [\.dayTimeline, \.startPlace]
+            var moves: [PersistentIdentifier: [Move]] = [:]
+            for move in try context.fetch(moveFetch) {
+                guard let day = move.dayTimeline?.persistentModelID else { continue }
+                moves[day, default: []].append(Move(
+                    id: move.id,
+                    comment: move.comment,
+                    modeRaw: move.transportModeRawValue,
+                    startDate: move.timelineStartDate,
+                    duration: move.timelineDuration
+                ))
+            }
+
+            corpus.days = try context.fetch(FetchDescriptor<DayTimeline>(sortBy: [SortDescriptor(\.dayStart)])).map { day in
+                let id = day.persistentModelID
+                return Day(
+                    dayKey: day.dayKey,
+                    dayStart: day.dayStart,
+                    uniqueLocationCount: buckets[id]?.count ?? 0,
+                    visits: visits[id] ?? [],
+                    moves: moves[id] ?? []
+                )
+            }
+            return corpus
+        }.value
+    }
+}
+
+/// Builds grouped search hits from the parsed query and values read off the store.
 enum MovesSearchIndex {
     static let resultLimit = 8
 
     static func results(
         parsed: SearchQueryParser.ParsedQuery,
-        knownPlaces: [KnownPlace],
-        days: [DayTimeline],
+        corpus: MovesSearchCorpus,
         now: Date,
         calendar: Calendar
     ) -> [MovesSearchSection] {
         guard !parsed.isEmpty else { return [] }
 
         var sections: [MovesSearchSection] = []
-        let places = placeHits(parsed: parsed, knownPlaces: knownPlaces, days: days)
+        let places = placeHits(parsed: parsed, corpus: corpus)
         if !places.isEmpty {
             sections.append(MovesSearchSection(title: String(localized: "Places"), hits: places))
         }
-        let dayHits = dayHits(parsed: parsed, days: days, calendar: calendar)
+        let dayHits = dayHits(parsed: parsed, days: corpus.days, calendar: calendar)
         if !dayHits.isEmpty {
             sections.append(MovesSearchSection(title: String(localized: "Days"), hits: dayHits))
         }
@@ -196,7 +303,7 @@ enum MovesSearchIndex {
         if !moments.isEmpty {
             sections.append(MovesSearchSection(title: String(localized: "Moments"), hits: moments))
         }
-        let notes = noteHits(parsed: parsed, days: days)
+        let notes = noteHits(parsed: parsed, days: corpus.days)
         if !notes.isEmpty {
             sections.append(MovesSearchSection(title: String(localized: "Notes"), hits: notes))
         }
@@ -205,8 +312,7 @@ enum MovesSearchIndex {
 
     private static func placeHits(
         parsed: SearchQueryParser.ParsedQuery,
-        knownPlaces: [KnownPlace],
-        days: [DayTimeline]
+        corpus: MovesSearchCorpus
     ) -> [MovesSearchHit] {
         let needle = parsed.freeText
         guard needle.count >= 2 || (needle.count == 1 && parsed.day == nil) else { return [] }
@@ -215,7 +321,7 @@ enum MovesSearchIndex {
         var hits: [MovesSearchHit] = []
         var seen = Set<UUID>()
 
-        for place in knownPlaces {
+        for place in corpus.knownPlaces {
             guard placeMatches(place, needle: needle) else { continue }
             seen.insert(place.id)
             let city = [place.locality, PlacesGeography.countryName(forCountryCode: place.countryCode)]
@@ -235,10 +341,10 @@ enum MovesSearchIndex {
             if hits.count >= resultLimit { return hits }
         }
 
-        for day in days {
-            for visit in day.places {
-                if let knownID = visit.knownPlace?.id, seen.contains(knownID) { continue }
-                guard visit.displayTitle.localizedCaseInsensitiveContains(needle)
+        for day in corpus.days {
+            for visit in day.visits {
+                if let knownID = visit.knownPlaceID, seen.contains(knownID) { continue }
+                guard visit.title.localizedCaseInsensitiveContains(needle)
                     || (visit.locality?.localizedCaseInsensitiveContains(needle) == true) else {
                     continue
                 }
@@ -246,8 +352,8 @@ enum MovesSearchIndex {
                     MovesSearchHit(
                         id: "visit-\(visit.id.uuidString)",
                         kind: .place,
-                        title: visit.displayTitle,
-                        subtitle: MovesStatisticsFormatting.visitInterval(visit),
+                        title: visit.title,
+                        subtitle: MovesStatisticsFormatting.visitInterval(arrival: visit.arrivalDate, departure: visit.departureDate),
                         symbolName: "mappin",
                         action: .visit(visit.id)
                     )
@@ -260,7 +366,7 @@ enum MovesSearchIndex {
 
     private static func dayHits(
         parsed: SearchQueryParser.ParsedQuery,
-        days: [DayTimeline],
+        days: [MovesSearchCorpus.Day],
         calendar: Calendar
     ) -> [MovesSearchHit] {
         var hits: [MovesSearchHit] = []
@@ -305,13 +411,13 @@ enum MovesSearchIndex {
 
     private static func noteHits(
         parsed: SearchQueryParser.ParsedQuery,
-        days: [DayTimeline]
+        days: [MovesSearchCorpus.Day]
     ) -> [MovesSearchHit] {
         let needle = parsed.freeText
         guard needle.count >= 2 else { return [] }
         var hits: [MovesSearchHit] = []
         for day in days.reversed() {
-            for visit in day.places {
+            for visit in day.visits {
                 guard let comment = visit.comment?.trimmingCharacters(in: .whitespacesAndNewlines),
                       !comment.isEmpty,
                       comment.localizedCaseInsensitiveContains(needle) else { continue }
@@ -320,7 +426,7 @@ enum MovesSearchIndex {
                         id: "note-\(visit.id.uuidString)",
                         kind: .note,
                         title: comment,
-                        subtitle: "\(visit.displayTitle) · \(MovesStatisticsFormatting.visitInterval(visit))",
+                        subtitle: "\(visit.title) · \(MovesStatisticsFormatting.visitInterval(arrival: visit.arrivalDate, departure: visit.departureDate))",
                         symbolName: "note.text",
                         action: .visit(visit.id)
                     )
@@ -331,14 +437,15 @@ enum MovesSearchIndex {
                 guard let comment = move.comment?.trimmingCharacters(in: .whitespacesAndNewlines),
                       !comment.isEmpty,
                       comment.localizedCaseInsensitiveContains(needle) else { continue }
+                let mode = TransportMode(rawValue: move.modeRaw) ?? .unknown
                 hits.append(
                     MovesSearchHit(
                         id: "note-move-\(move.id.uuidString)",
                         kind: .note,
                         title: comment,
-                        subtitle: "\(move.transportMode.title) · \(MovesStatisticsFormatting.duration(move.timelineDuration))",
+                        subtitle: "\(mode.title) · \(MovesStatisticsFormatting.duration(move.duration))",
                         symbolName: "note.text",
-                        action: .moment(move.timelineStartDate)
+                        action: .moment(move.startDate)
                     )
                 )
                 if hits.count >= resultLimit { return hits }
@@ -349,7 +456,7 @@ enum MovesSearchIndex {
 
     private static func dayHit(
         for date: Date,
-        timelines: [DayTimeline],
+        timelines: [MovesSearchCorpus.Day],
         calendar: Calendar
     ) -> MovesSearchHit {
         let start = calendar.startOfDay(for: date)
@@ -372,7 +479,7 @@ enum MovesSearchIndex {
         )
     }
 
-    private static func placeMatches(_ place: KnownPlace, needle: String) -> Bool {
+    private static func placeMatches(_ place: MovesSearchCorpus.Place, needle: String) -> Bool {
         if place.name.localizedCaseInsensitiveContains(needle) { return true }
         if place.locality?.localizedCaseInsensitiveContains(needle) == true { return true }
         if place.category?.localizedCaseInsensitiveContains(needle) == true { return true }

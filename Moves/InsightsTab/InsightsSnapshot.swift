@@ -1,5 +1,6 @@
 import Foundation
 import CoreLocation
+import SwiftData
 
 /// Year chip on Insights, plus an all-time rollup.
 enum InsightsPeriod: Hashable, Sendable {
@@ -30,12 +31,92 @@ struct InsightsDayRecord: Equatable, Sendable {
         self.moves = moves
         self.visits = visits
     }
+}
 
-    /// Copies relationship values while the caller still has a valid `ModelContext`.
-    init(_ day: DayTimeline) {
-        dayStart = day.dayStart
-        moves = day.moves.map(InsightsMoveRecord.init)
-        visits = day.places.map(InsightsVisitRecord.init)
+/// Everything Insights reads from the store, as plain values.
+struct InsightsSource: Equatable, Sendable {
+    var days: [InsightsDayRecord] = []
+    /// Any visit, trip, or fix at all; decides between the cards and the empty state.
+    var hasRecordedActivity = false
+}
+
+/// Reads Insights' inputs on a private context, never from the view's `@Query` rows.
+///
+/// The reconciler deletes and rebuilds trips on its own context after every batch of
+/// fixes. A main-context model whose row went before the merge aborts the process the
+/// moment a property is read (field crash in `MoveSegment.startPlace` under
+/// `InsightsDayRecord.init`), and nothing can catch it. A fresh context reads the
+/// committed store, and each fetch prefetches the relationships it follows and is copied
+/// out at once, so nothing faults lazily against a row another context may delete.
+enum InsightsSourceLoader {
+    static func load(from container: ModelContainer) throws -> InsightsSource {
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+
+        let days = try context.fetch(FetchDescriptor<DayTimeline>(sortBy: [SortDescriptor(\.dayStart)]))
+        var order: [PersistentIdentifier] = []
+        var dayStarts: [PersistentIdentifier: Date] = [:]
+        for day in days {
+            let id = day.persistentModelID
+            if dayStarts[id] == nil { order.append(id) }
+            dayStarts[id] = day.dayStart
+        }
+
+        var moveFetch = FetchDescriptor<MoveSegment>(sortBy: [SortDescriptor(\.startDate)])
+        moveFetch.relationshipKeyPathsForPrefetching = [\.dayTimeline, \.startPlace]
+        var moves: [PersistentIdentifier: [InsightsMoveRecord]] = [:]
+        var moveCount = 0
+        for move in try context.fetch(moveFetch) {
+            moveCount += 1
+            guard let day = move.dayTimeline?.persistentModelID else { continue }
+            moves[day, default: []].append(InsightsMoveRecord(move))
+        }
+
+        var visitFetch = FetchDescriptor<VisitPlace>(sortBy: [SortDescriptor(\.arrivalDate)])
+        visitFetch.relationshipKeyPathsForPrefetching = [\.dayTimeline, \.knownPlace]
+        var visits: [PersistentIdentifier: [InsightsVisitRecord]] = [:]
+        var visitCount = 0
+        for visit in try context.fetch(visitFetch) {
+            visitCount += 1
+            guard let day = visit.dayTimeline?.persistentModelID else { continue }
+            visits[day, default: []].append(InsightsVisitRecord(visit))
+        }
+
+        var sampleFetch = FetchDescriptor<LocationSample>()
+        sampleFetch.fetchLimit = 1
+        let hasSamples = try context.fetchCount(sampleFetch) > 0
+
+        return InsightsSource(
+            days: order.compactMap { id in
+                dayStarts[id].map { InsightsDayRecord(dayStart: $0, moves: moves[id] ?? [], visits: visits[id] ?? []) }
+            },
+            hasRecordedActivity: moveCount > 0 || visitCount > 0 || hasSamples
+        )
+    }
+}
+
+/// Which saves can change a reader built from trips, stops, and days. Capture saves a
+/// batch of fixes every few seconds; those alone change nothing Insights shows.
+enum TimelineSaveFilter {
+    static let timelineEntities: Set<String> = ["DayTimeline", "MoveSegment", "VisitPlace", "KnownPlace"]
+
+    static func touchesTimeline(_ notification: Notification) -> Bool {
+        let keys: [ModelContext.NotificationKey] = [.insertedIdentifiers, .updatedIdentifiers, .deletedIdentifiers]
+        guard let info = notification.userInfo else { return true }
+        if let invalidated = info[ModelContext.NotificationKey.invalidatedAllIdentifiers]
+            ?? info[ModelContext.NotificationKey.invalidatedAllIdentifiers.rawValue],
+           (invalidated as? Bool) != false { return true }
+        var understood = false
+        for key in keys {
+            guard let payload = info[key] ?? info[key.rawValue] else { continue }
+            let identifiers: [PersistentIdentifier]
+            if let values = payload as? [PersistentIdentifier] { identifiers = values }
+            else if let values = payload as? Set<PersistentIdentifier> { identifiers = Array(values) }
+            else { return true }
+            understood = true
+            if identifiers.contains(where: { timelineEntities.contains($0.entityName) }) { return true }
+        }
+        return !understood
     }
 }
 

@@ -139,7 +139,8 @@ final class StoreResilienceTests: XCTestCase {
         print("Real store after repair: \(try Self.quality(of: afterUpgrade))")
 
         // Fixes are the record of where the person actually was. Nothing may lose them.
-        let repository = SwiftDataTimelineRepository(modelContainer: container)
+        let writerContext = ModelContext(container)
+        let repository = SwiftDataTimelineRepository(modelContext: writerContext)
         let assembler = DefaultTimelineAssembler(
             repository: repository,
             motionClassifier: RecordingMotionClassifier(),
@@ -147,13 +148,23 @@ final class StoreResilienceTests: XCTestCase {
         )
 
         var previous = try Self.identities(in: ModelContext(container))
+        var saves = 0
+        // Only the reconciler's own context: the test host app saves its demo store too.
+        let observer = NotificationCenter.default.addObserver(forName: ModelContext.didSave, object: writerContext, queue: nil) { _ in
+            saves += 1
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
         for pass in 1...4 {
+            saves = 0
             await assembler.reconcileSampleStays()
             let current = try Self.identities(in: ModelContext(container))
-            if pass >= 3 {
+            // The first pass may repair what older builds left; after that, nothing is new.
+            if pass >= 2 {
                 XCTAssertEqual(current.moves, previous.moves, "Pass \(pass) deleted or rebuilt trips with nothing new to learn")
                 XCTAssertEqual(current.visits, previous.visits, "Pass \(pass) deleted or rebuilt stops with nothing new to learn")
+                XCTAssertEqual(saves, 0, "Pass \(pass) saved with nothing new to learn")
             }
+            print("Reconcile pass \(pass): \(saves) saves")
             previous = current
         }
 
@@ -169,6 +180,49 @@ final class StoreResilienceTests: XCTestCase {
 
         await ShareMapAggregateBuilder.refreshAll(in: container)
         XCTAssertFalse(try ModelContext(container).fetch(FetchDescriptor<ShareMapAggregate>()).isEmpty)
+    }
+
+    /// Insights now reads its own context instead of the view's day rows. On a real
+    /// history it must add up to exactly what walking every day's rows did.
+    func testInsightsLoaderMatchesTheDayWalkOnRealStore() throws {
+        let backup = try Self.latestDeviceBackup()
+        let directory = try makeTemporaryDirectory()
+        let storeURL = directory.appendingPathComponent("default.store")
+        for suffix in ["", "-wal", "-shm"] {
+            let source = URL(fileURLWithPath: backup.path + suffix)
+            guard FileManager.default.fileExists(atPath: source.path) else { continue }
+            try FileManager.default.copyItem(at: source, to: URL(fileURLWithPath: storeURL.path + suffix))
+        }
+        let container = try makeContainer(storeURL: storeURL)
+        let days = try ModelContext(container).fetch(FetchDescriptor<DayTimeline>(sortBy: [SortDescriptor(\.dayStart)]))
+        let walked = days.map { day in
+            InsightsDayRecord(
+                dayStart: day.dayStart,
+                moves: day.moves.map(InsightsMoveRecord.init),
+                visits: day.places.map(InsightsVisitRecord.init)
+            )
+        }
+        let loaded = try InsightsSourceLoader.load(from: container)
+        XCTAssertEqual(loaded.days.count, walked.count)
+        let now = Date.now
+        let calendar = Calendar.current
+        for period in [InsightsPeriod.year(calendar.component(.year, from: now)), .all] {
+            let old = InsightsSnapshotBuilder.build(days: walked, period: period, now: now, calendar: calendar, builtAt: now)
+            let new = InsightsSnapshotBuilder.build(days: loaded.days, period: period, now: now, calendar: calendar, builtAt: now)
+            XCTAssertEqual(new.totalDistanceMeters, old.totalDistanceMeters, accuracy: 0.01)
+            XCTAssertEqual(new.totalMovingDuration, old.totalMovingDuration, accuracy: 0.01)
+            XCTAssertEqual(new.activeDayCount, old.activeDayCount)
+            XCTAssertEqual(new.currentStreakDays, old.currentStreakDays)
+            XCTAssertEqual(new.longestStreakDays, old.longestStreakDays)
+            XCTAssertEqual(new.countries, old.countries)
+            XCTAssertEqual(new.cities, old.cities)
+            XCTAssertEqual(new.modes.map(\.modeRaw), old.modes.map(\.modeRaw))
+            for (a, b) in zip(new.modes, old.modes) {
+                XCTAssertEqual(a.distanceMeters, b.distanceMeters, accuracy: 0.01)
+                XCTAssertEqual(a.duration, b.duration, accuracy: 0.01)
+            }
+            print("Insights \(period.id) on backup copy: \(Int(new.totalDistanceMeters)) m, \(Int(new.totalMovingDuration)) s, \(new.activeDayCount) active days — matches day walk")
+        }
     }
 
     // MARK: - Helpers
@@ -248,10 +302,13 @@ final class StoreResilienceTests: XCTestCase {
     }
 
     private static func latestDeviceBackup() throws -> URL {
-        let repository = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        let staging = repository.appendingPathComponent("import-staging")
+        // A worktree sits inside the main checkout, which holds the private backups.
+        var directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        var staging = directory.appendingPathComponent("import-staging")
+        while !FileManager.default.fileExists(atPath: staging.path), directory.pathComponents.count > 1 {
+            directory = directory.deletingLastPathComponent()
+            staging = directory.appendingPathComponent("import-staging")
+        }
         let backups = try FileManager.default.contentsOfDirectory(atPath: staging.path)
             .filter { $0.hasPrefix("device-backup-") }
             .sorted()
