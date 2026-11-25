@@ -888,7 +888,16 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
     private let motionActivityManager = CMMotionActivityManager()
     private var isReceivingMotionUpdates = false
     private var settleCheckTask: Task<Void, Never>?
-    private var continuousSessionStartedAt: Date?
+    private var continuousSessionStartedAt: Date? {
+        didSet {
+            if followedTripStartedAt != continuousSessionStartedAt {
+                followedTripStartedAt = continuousSessionStartedAt
+            }
+        }
+    }
+    /// When the trip being followed right now began, or nil while staying put. The
+    /// timeline shows the trip in progress from the fixes recorded since then.
+    @Published private(set) var followedTripStartedAt: Date?
     private var temporaryRouteTrackingExpiryTask: Task<Void, Never>?
     /// When the short post-ride / departure fix burst should stop.
     private var lastMileEndsAt: Date?
@@ -961,6 +970,8 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         }
         if captureMachine.phase == .moving {
             continuousSessionStartedAt = .now
+            // Property observers do not run during init.
+            followedTripStartedAt = continuousSessionStartedAt
             fixFilter.beginSession(at: .now)
         }
         updateBackgroundLocationAllowance()

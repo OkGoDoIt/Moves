@@ -1470,7 +1470,10 @@ struct DayMapStrip: View {
             let subtitle = move.map { DurationFormatter.text(for: $0.timelineDuration) } ?? route.transportMode.title
             return (route.transportMode.title, subtitle, route.tint)
         case .liveRoute:
-            return (String(localized: "Live route tracking"), String(localized: "Now"), MovesPalette.routeTracking)
+            let title = liveRouteSnapshot?.isFollowedTrip == true
+                ? String(localized: "Trip in progress")
+                : String(localized: "Route tracking")
+            return (title, String(localized: "Now"), MovesPalette.routeTracking)
         case .sample:
             return (String(localized: "Captured location"), String(localized: "Now"), MovesPalette.start)
         case nil:
@@ -2545,8 +2548,10 @@ enum TimelineEntry: Identifiable {
             let start = segment.startPlace.map(Self.placeTitle) ?? String(localized: "Unknown start")
             let end = segment.endPlace.map(Self.placeTitle) ?? String(localized: "Unknown destination")
             return "\(start) to \(end)"
-        case .liveRoute:
-            return String(localized: "Live route tracking")
+        case .liveRoute(let snapshot):
+            return snapshot.isFollowedTrip
+                ? String(localized: "Trip in progress")
+                : String(localized: "Route tracking")
         case .sample(let location, _, let resolvedName):
             if let resolvedName,
                !resolvedName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -2602,6 +2607,12 @@ enum TimelineEntry: Identifiable {
             let distance = Measurement(value: max(snapshot.distanceMeters, 0), unit: UnitLength.meters)
                 .formatted(.measurement(width: .abbreviated, usage: .road))
 
+            if snapshot.isFollowedTrip {
+                return snapshot.sampleCount == 0
+                    ? String(localized: "Just set off")
+                    : "\(duration)   \(distance)"
+            }
+
             if snapshot.sampleCount == 0 {
                 return String(localized: "Waiting for the first live GPS fix")
             }
@@ -2652,7 +2663,9 @@ enum TimelineEntry: Identifiable {
             return details.isEmpty ? nil : details.joined(separator: "   ")
         case .liveRoute(let snapshot):
             if snapshot.sampleCount == 0 {
-                return String(localized: "Tracking will start as soon as GPS provides the first fix.")
+                return snapshot.isFollowedTrip
+                    ? nil
+                    : String(localized: "Tracking will start as soon as GPS provides the first fix.")
             }
             return String(localized: "Last update \(snapshot.latestDate.formatted(date: .omitted, time: .shortened))")
         case .sample(_, let sampleCount, _):

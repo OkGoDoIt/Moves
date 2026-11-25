@@ -86,6 +86,8 @@ struct LiveRouteTrackingSnapshot {
     let sampleCount: Int
     let distanceMeters: CLLocationDistance
     let coordinates: [CLLocationCoordinate2D]
+    /// True for a trip everyday tracking is following; false for manual Route Tracking.
+    var isFollowedTrip = false
 
     var id: String {
         [
@@ -146,22 +148,31 @@ func liveRouteTrackingSnapshot(
     for dayTimeline: DayTimeline,
     captureManager: MovesLocationCaptureManager
 ) -> LiveRouteTrackingSnapshot? {
-    guard let endsAt = captureManager.temporaryRouteTrackingEndsAt, endsAt > .now else {
+    let routeTrackingEndsAt = captureManager.temporaryRouteTrackingEndsAt.flatMap { $0 > .now ? $0 : nil }
+    // A trip everyday tracking is following shows the same way, on today's page only.
+    let followedSince = routeTrackingEndsAt == nil && Calendar.autoupdatingCurrent.isDateInToday(dayTimeline.dayStart)
+        ? captureManager.followedTripStartedAt
+        : nil
+    guard routeTrackingEndsAt != nil || followedSince != nil else {
         return nil
     }
+    let sessionStartedAt = routeTrackingEndsAt != nil
+        ? captureManager.temporaryRouteTrackingStartedAt
+        : followedSince
 
     let sortedSamples = dayTimeline.samples.sorted(by: { $0.timestamp < $1.timestamp })
     let preferredSamples = sortedSamples.preferredRouteDisplaySamples
 
     let liveSamples = liveRouteSessionSamples(
         from: preferredSamples,
-        startedAt: captureManager.temporaryRouteTrackingStartedAt
+        startedAt: sessionStartedAt
     )
 
-    let startDate = captureManager.temporaryRouteTrackingStartedAt
+    let startDate = sessionStartedAt
         ?? liveSamples.first?.timestamp
         ?? captureManager.lastCaptureAt
-        ?? endsAt
+        ?? routeTrackingEndsAt
+        ?? .now
     let latestDate = liveSamples.last?.timestamp ?? captureManager.lastCaptureAt ?? startDate
     let anchorCoordinate = liveRouteAnchorCoordinate(for: dayTimeline, startDate: startDate)
 
@@ -180,7 +191,8 @@ func liveRouteTrackingSnapshot(
         latestDate: latestDate,
         sampleCount: liveSamples.count,
         distanceMeters: routeDistance(for: coordinates),
-        coordinates: coordinates
+        coordinates: coordinates,
+        isFollowedTrip: followedSince != nil
     )
 }
 
