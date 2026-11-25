@@ -6,6 +6,7 @@ import SwiftUI
 struct PhotosSettingsCard: View {
     @EnvironmentObject private var photoLibrary: PhotoLibraryController
     @AppStorage(PhotoLibrarySettings.showOnVisitsKey) private var showOnVisits = true
+    @AppStorage(PhotoLibrarySettings.usesCameraPhotosAsFixesKey) private var usesCameraPhotos = true
 
     let firstRecordedDayStart: Date?
 
@@ -19,6 +20,25 @@ struct PhotosSettingsCard: View {
                         Task { await enablePhotos() }
                     }
                 }
+
+            Toggle("Use photos I take for location", isOn: $usesCameraPhotos)
+                .onChange(of: usesCameraPhotos) { _, isOn in
+                    if isOn {
+                        Task { await enableCameraPhotos() }
+                    }
+                }
+
+            Text("A photo you take with this iPhone adds its location to your timeline. Screenshots and saved photos are left out.")
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if usesCameraPhotos, photoLibrary.hasReadAccess {
+                PhotoFixStatusLine(
+                    status: photoLibrary.fixStatus,
+                    isChecking: photoLibrary.isCheckingRecentPhotos
+                )
+            }
 
             Text(accessExplanation)
                 .font(.system(size: 12, weight: .medium, design: .rounded))
@@ -40,12 +60,21 @@ struct PhotosSettingsCard: View {
             Button {
                 Task { await presentImporter() }
             } label: {
-                HStack(spacing: 12) {
-                    Label("Rebuild history from photos…", systemImage: "clock.arrow.circlepath")
-                    Spacer(minLength: 8)
-                    Image(systemName: "chevron.right")
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 12) {
+                        Label("Rebuild history from photos…", systemImage: "clock.arrow.circlepath")
+                        Spacer(minLength: 8)
+                        Image(systemName: "chevron.right")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    if let job = photoLibrary.historyJob {
+                        PhotoHistoryProgressSummary(
+                            job: job,
+                            isWorking: photoLibrary.isHistoryImportWorking,
+                            timeRemaining: photoLibrary.historyTimeRemaining
+                        )
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
@@ -84,6 +113,13 @@ struct PhotosSettingsCard: View {
         }
     }
 
+    private func enableCameraPhotos() async {
+        let status = await photoLibrary.requestAccess()
+        if status == .denied || status == .restricted {
+            usesCameraPhotos = false
+        }
+    }
+
     private func presentImporter() async {
         if !photoLibrary.hasReadAccess {
             let status = await photoLibrary.requestAccess()
@@ -93,7 +129,177 @@ struct PhotosSettingsCard: View {
     }
 }
 
-/// Date range, preview counts, import progress, and a report. Re-running is idempotent.
+/// Whether new photos are being picked up, and what they added lately.
+struct PhotoFixStatusLine: View {
+    let status: PhotoFixStatus
+    let isChecking: Bool
+
+    var body: some View {
+        // "2 minutes ago" goes stale on a screen left open.
+        TimelineView(.periodic(from: .now, by: 30)) { timeline in
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Image(systemName: isChecking ? "arrow.triangle.2.circlepath" : "checkmark.circle.fill")
+                    .foregroundStyle(isChecking ? Color.secondary : MovesPalette.place)
+                Text(text(at: timeline.date))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .font(.system(size: 12, weight: .semibold, design: .rounded))
+        }
+    }
+
+    private func text(at now: Date) -> String {
+        if isChecking {
+            return String(localized: "Checking for new photos…")
+        }
+        guard let checked = status.lastCheckedAt else {
+            return String(localized: "New photos are checked when you open Moves.")
+        }
+        let checkedAgo = Self.ago(checked, now: now)
+        guard status.recentFixCount > 0, let latest = status.latestFixAt else {
+            return String(localized: "No photos used this week. Last checked \(checkedAgo).")
+        }
+        let count = status.recentFixCount.formatted(.number)
+        let latestAgo = Self.ago(latest, now: now)
+        if status.recentFixCount == 1 {
+            return String(localized: "1 photo used this week, \(latestAgo). Last checked \(checkedAgo).")
+        }
+        return String(localized: "\(count) photos used this week, the latest \(latestAgo). Last checked \(checkedAgo).")
+    }
+
+    private static func ago(_ date: Date, now: Date) -> String {
+        guard now.timeIntervalSince(date) >= 60 else { return String(localized: "just now") }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
+        return formatter.localizedString(for: date, relativeTo: now)
+    }
+}
+
+/// Where a history import stands: a bar for how much is done, a word for whether it is
+/// working, the date it has reached, and how long is left.
+struct PhotoHistoryProgressSummary: View {
+    let job: PhotoHistoryJob
+    let isWorking: Bool
+    let timeRemaining: TimeInterval?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if job.state != .finished {
+                ProgressView(value: job.fractionComplete)
+                    .tint(job.state == .running ? MovesPalette.place : .secondary)
+            }
+            HStack(spacing: 6) {
+                if job.state == .running, isWorking {
+                    ProgressView()
+                        .controlSize(.mini)
+                } else {
+                    Image(systemName: statusSymbol)
+                        .foregroundStyle(statusColor)
+                }
+                Text(headline)
+                    .foregroundStyle(job.state == .failed ? .red : .primary)
+            }
+            .font(.system(size: 13, weight: .semibold, design: .rounded))
+
+            if let reached {
+                Text(reached)
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text(detail)
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+    }
+
+    private var statusSymbol: String {
+        switch job.state {
+        case .running: "clock"
+        case .paused: "pause.circle.fill"
+        case .failed: "exclamationmark.triangle.fill"
+        case .finished: "checkmark.circle.fill"
+        }
+    }
+
+    private var statusColor: Color {
+        switch job.state {
+        case .running, .paused: .secondary
+        case .failed: .red
+        case .finished: MovesPalette.place
+        }
+    }
+
+    private var headline: String {
+        switch job.state {
+        case .running:
+            isWorking ? String(localized: "Importing now") : String(localized: "Starting…")
+        case .paused:
+            String(localized: "Paused")
+        case .failed:
+            String(localized: "Import stopped")
+        case .finished:
+            if let finishedAt = job.finishedAt {
+                String(localized: "Finished \(finishedAt.formatted(date: .abbreviated, time: .shortened))")
+            } else {
+                String(localized: "Finished")
+            }
+        }
+    }
+
+    /// The line that answers "how far back has it got?"
+    private var reached: String? {
+        if job.state == .finished {
+            guard let earliest = job.earliestPhotoAt else { return nil }
+            return String(localized: "Photos imported back to \(earliest.formatted(date: .long, time: .omitted)).")
+        }
+        guard job.cursor < job.rangeEnd else { return nil }
+        return String(localized: "Imported back through \(job.cursor.formatted(date: .long, time: .omitted)).")
+    }
+
+    private var detail: String {
+        if job.state == .finished {
+            return job.report.geotaggedPhotoCount == 0
+                ? String(localized: "No photos with a location in these dates.")
+                : job.report.summary
+        }
+        if let message = job.message {
+            return message
+        }
+        let checked = job.checkedPhotoCount.formatted(.number)
+        let total = job.totalPhotoCount.formatted(.number)
+        let counts = String(localized: "\(checked) of \(total) photos checked")
+        switch job.state {
+        case .running:
+            guard let timeRemaining else {
+                return String(localized: "\(counts). Working out how long is left…")
+            }
+            return "\(Self.remainingText(timeRemaining)) · \(counts)"
+        case .paused:
+            return String(localized: "\(counts). Resume to carry on from here.")
+        case .failed, .finished:
+            return counts
+        }
+    }
+
+    static func remainingText(_ seconds: TimeInterval) -> String {
+        guard seconds >= 60 else { return String(localized: "Less than a minute left") }
+        let formatter = DateComponentsFormatter()
+        formatter.allowedUnits = seconds >= 90 * 60 ? [.hour] : [.minute]
+        formatter.unitsStyle = .full
+        // "About 20 minutes" should not become "19 minutes" a second later.
+        let rounded = seconds >= 90 * 60 ? (seconds / 3_600).rounded() * 3_600 : (seconds / 60).rounded(.up) * 60
+        let duration = formatter.string(from: rounded) ?? ""
+        return String(localized: "About \(duration) left")
+    }
+}
+
+/// Date range, preview counts, import progress, and a report.
+///
+/// The import belongs to the app, not this sheet: closing the sheet or leaving Moves
+/// does not lose it, and it carries on from where it stopped.
 struct PhotoHistoryImportSheet: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var photoLibrary: PhotoLibraryController
@@ -102,6 +308,7 @@ struct PhotoHistoryImportSheet: View {
 
     @State private var rangeStart: Date
     @State private var rangeEnd: Date
+    @State private var includesSavedPhotos = false
     @State private var preview: PhotoHistoryPreview?
     @State private var isLoadingPreview = false
     @State private var previewError: String?
@@ -129,33 +336,10 @@ struct PhotoHistoryImportSheet: View {
                         .font(.system(size: 14, weight: .medium, design: .rounded))
                         .foregroundStyle(.secondary)
 
-                    DatePicker("From", selection: $rangeStart, displayedComponents: .date)
-                    DatePicker("To", selection: $rangeEnd, in: rangeStart..., displayedComponents: .date)
-
-                    if isLoadingPreview {
-                        ProgressView("Counting photos…")
-                    } else if let preview {
-                        Text(preview.summary)
-                            .font(.system(size: 15, weight: .semibold, design: .rounded))
-                    } else if let previewError {
-                        Text(previewError)
-                            .font(.system(size: 13, weight: .medium, design: .rounded))
-                            .foregroundStyle(.red)
-                    }
-
-                    if photoLibrary.isImporting {
-                        ProgressView(value: photoLibrary.importProgress)
-                        Text(photoLibrary.importProgressText)
-                            .font(.system(size: 13, weight: .medium, design: .rounded))
-                            .foregroundStyle(.secondary)
-                    } else if let report = photoLibrary.lastReport {
-                        Text(report.summary)
-                            .font(.system(size: 14, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.green)
-                    } else if let message = photoLibrary.lastErrorMessage {
-                        Text(message)
-                            .font(.system(size: 13, weight: .medium, design: .rounded))
-                            .foregroundStyle(.red)
+                    if let job = photoLibrary.historyJob {
+                        progress(for: job)
+                    } else {
+                        setup
                     }
 
                     Text("Photos never leave this device.")
@@ -168,26 +352,99 @@ struct PhotoHistoryImportSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") { dismiss() }
-                        .disabled(photoLibrary.isImporting)
+                    Button("Close") { close() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    if photoLibrary.isImporting {
-                        Button("Cancel", role: .cancel) {
-                            photoLibrary.cancelImport()
-                        }
-                    } else {
+                    if photoLibrary.historyJob == nil {
                         Button("Import") {
-                            photoLibrary.importHistory(in: selectedInterval)
+                            photoLibrary.startHistoryImport(
+                                in: selectedInterval,
+                                includesSavedPhotos: includesSavedPhotos
+                            )
                         }
-                        .disabled(preview?.geotaggedPhotoCount == 0)
+                        .disabled(preview?.geotaggedPhotoCount == 0 || photoLibrary.isPreparingHistoryImport)
                     }
                 }
             }
-            .task(id: rangeKey) {
+            .task(id: previewKey) {
                 await refreshPreview()
             }
         }
+    }
+
+    @ViewBuilder
+    private var setup: some View {
+        DatePicker("From", selection: $rangeStart, displayedComponents: .date)
+        DatePicker("To", selection: $rangeEnd, in: rangeStart..., displayedComponents: .date)
+
+        Toggle("Include saved and imported photos", isOn: $includesSavedPhotos)
+
+        Text("Photos you took with your camera are always read. Saved and imported photos can carry someone else's location.")
+            .font(.system(size: 12, weight: .medium, design: .rounded))
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+        if isLoadingPreview {
+            ProgressView("Counting photos…")
+        } else if let preview {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(preview.geotaggedPhotoCount == 0 ? String(localized: "No photos with a location in these dates") : preview.summary)
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                if preview.skippedPhotoCount > 0 {
+                    Text("\(preview.skippedPhotoCount.formatted(.number)) saved or imported photos left out")
+                        .font(.system(size: 13, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        } else if let previewError {
+            Text(previewError)
+                .font(.system(size: 13, weight: .medium, design: .rounded))
+                .foregroundStyle(.red)
+        }
+
+        if let message = photoLibrary.lastErrorMessage {
+            Text(message)
+                .font(.system(size: 13, weight: .medium, design: .rounded))
+                .foregroundStyle(.red)
+        }
+    }
+
+    @ViewBuilder
+    private func progress(for job: PhotoHistoryJob) -> some View {
+        PhotoHistoryProgressSummary(
+            job: job,
+            isWorking: photoLibrary.isHistoryImportWorking,
+            timeRemaining: photoLibrary.historyTimeRemaining
+        )
+
+        switch job.state {
+        case .running:
+            Text("You can close this and keep using Moves. If Moves is closed, the import carries on from here the next time you open it.")
+                .font(.system(size: 13, weight: .medium, design: .rounded))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Pause") { photoLibrary.pauseHistoryImport() }
+                .buttonStyle(.bordered)
+        case .paused, .failed:
+            let buttons = Group {
+                Button(job.state == .failed ? "Try Again" : "Resume") { photoLibrary.resumeHistoryImport() }
+                    .buttonStyle(.borderedProminent)
+                Button("Choose Other Dates") { photoLibrary.clearHistoryImport() }
+                    .buttonStyle(.bordered)
+            }
+            // Side by side where they fit, stacked on a narrow phone or at large text sizes.
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) { buttons }
+                VStack(alignment: .leading, spacing: 10) { buttons }
+            }
+        case .finished:
+            Button("Import Another Range") { photoLibrary.clearHistoryImport() }
+                .buttonStyle(.bordered)
+        }
+    }
+
+    private func close() {
+        dismiss()
     }
 
     private var selectedInterval: DateInterval {
@@ -197,15 +454,22 @@ struct PhotoHistoryImportSheet: View {
         return DateInterval(start: start, end: end)
     }
 
-    private var rangeKey: String {
-        "\(rangeStart.timeIntervalSince1970)|\(rangeEnd.timeIntervalSince1970)"
+    private var previewKey: String {
+        let isSettingUp = photoLibrary.historyJob == nil
+        return "\(rangeStart.timeIntervalSince1970)|\(rangeEnd.timeIntervalSince1970)|\(includesSavedPhotos)|\(isSettingUp)"
     }
 
     private func refreshPreview() async {
+        guard photoLibrary.historyJob == nil else { return }
         isLoadingPreview = true
         previewError = nil
         do {
-            preview = try await photoLibrary.previewHistory(in: selectedInterval)
+            preview = try await photoLibrary.previewHistory(
+                in: selectedInterval,
+                includesSavedPhotos: includesSavedPhotos
+            )
+        } catch is CancellationError {
+            return
         } catch {
             preview = nil
             previewError = error.localizedDescription

@@ -4,7 +4,10 @@ import SwiftData
 
 /// Counts shown before a photo-history import starts writing.
 struct PhotoHistoryPreview: Sendable, Equatable {
+    /// Photos the import will read.
     var geotaggedPhotoCount = 0
+    /// Saved, received, or imported photos the import leaves out.
+    var skippedPhotoCount = 0
     var estimatedVisitCount = 0
     var dayCount = 0
 
@@ -17,7 +20,7 @@ struct PhotoHistoryPreview: Sendable, Equatable {
 }
 
 /// Result of attaching photos and, optionally, creating photo-inferred days.
-struct PhotoHistoryImportReport: Sendable, Equatable {
+struct PhotoHistoryImportReport: Sendable, Equatable, Codable {
     var geotaggedPhotoCount = 0
     var attachedPhotoCount = 0
     var createdVisitCount = 0
@@ -38,9 +41,19 @@ struct PhotoHistoryImportReport: Sendable, Equatable {
         if sensorDaySkipCount > 0 {
             parts.append("left \(sensorDaySkipCount.formatted(.number)) recorded day\(sensorDaySkipCount == 1 ? "" : "s") unchanged")
         }
-        var text = parts.joined(separator: ", ") + "."
-        text += " Photos stay on this device."
-        return text
+        return ListFormatter.localizedString(byJoining: parts) + "."
+    }
+
+    static func + (lhs: Self, rhs: Self) -> Self {
+        Self(
+            geotaggedPhotoCount: lhs.geotaggedPhotoCount + rhs.geotaggedPhotoCount,
+            attachedPhotoCount: lhs.attachedPhotoCount + rhs.attachedPhotoCount,
+            createdVisitCount: lhs.createdVisitCount + rhs.createdVisitCount,
+            reusedVisitCount: lhs.reusedVisitCount + rhs.reusedVisitCount,
+            createdMoveCount: lhs.createdMoveCount + rhs.createdMoveCount,
+            sensorDaySkipCount: lhs.sensorDaySkipCount + rhs.sensorDaySkipCount,
+            dayOnlyAttachmentCount: lhs.dayOnlyAttachmentCount + rhs.dayOnlyAttachmentCount
+        )
     }
 }
 
@@ -101,6 +114,10 @@ struct PhotoHistoryImporter {
         var planeSpeedKilometersPerHour: Double = 200
         /// Skip a connecting move when the stays are closer than this.
         var minimumMoveDistance: CLLocationDistance = 80
+        /// Two stays further apart in time than this are separate outings, not one trip.
+        var maximumMoveGap: TimeInterval = 24 * 60 * 60
+        /// A stop the person removed is not rebuilt from photos taken this close to it.
+        var removedStopMatchDistance: CLLocationDistance = 200
 
         init() {}
     }
@@ -141,13 +158,16 @@ struct PhotoHistoryImporter {
     static func preview(
         assets: [PhotoAssetDescriptor],
         in interval: DateInterval,
+        includesSavedPhotos: Bool = false,
         configuration: Configuration = Configuration()
     ) -> PhotoHistoryPreview {
-        let filtered = Self.geotagged(assets, in: interval)
+        let geotagged = Self.geotagged(assets, in: interval)
+        let filtered = includesSavedPhotos ? geotagged : geotagged.filter(\.isCameraCapture)
         let stays = clusterStays(filtered, configuration: configuration)
         let days = Set(stays.map { DayTimeline.makeDayKey(for: $0.arrivalDate) })
         return PhotoHistoryPreview(
             geotaggedPhotoCount: filtered.count,
+            skippedPhotoCount: geotagged.count - filtered.count,
             estimatedVisitCount: stays.count,
             dayCount: days.count
         )
@@ -168,11 +188,10 @@ struct PhotoHistoryImporter {
             let points = window.compactMap(\.locationLogPoint)
             let timeline = segmenter.segment(points)
             for stay in timeline.stays {
-                let stayAssets = window.filter { asset in
-                    stay.points.contains { point in
-                        abs(point.timestamp.timeIntervalSince(asset.capturedAt)) < 0.75
-                    }
-                }
+                // Points keep the capture time they were made from, so a set finds a stay's
+                // photos without comparing every photo with every point.
+                let stayTimes = Set(stay.points.map(\.timestamp))
+                let stayAssets = window.filter { stayTimes.contains($0.capturedAt) }
                 let qualifyingCount = stayAssets.count >= configuration.minimumStayPhotoCount
                 let qualifyingDuration = stay.duration >= configuration.minimumStayDuration
                 guard qualifyingCount || qualifyingDuration, !stayAssets.isEmpty else {
@@ -229,111 +248,118 @@ struct PhotoHistoryImporter {
         in interval: DateInterval,
         progress: (@Sendable (Double, String) -> Void)? = nil
     ) throws -> PhotoHistoryImportReport {
-        let filtered = Self.geotagged(assets, in: interval)
-        var report = PhotoHistoryImportReport(geotaggedPhotoCount: filtered.count)
-        guard !filtered.isEmpty else {
-            progress?(1, "Done")
-            return report
-        }
-
-        progress?(0.05, "Grouping photos…")
-        let stays = Self.clusterStays(filtered, configuration: configuration)
-        var attachedIDs = try existingAttachmentIdentifiers()
-        var usedAssetIDs = Set<String>()
-        var stayVisits: [VisitPlace?] = []
-        stayVisits.reserveCapacity(stays.count)
-        let total = Double(max(stays.count, 1))
-
-        for (index, stay) in stays.enumerated() {
-            progress?(0.08 + 0.75 * Double(index) / total, "Rebuilding timeline…")
-            let (visit, created, skippedSensorDay) = try persistStay(stay)
-            stayVisits.append(visit)
-            if skippedSensorDay {
-                report.sensorDaySkipCount += 1
-            }
-            if created {
-                report.createdVisitCount += 1
-            } else if visit != nil {
-                report.reusedVisitCount += 1
-            }
-            for asset in stay.assets {
-                let attached = try attach(
-                    asset,
-                    to: visit,
-                    day: try timeline(for: asset.capturedAt),
-                    attachedIDs: &attachedIDs
-                )
-                if attached {
-                    report.attachedPhotoCount += 1
-                    if visit == nil {
-                        report.dayOnlyAttachmentCount += 1
-                    }
-                }
-                usedAssetIDs.insert(asset.localIdentifier)
-            }
-        }
-
-        progress?(0.88, "Connecting visits…")
-        for index in stayVisits.indices.dropFirst() {
-            guard let start = stayVisits[index - 1], let end = stayVisits[index] else {
-                continue
-            }
-            if try insertMoveIfNeeded(from: start, to: end, stay: stays[index - 1], next: stays[index]) {
-                report.createdMoveCount += 1
-            }
-        }
-
-        progress?(0.94, "Attaching remaining photos…")
-        for asset in filtered where !usedAssetIDs.contains(asset.localIdentifier) {
-            let visit = try matchingVisit(for: asset)
-            let attached = try attach(
-                asset,
-                to: visit,
-                day: try timeline(for: asset.capturedAt),
-                attachedIDs: &attachedIDs
-            )
-            if attached {
-                report.attachedPhotoCount += 1
-                if visit == nil {
-                    report.dayOnlyAttachmentCount += 1
-                }
-            }
-        }
-
-        progress?(0.99, "Saving…")
-        try repository.saveIfNeeded()
-        NotificationCenter.default.post(name: .movesLocationSamplesDidChange, object: nil)
-        NotificationCenter.default.post(name: .movesPhotoLibraryDidChange, object: nil)
+        progress?(0.05, "Rebuilding timeline…")
+        let report = try importStep(Self.geotagged(assets, in: interval))
+        Self.announceChanges()
         RouteMatchBackgroundTask.scheduleAfterImport()
         progress?(1, "Done")
         return report
     }
 
+    /// Writes one batch of photos and saves once.
+    ///
+    /// A long import calls this for one batch after another. Everything a batch needs is
+    /// read up front for its own dates, so a batch costs the same in the first year as the
+    /// twentieth, and a batch that is interrupted leaves nothing half-written: repeating it
+    /// finds the visits and attachments it already made.
+    @discardableResult
+    func importStep(_ assets: [PhotoAssetDescriptor]) throws -> PhotoHistoryImportReport {
+        let geotagged = assets
+            .filter { $0.coordinate != nil }
+            .sorted { $0.capturedAt < $1.capturedAt }
+        var report = PhotoHistoryImportReport(geotaggedPhotoCount: geotagged.count)
+        guard let first = geotagged.first, let last = geotagged.last else { return report }
+
+        let range = DateInterval(start: first.capturedAt, end: last.capturedAt)
+        let stays = Self.clusterStays(geotagged, configuration: configuration)
+
+        try repository.performBulkImportStep(covering: range) {
+            var step = try Step(range: range, configuration: configuration, context: modelContext)
+            var usedAssetIDs = Set<String>()
+            var previous = step.latestPhotoInferredVisit(before: stays.first?.arrivalDate ?? range.start)
+
+            for stay in stays {
+                if Task.isCancelled {
+                    modelContext.rollback()
+                    throw CancellationError()
+                }
+                let (visit, created, skippedSensorDay) = try persistStay(stay, step: &step)
+                if skippedSensorDay {
+                    report.sensorDaySkipCount += 1
+                }
+                if created {
+                    report.createdVisitCount += 1
+                } else if visit != nil {
+                    report.reusedVisitCount += 1
+                }
+                for asset in stay.assets {
+                    if try attach(asset, to: visit, step: &step) {
+                        report.attachedPhotoCount += 1
+                        if visit == nil {
+                            report.dayOnlyAttachmentCount += 1
+                        }
+                    }
+                    usedAssetIDs.insert(asset.localIdentifier)
+                }
+                if let visit {
+                    if let previous, try insertMoveIfNeeded(from: previous, to: visit, step: &step) {
+                        report.createdMoveCount += 1
+                    }
+                    previous = visit
+                }
+            }
+            // An import that works backward has already made the visits that follow this batch.
+            if let last = previous, last.origin == .photoInferred,
+               let following = step.earliestPhotoInferredVisit(after: last),
+               try insertMoveIfNeeded(from: last, to: following, step: &step) {
+                report.createdMoveCount += 1
+            }
+
+            for asset in geotagged where !usedAssetIDs.contains(asset.localIdentifier) {
+                let visit = step.matchingVisit(for: asset)
+                if try attach(asset, to: visit, step: &step) {
+                    report.attachedPhotoCount += 1
+                    if visit == nil {
+                        report.dayOnlyAttachmentCount += 1
+                    }
+                }
+            }
+
+            try repository.saveIfNeeded()
+        }
+        return report
+    }
+
     /// Attaches newly seen geotagged photos to matching visits or to the day.
     @discardableResult
-    func attachPhotos(
-        _ assets: [PhotoAssetDescriptor],
-        attachedIDs: Set<String>? = nil
-    ) throws -> Int {
-        var known = try attachedIDs ?? existingAttachmentIdentifiers()
+    func attachPhotos(_ assets: [PhotoAssetDescriptor]) throws -> Int {
+        let geotagged = assets
+            .filter { $0.coordinate != nil }
+            .sorted { $0.capturedAt < $1.capturedAt }
+        guard let first = geotagged.first, let last = geotagged.last else { return 0 }
+
+        var step = try Step(
+            range: DateInterval(start: first.capturedAt, end: last.capturedAt),
+            configuration: configuration,
+            context: modelContext
+        )
         var attached = 0
-        for asset in assets where asset.coordinate != nil {
-            let visit = try matchingVisit(for: asset)
-            if try attach(
-                asset,
-                to: visit,
-                day: try timeline(for: asset.capturedAt),
-                attachedIDs: &known
-            ) {
+        for asset in geotagged {
+            if try attach(asset, to: step.matchingVisit(for: asset), step: &step) {
                 attached += 1
             }
         }
         if attached > 0 {
             try repository.saveIfNeeded()
-            NotificationCenter.default.post(name: .movesLocationSamplesDidChange, object: nil)
-            NotificationCenter.default.post(name: .movesPhotoLibraryDidChange, object: nil)
+            Self.announceChanges()
         }
         return attached
+    }
+
+    /// Tells open screens that photo-built visits or attachments changed.
+    static func announceChanges() {
+        NotificationCenter.default.post(name: .movesLocationSamplesDidChange, object: nil)
+        NotificationCenter.default.post(name: .movesPhotoLibraryDidChange, object: nil)
     }
 
     // MARK: - Clustering helpers
@@ -394,8 +420,18 @@ struct PhotoHistoryImporter {
         to end: PhotoHistoryStay,
         configuration: Configuration
     ) -> TransportMode {
-        let distance = LocationLogGeometry.distance(from: start.coordinate, to: end.coordinate)
-        let duration = end.arrivalDate.timeIntervalSince(start.departureDate)
+        transportMode(
+            distance: LocationLogGeometry.distance(from: start.coordinate, to: end.coordinate),
+            duration: end.arrivalDate.timeIntervalSince(start.departureDate),
+            configuration: configuration
+        )
+    }
+
+    static func transportMode(
+        distance: CLLocationDistance,
+        duration: TimeInterval,
+        configuration: Configuration
+    ) -> TransportMode {
         guard duration > 0 else { return .unknown }
         let kilometersPerHour = (distance / 1_000) / (duration / 3_600)
         return AutomaticTransportModes.load().allowedMode(
@@ -405,21 +441,179 @@ struct PhotoHistoryImporter {
 
     // MARK: - Write path
 
+    /// What one batch reads once instead of asking the store about every photo.
+    private struct Step {
+        let configuration: Configuration
+        /// Visits that could overlap the batch, ordered by arrival.
+        private(set) var visits: [VisitPlace]
+        var attachedIDs: Set<String>
+        var protectedDays: [String: Bool] = [:]
+        /// The first and last fix stored for a visit made in this batch.
+        var endpointSamples: [UUID: (first: LocationSample, last: LocationSample)] = [:]
+        private let removedStops: [(interval: DateInterval, coordinate: CLLocationCoordinate2D)]
+
+        /// A visit from a week earlier can still be open over the batch's first photo.
+        private static let visitLookback: TimeInterval = 8 * 24 * 60 * 60
+
+        init(range: DateInterval, configuration: Configuration, context: ModelContext) throws {
+            self.configuration = configuration
+            let slack = configuration.visitMatchSlack
+
+            let visitsFrom = range.start.addingTimeInterval(-Self.visitLookback)
+            let visitsThrough = range.end.addingTimeInterval(slack + configuration.maximumMoveGap)
+            visits = try context.fetch(
+                FetchDescriptor<VisitPlace>(
+                    predicate: #Predicate { $0.arrivalDate >= visitsFrom && $0.arrivalDate <= visitsThrough },
+                    sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .forward)]
+                )
+            )
+
+            let photosFrom = range.start.addingTimeInterval(-1)
+            let photosThrough = range.end.addingTimeInterval(1)
+            var attachments = FetchDescriptor<PhotoAttachment>(
+                predicate: #Predicate { $0.capturedAt >= photosFrom && $0.capturedAt <= photosThrough }
+            )
+            attachments.propertiesToFetch = [\.assetLocalIdentifier]
+            attachedIDs = Set(try context.fetch(attachments).map(\.assetLocalIdentifier))
+
+            let removedFrom = range.start
+            let removedThrough = range.end
+            removedStops = try context.fetch(
+                FetchDescriptor<RemovedTimelineSpan>(
+                    predicate: #Predicate { $0.endDate >= removedFrom && $0.startDate <= removedThrough }
+                )
+            )
+            .filter { $0.kind == .stop }
+            .map { span in
+                (
+                    DateInterval(start: span.startDate, end: max(span.endDate, span.startDate)),
+                    CLLocationCoordinate2D(latitude: span.latitude, longitude: span.longitude)
+                )
+            }
+        }
+
+        /// Visits whose time range touches the stay, whichever day they are filed under: a
+        /// hotel visit from Monday covers Tuesday's photos though Tuesday has no rows.
+        func visitsOverlapping(_ stay: PhotoHistoryStay) -> [VisitPlace] {
+            let slack = configuration.visitMatchSlack
+            let windowEnd = stay.departureDate.addingTimeInterval(slack)
+            return visits(arrivingFrom: stay.arrivalDate.addingTimeInterval(-Self.visitLookback), through: windowEnd)
+                .filter { place in
+                    PhotoHistoryImporter.timeRangesOverlap(
+                        startA: stay.arrivalDate.addingTimeInterval(-slack),
+                        endA: windowEnd,
+                        startB: place.arrivalDate,
+                        endB: place.departureDate ?? place.outgoingMoves.map(\.startDate).min() ?? .distantFuture
+                    )
+                }
+        }
+
+        func matchingVisit(for asset: PhotoAssetDescriptor) -> VisitPlace? {
+            guard let coordinate = asset.coordinate else { return nil }
+            let slack = configuration.visitMatchSlack
+            let radius = configuration.visitMatchRadius
+            return visits(
+                arrivingFrom: asset.capturedAt.addingTimeInterval(-Self.visitLookback),
+                through: asset.capturedAt.addingTimeInterval(slack)
+            )
+            .filter { place in
+                let start = place.arrivalDate.addingTimeInterval(-slack)
+                let end = (place.departureDate ?? .distantFuture).addingTimeInterval(slack)
+                return asset.capturedAt >= start
+                    && asset.capturedAt <= end
+                    && LocationLogGeometry.distance(from: place.coordinate, to: coordinate) <= radius
+            }
+            .min { lhs, rhs in
+                LocationLogGeometry.distance(from: coordinate, to: lhs.coordinate)
+                    < LocationLogGeometry.distance(from: coordinate, to: rhs.coordinate)
+            }
+        }
+
+        /// The photo-built visit a batch continues from, so a trip that spans two batches
+        /// is still joined.
+        func latestPhotoInferredVisit(before date: Date) -> VisitPlace? {
+            visits[..<firstIndex(arrivingAtOrAfter: date)].last { $0.origin == .photoInferred }
+        }
+
+        func earliestPhotoInferredVisit(after visit: VisitPlace) -> VisitPlace? {
+            let departure = visit.departureDate ?? visit.arrivalDate
+            return visits[firstIndex(arrivingAtOrAfter: departure)...].first {
+                $0.origin == .photoInferred && $0.id != visit.id
+            }
+        }
+
+        func wasRemoved(_ stay: PhotoHistoryStay) -> Bool {
+            removedStops.contains { removed in
+                removed.interval.start < stay.departureDate.addingTimeInterval(1)
+                    && removed.interval.end > stay.arrivalDate.addingTimeInterval(-1)
+                    && LocationLogGeometry.distance(from: stay.coordinate, to: removed.coordinate)
+                        <= configuration.removedStopMatchDistance
+            }
+        }
+
+        mutating func insert(_ visit: VisitPlace) {
+            visits.insert(visit, at: firstIndex(arrivingAtOrAfter: visit.arrivalDate))
+        }
+
+        /// Call after moving a visit's arrival so later lookups still find it in order.
+        mutating func restoreOrder() {
+            visits.sort { $0.arrivalDate < $1.arrivalDate }
+        }
+
+        private func visits(arrivingFrom start: Date, through end: Date) -> ArraySlice<VisitPlace> {
+            let lower = firstIndex(arrivingAtOrAfter: start)
+            var upper = lower
+            while upper < visits.count, visits[upper].arrivalDate <= end {
+                upper += 1
+            }
+            return visits[lower..<upper]
+        }
+
+        private func firstIndex(arrivingAtOrAfter date: Date) -> Int {
+            var low = 0
+            var high = visits.count
+            while low < high {
+                let middle = (low + high) / 2
+                if visits[middle].arrivalDate < date {
+                    low = middle + 1
+                } else {
+                    high = middle
+                }
+            }
+            return low
+        }
+    }
+
     private func persistStay(
-        _ stay: PhotoHistoryStay
+        _ stay: PhotoHistoryStay,
+        step: inout Step
     ) throws -> (visit: VisitPlace?, created: Bool, skippedSensorDay: Bool) {
-        let day = try timeline(for: stay.arrivalDate)
-        let overlapping = try visitsOverlapping(stay)
+        let day = try repository.dayTimeline(for: stay.arrivalDate)
+        let overlapping = step.visitsOverlapping(stay)
         let match = matchingVisit(for: stay, among: overlapping)
-        if day.isProtectedFromPhotoBackfill || overlapping.contains(where: { $0.origin != .photoInferred }) {
+        if isProtected(day, step: &step) || overlapping.contains(where: { $0.origin != .photoInferred }) {
             return (match, false, true)
         }
 
         if let existing = match {
             if existing.origin == .photoInferred {
+                let arrival = existing.arrivalDate
                 extendPhotoInferredVisit(existing, with: stay)
+                if existing.arrivalDate != arrival {
+                    step.restoreOrder()
+                }
+                // Photos the visit did not have before bring their fixes with them.
+                _ = try repository.appendSamples(
+                    from: stay.assets.compactMap(\.locationLogPoint).map(\.location),
+                    source: .photoLibrary
+                )
             }
             return (existing, false, false)
+        }
+
+        // Removing a stop is a correction, and a correction outlasts every later import.
+        if step.wasRemoved(stay) {
+            return (nil, false, false)
         }
 
         let visit = VisitPlace(
@@ -432,9 +626,24 @@ struct PhotoHistoryImporter {
         visit.origin = .photoInferred
         visit.dayTimeline = day
         modelContext.insert(visit)
-        try insertSamples(for: stay)
+        step.insert(visit)
+
+        let locations = stay.assets.compactMap(\.locationLogPoint).map(\.location)
+        let samples = try repository.appendSamples(from: locations, source: .photoLibrary)
+        if let first = samples.first, let last = samples.last {
+            step.endpointSamples[visit.id] = (first, last)
+        }
         try repository.applyPlaceLearning(to: visit)
         return (visit, true, false)
+    }
+
+    private func isProtected(_ day: DayTimeline, step: inout Step) -> Bool {
+        if let known = step.protectedDays[day.dayKey] {
+            return known
+        }
+        let protected = day.isProtectedFromPhotoBackfill
+        step.protectedDays[day.dayKey] = protected
+        return protected
     }
 
     private func extendPhotoInferredVisit(_ visit: VisitPlace, with stay: PhotoHistoryStay) {
@@ -451,39 +660,41 @@ struct PhotoHistoryImporter {
         }
     }
 
+    /// Joins two photo-built visits with an estimated trip when they belong to one outing.
     private func insertMoveIfNeeded(
         from start: VisitPlace,
         to end: VisitPlace,
-        stay: PhotoHistoryStay,
-        next: PhotoHistoryStay
+        step: inout Step
     ) throws -> Bool {
-        guard start.origin == .photoInferred, end.origin == .photoInferred else {
+        guard start.id != end.id, start.origin == .photoInferred, end.origin == .photoInferred else {
             return false
         }
-        guard start.dayTimeline?.isProtectedFromPhotoBackfill != true,
-              end.dayTimeline?.isProtectedFromPhotoBackfill != true
-        else {
-            return false
-        }
-        guard let logMove = Self.makeMove(from: stay, to: next, configuration: configuration) else {
-            return false
-        }
+        let startDate = start.departureDate ?? start.arrivalDate
+        let endDate = end.arrivalDate
+        let gap = endDate.timeIntervalSince(startDate)
+        guard gap >= 0, gap <= configuration.maximumMoveGap else { return false }
+
+        let distance = LocationLogGeometry.distance(from: start.coordinate, to: end.coordinate)
+        guard distance >= configuration.minimumMoveDistance else { return false }
+
+        if let startDay = start.dayTimeline, isProtected(startDay, step: &step) { return false }
+        if let endDay = end.dayTimeline, isProtected(endDay, step: &step) { return false }
         if start.outgoingMoves.contains(where: { move in
             move.endPlace?.id == end.id && move.origin == .photoInferred
         }) {
             return false
         }
 
-        let samples = try repository.appendSamples(
-            from: logMove.points.map(\.location),
-            source: .photoLibrary
-        )
         let move = MoveSegment(
-            dedupeKey: "photo-\(start.id.uuidString)-\(end.id.uuidString)-\(Int(logMove.startDate.timeIntervalSince1970))",
-            startDate: logMove.startDate,
-            endDate: logMove.endDate,
-            transportMode: logMove.transportMode,
-            distanceMeters: logMove.distanceMeters,
+            dedupeKey: "photo-\(start.id.uuidString)-\(end.id.uuidString)-\(Int(startDate.timeIntervalSince1970))",
+            startDate: startDate,
+            endDate: endDate,
+            transportMode: Self.transportMode(
+                distance: distance,
+                duration: gap,
+                configuration: configuration
+            ),
+            distanceMeters: distance,
             stepCount: nil
         )
         move.origin = .photoInferred
@@ -494,9 +705,9 @@ struct PhotoHistoryImporter {
         move.startPlace = start
         move.endPlace = end
         move.dayTimeline = start.dayTimeline ?? end.dayTimeline
-        for sample in samples {
-            sample.moveSegment = move
-        }
+        // The last photo at one stop and the first at the next are the trip's two fixes.
+        step.endpointSamples[start.id]?.last.moveSegment = move
+        step.endpointSamples[end.id]?.first.moveSegment = move
         modelContext.insert(move)
         return true
     }
@@ -505,14 +716,9 @@ struct PhotoHistoryImporter {
     private func attach(
         _ asset: PhotoAssetDescriptor,
         to visit: VisitPlace?,
-        day: DayTimeline,
-        attachedIDs: inout Set<String>
+        step: inout Step
     ) throws -> Bool {
-        guard !attachedIDs.contains(asset.localIdentifier) else { return false }
-        if try attachment(for: asset.localIdentifier) != nil {
-            attachedIDs.insert(asset.localIdentifier)
-            return false
-        }
+        guard step.attachedIDs.insert(asset.localIdentifier).inserted else { return false }
 
         let attachment = PhotoAttachment(
             assetLocalIdentifier: asset.localIdentifier,
@@ -521,36 +727,9 @@ struct PhotoHistoryImporter {
             longitude: asset.longitude
         )
         attachment.visitPlace = visit
-        attachment.dayTimeline = visit?.dayTimeline ?? day
+        attachment.dayTimeline = try visit?.dayTimeline ?? repository.dayTimeline(for: asset.capturedAt)
         modelContext.insert(attachment)
-        attachedIDs.insert(asset.localIdentifier)
         return true
-    }
-
-    private func insertSamples(for stay: PhotoHistoryStay) throws {
-        let locations = stay.assets.compactMap(\.locationLogPoint).map(\.location)
-        _ = try repository.appendSamples(from: locations, source: .photoLibrary)
-    }
-
-    /// Visits whose time range touches the stay, whichever day they are filed under: a
-    /// hotel visit from Monday covers Tuesday's photos though Tuesday has no rows.
-    private func visitsOverlapping(_ stay: PhotoHistoryStay) throws -> [VisitPlace] {
-        let slack = configuration.visitMatchSlack
-        let windowStart = stay.arrivalDate.addingTimeInterval(-8 * 24 * 60 * 60)
-        let windowEnd = stay.departureDate.addingTimeInterval(slack)
-        let descriptor = FetchDescriptor<VisitPlace>(
-            predicate: #Predicate { place in
-                place.arrivalDate >= windowStart && place.arrivalDate <= windowEnd
-            }
-        )
-        return try modelContext.fetch(descriptor).filter { place in
-            Self.timeRangesOverlap(
-                startA: stay.arrivalDate.addingTimeInterval(-slack),
-                endA: windowEnd,
-                startB: place.arrivalDate,
-                endB: place.departureDate ?? place.outgoingMoves.map(\.startDate).min() ?? .distantFuture
-            )
-        }
     }
 
     private func matchingVisit(for stay: PhotoHistoryStay, among visits: [VisitPlace]) -> VisitPlace? {
@@ -565,76 +744,13 @@ struct PhotoHistoryImporter {
             }
     }
 
-    private func matchingVisit(for asset: PhotoAssetDescriptor) throws -> VisitPlace? {
-        guard let coordinate = asset.coordinate else { return nil }
-        let slack = configuration.visitMatchSlack
-        let windowStart = asset.capturedAt.addingTimeInterval(-8 * 24 * 60 * 60)
-        let windowEnd = asset.capturedAt.addingTimeInterval(slack)
-        let descriptor = FetchDescriptor<VisitPlace>(
-            predicate: #Predicate { place in
-                place.arrivalDate >= windowStart && place.arrivalDate <= windowEnd
-            }
-        )
-        let nearby = try modelContext.fetch(descriptor)
-        return nearby
-            .filter { place in
-                Self.visit(place, matches: asset.capturedAt, coordinate: coordinate, slack: slack, radius: configuration.visitMatchRadius)
-            }
-            .min { lhs, rhs in
-                LocationLogGeometry.distance(from: coordinate, to: lhs.coordinate)
-                    < LocationLogGeometry.distance(from: coordinate, to: rhs.coordinate)
-            }
-    }
-
-    private static func visit(
-        _ place: VisitPlace,
-        matches date: Date,
-        coordinate: CLLocationCoordinate2D,
-        slack: TimeInterval,
-        radius: CLLocationDistance
-    ) -> Bool {
-        let start = place.arrivalDate.addingTimeInterval(-slack)
-        let end = (place.departureDate ?? .distantFuture).addingTimeInterval(slack)
-        guard date >= start, date <= end else { return false }
-        return LocationLogGeometry.distance(from: place.coordinate, to: coordinate) <= radius
-    }
-
-    private static func timeRangesOverlap(
+    fileprivate static func timeRangesOverlap(
         startA: Date,
         endA: Date,
         startB: Date,
         endB: Date
     ) -> Bool {
         min(endA, endB) >= max(startA, startB)
-    }
-
-    private func existingAttachmentIdentifiers() throws -> Set<String> {
-        let rows = try modelContext.fetch(FetchDescriptor<PhotoAttachment>())
-        return Set(rows.map(\.assetLocalIdentifier))
-    }
-
-    private func attachment(for identifier: String) throws -> PhotoAttachment? {
-        var descriptor = FetchDescriptor<PhotoAttachment>(
-            predicate: #Predicate { $0.assetLocalIdentifier == identifier }
-        )
-        descriptor.fetchLimit = 1
-        return try modelContext.fetch(descriptor).first
-    }
-
-    private func timeline(for date: Date) throws -> DayTimeline {
-        let dayKey = DayTimeline.makeDayKey(for: date)
-        var descriptor = FetchDescriptor<DayTimeline>(
-            predicate: #Predicate { timeline in
-                timeline.dayKey == dayKey
-            }
-        )
-        descriptor.fetchLimit = 1
-        if let existing = try modelContext.fetch(descriptor).first {
-            return existing
-        }
-        let timeline = DayTimeline(dayStart: date)
-        modelContext.insert(timeline)
-        return timeline
     }
 }
 
@@ -644,7 +760,7 @@ extension DayTimeline {
     var isProtectedFromPhotoBackfill: Bool {
         places.contains { $0.origin != .photoInferred }
             || moves.contains { $0.origin != .photoInferred }
-            || samples.contains { $0.source != .photoLibrary }
+            || samples.contains { $0.source != .photoLibrary && $0.source != .cameraPhoto }
     }
 }
 

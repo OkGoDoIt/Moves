@@ -78,6 +78,9 @@ enum LocationSampleSource: String, Codable, CaseIterable {
     case lastMile
     /// A geotagged photo from the user's library. Not a route track.
     case photoLibrary
+    /// A photo taken with this phone's camera, checked against the phone's own fixes.
+    /// Unlike `.photoLibrary` history, it counts toward stops and trips.
+    case cameraPhoto
     /// Imported from Google Timeline (Records, Semantic Location History, or on-device JSON).
     case googleTimelineImport
     /// Reserved for a future Arc Timeline importer; stored as a string so existing rows stay valid.
@@ -94,7 +97,8 @@ extension LocationSampleSource {
         case .fileRouteImport, .googleTimelineImport, .arcImport:
             return true
         case .visit, .significantChange, .routeTracking, .watchRouteTracking, .watchSignificantChange,
-             .healthWorkoutRoute, .launchBackfill, .authorizationGrant, .lastMile, .photoLibrary, .continuous:
+             .healthWorkoutRoute, .launchBackfill, .authorizationGrant, .lastMile, .photoLibrary, .cameraPhoto,
+             .continuous:
             return false
         }
     }
@@ -107,7 +111,7 @@ extension LocationSampleSource {
         case .routeTracking: return 4
         case .visit: return 3
         case .watchSignificantChange: return 2
-        case .significantChange: return 2
+        case .significantChange, .cameraPhoto: return 2
         case .authorizationGrant, .photoLibrary: return 1
         case .launchBackfill: return 0
         case .lastMile: return 4
@@ -119,7 +123,7 @@ extension LocationSampleSource {
         switch self {
         case .routeTracking, .watchRouteTracking, .healthWorkoutRoute, .fileRouteImport, .lastMile, .continuous, .googleTimelineImport, .arcImport:
             return true
-        case .visit, .significantChange, .watchSignificantChange, .launchBackfill, .authorizationGrant, .photoLibrary:
+        case .visit, .significantChange, .watchSignificantChange, .launchBackfill, .authorizationGrant, .photoLibrary, .cameraPhoto:
             return false
         }
     }
@@ -128,7 +132,7 @@ extension LocationSampleSource {
         switch self {
         case .healthWorkoutRoute, .watchRouteTracking, .fileRouteImport, .lastMile, .continuous, .googleTimelineImport, .arcImport:
             return true
-        case .routeTracking, .visit, .significantChange, .watchSignificantChange, .launchBackfill, .authorizationGrant, .photoLibrary:
+        case .routeTracking, .visit, .significantChange, .watchSignificantChange, .launchBackfill, .authorizationGrant, .photoLibrary, .cameraPhoto:
             return false
         }
     }
@@ -1936,13 +1940,35 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         return report
     }
 
+    /// Runs one saved step of a long import. The lookup tables cover only `range`, so
+    /// a step costs the same however much history is already stored, and nothing is
+    /// held between steps. Every date `body` writes must fall inside `range`.
+    func performBulkImportStep<T>(covering range: DateInterval, _ body: () throws -> T) throws -> T {
+        try beginBulkImport(covering: range)
+        defer { endBulkImport() }
+        return try body()
+    }
+
+    /// The day a date is filed under, shared with samples written in the same step.
+    func dayTimeline(for date: Date) throws -> DayTimeline {
+        try timeline(for: date)
+    }
+
     /// Loads the lookup tables the bulk importers use to avoid per-record fetches.
-    private func beginBulkImport() throws {
+    private func beginBulkImport(covering range: DateInterval? = nil) throws {
         var keyDescriptor = FetchDescriptor<LocationSample>()
+        var timelineDescriptor = FetchDescriptor<DayTimeline>()
+        if let range {
+            // A day starts up to a day before its last fix, in whichever time zone filed it.
+            let start = range.start.addingTimeInterval(-2 * 24 * 60 * 60)
+            let end = range.end.addingTimeInterval(2 * 24 * 60 * 60)
+            keyDescriptor.predicate = #Predicate { $0.timestamp >= start && $0.timestamp <= end }
+            timelineDescriptor.predicate = #Predicate { $0.dayStart >= start && $0.dayStart <= end }
+        }
         keyDescriptor.propertiesToFetch = [\.dedupeKey]
         archiveImportSampleKeys = Set(try modelContext.fetch(keyDescriptor).map(\.dedupeKey))
 
-        let timelines = try modelContext.fetch(FetchDescriptor<DayTimeline>())
+        let timelines = try modelContext.fetch(timelineDescriptor)
         var cache: [String: DayTimeline] = [:]
         cache.reserveCapacity(timelines.count)
         for timeline in timelines where cache[timeline.dayKey] == nil {

@@ -240,6 +240,8 @@ enum LocationUploadFilter {
         .googleTimelineImport,
         .arcImport,
         .photoLibrary,
+        // A photo fix is one more check on where the phone was, so it stays on the device.
+        .cameraPhoto,
     ]
 
     /// A Health route can be today's workout or years of backfill. This matches how far back

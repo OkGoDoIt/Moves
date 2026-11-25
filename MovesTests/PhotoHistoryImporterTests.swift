@@ -375,7 +375,239 @@ final class PhotoHistoryImporterTests: XCTestCase {
         XCTAssertTrue(try PhotoAttachmentQuery.photos(in: beforeVisit, context: context).isEmpty)
     }
 
+    // MARK: - Resumable import
+
+    func testInterruptedImportResumesToTheSameTimeline() async throws {
+        let assets = libraryAcrossManyDays()
+        let interval = DateInterval(start: epoch.addingTimeInterval(-1), end: epoch.addingTimeInterval(90 * 24 * 3_600))
+
+        // One uninterrupted pass over everything is the reference.
+        let (wholeContext, _) = try makeContext()
+        let camera = assets.filter(\.isCameraCapture)
+        _ = try PhotoHistoryImporter(modelContext: wholeContext, calendar: gmt).importHistory(assets: camera, in: interval)
+        let expected = try snapshot(wholeContext)
+        XCTAssertGreaterThan(expected.visits.count, 10)
+        XCTAssertGreaterThan(expected.moves, 0)
+
+        // The same library in small steps, stopped and restarted along the way.
+        let (_, container) = try makeContext()
+        var runner = PhotoHistoryImportRunner(provider: FakePhotoAssetProvider(assets: assets), container: container)
+        runner.pageSize = 9
+        var job = try await runner.makeJob(in: interval, includesSavedPhotos: false)
+        XCTAssertEqual(job.totalPhotoCount, assets.count)
+
+        var steps = 0
+        while job.state == .running {
+            let saved = job
+            job = try await runner.runStep(saved)
+            if steps.isMultiple(of: 3) {
+                // Moves was closed after the step saved but before its progress was
+                // written down, so the step runs again from the older cursor.
+                job = try await runner.runStep(saved)
+            }
+            // What survives a restart is the job as it is stored.
+            let defaults = UserDefaults(suiteName: "photo-history-\(UUID().uuidString)")!
+            let store = PhotoHistoryJobStore(defaults: defaults)
+            store.save(job)
+            job = try XCTUnwrap(store.load())
+            XCTAssertLessThan(job.cursor, saved.cursor, "Every step reaches further back")
+            steps += 1
+            XCTAssertLessThan(steps, 200)
+        }
+
+        XCTAssertGreaterThan(steps, 5, "The library was imported in several steps")
+        XCTAssertEqual(job.state, .finished)
+        XCTAssertEqual(job.fractionComplete, 1)
+        let resumed = try snapshot(ModelContext(container))
+        XCTAssertEqual(resumed.visits, expected.visits)
+        XCTAssertEqual(resumed.photos, expected.photos)
+        XCTAssertEqual(resumed.moves, expected.moves)
+        XCTAssertEqual(resumed.samples, expected.samples)
+        XCTAssertFalse(resumed.photos.contains { $0.hasPrefix("saved") }, "Saved photos are left out")
+        XCTAssertEqual(job.earliestPhotoAt, camera.map(\.capturedAt).min())
+    }
+
+    func testAStepNeverEndsInTheMiddleOfAnOuting() {
+        let outing = (0..<4).map { photo("a\($0)", at: epoch.addingTimeInterval(Double($0) * 600), coordinate: home) }
+        let nextDay = (0..<3).map {
+            photo("b\($0)", at: epoch.addingTimeInterval(86_400 + Double($0) * 600), coordinate: cafe)
+        }
+        let usable = outing + nextDay
+        let page = PhotoAssetPage(assets: usable, scannedCount: 7, earliestScannedAt: usable.first?.capturedAt)
+
+        // The page is full, so the oldest outing on it may have begun before the page did.
+        let cut = PhotoHistoryPaging.batch(
+            from: page, usable: usable, cursor: .distantFuture, start: .distantPast, limit: 7, stayGap: 90 * 60
+        )
+        XCTAssertEqual(cut?.assets.map(\.localIdentifier), nextDay.map(\.localIdentifier))
+        XCTAssertEqual(cut?.nextCursor, nextDay[0].capturedAt, "The unfinished outing is read whole next time")
+        XCTAssertEqual(cut?.isLast, false)
+
+        // A page that is all one outing is not imported in pieces; it asks for a longer page.
+        let onlyOuting = PhotoAssetPage(assets: outing, scannedCount: 4, earliestScannedAt: outing[0].capturedAt)
+        XCTAssertNil(
+            PhotoHistoryPaging.batch(
+                from: onlyOuting, usable: outing, cursor: .distantFuture, start: .distantPast, limit: 4, stayGap: 90 * 60
+            )
+        )
+
+        let last = PhotoHistoryPaging.batch(
+            from: page, usable: usable, cursor: .distantFuture, start: .distantPast, limit: 8, stayGap: 90 * 60
+        )
+        XCTAssertEqual(last?.assets.count, 7)
+        XCTAssertEqual(last?.isLast, true)
+    }
+
+    func testRemovedStopIsNotRebuiltFromItsPhotos() throws {
+        let (context, _) = try makeContext()
+        let importer = PhotoHistoryImporter(modelContext: context, calendar: gmt)
+        let assets = [
+            photo("a", at: epoch, coordinate: home),
+            photo("b", at: epoch.addingTimeInterval(10 * 60), coordinate: home),
+        ]
+        let interval = DateInterval(start: epoch.addingTimeInterval(-1), end: epoch.addingTimeInterval(3_600))
+        _ = try importer.importHistory(assets: assets, in: interval)
+        let visit = try XCTUnwrap(try context.fetch(FetchDescriptor<VisitPlace>()).first)
+
+        let repository = SwiftDataTimelineRepository(modelContext: context)
+        repository.recordRemoval(of: visit)
+        visit.keepPhotosOnDay()
+        context.delete(visit)
+        try context.save()
+
+        let report = try importer.importHistory(assets: assets, in: interval)
+
+        XCTAssertEqual(report.createdVisitCount, 0)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<VisitPlace>()), 0)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<PhotoAttachment>()), 2, "The photos stay on the day")
+    }
+
+    // MARK: - Photos taken with this phone
+
+    func testOnlyPhotosAddedWhenTheyWereTakenCountAsCameraPhotos() {
+        XCTAssertTrue(PhotoCaptureClassifier.isCameraCapture(capturedAt: epoch, addedAt: epoch.addingTimeInterval(4)))
+        XCTAssertFalse(
+            PhotoCaptureClassifier.isCameraCapture(capturedAt: epoch, addedAt: epoch.addingTimeInterval(3 * 86_400)),
+            "A photo saved days after it was taken came from somewhere else"
+        )
+        XCTAssertFalse(PhotoCaptureClassifier.isCameraCapture(capturedAt: epoch, addedAt: nil))
+    }
+
+    func testPhotoFixIsCheckedAgainstWhereThePhoneWas() {
+        let now = epoch.addingTimeInterval(12 * 3_600)
+        func fix(_ coordinate: CLLocationCoordinate2D, minutes: Double) -> RecordedFix {
+            RecordedFix(
+                date: epoch.addingTimeInterval(minutes * 60),
+                latitude: coordinate.latitude,
+                longitude: coordinate.longitude
+            )
+        }
+        let acrossTown = offset(home, northMeters: 9_000)
+        let atHomeAllAlong = [fix(home, minutes: -20), fix(home, minutes: 25)]
+
+        // The phone sat at home before and after: a photo from across town is someone else's.
+        XCTAssertEqual(
+            PhotoFixPlausibility.verdict(for: photo("partner", at: epoch, coordinate: acrossTown), fixes: atHomeAllAlong),
+            .reject
+        )
+        XCTAssertEqual(
+            PhotoFixPlausibility.verdict(for: photo("mine", at: epoch, coordinate: cafe), fixes: atHomeAllAlong),
+            .accept
+        )
+        // Tracking went quiet after leaving home: the photo is the news, not a contradiction.
+        XCTAssertEqual(
+            PhotoFixPlausibility.verdict(
+                for: photo("out", at: epoch, coordinate: acrossTown),
+                fixes: [fix(home, minutes: -40)]
+            ),
+            .accept
+        )
+        // Another continent minutes after a fix at home waits for the phone's own word,
+        // and is refused when the phone turns out not to have gone.
+        let abroad = photo("abroad", at: epoch, coordinate: saigon)
+        XCTAssertEqual(PhotoFixPlausibility.verdict(for: abroad, fixes: [fix(home, minutes: -30)]), .wait)
+        XCTAssertEqual(
+            PhotoFixPlausibility.verdict(for: abroad, fixes: [fix(home, minutes: -30), fix(home, minutes: 400)]),
+            .reject
+        )
+        // After a flight the phone's own fixes are a continent apart, and so may the photo be.
+        XCTAssertEqual(
+            PhotoFixPlausibility.verdict(
+                for: photo("landed", at: epoch.addingTimeInterval(11 * 3_600), coordinate: saigon),
+                fixes: [fix(home, minutes: 0), fix(saigon, minutes: 11 * 60 + 5)]
+            ),
+            .accept
+        )
+
+        // Saved photos, vague fixes, and photos already weighed are never offered.
+        let saved = PhotoAssetDescriptor(
+            localIdentifier: "saved", capturedAt: epoch, latitude: cafe.latitude, longitude: cafe.longitude,
+            isCameraCapture: false
+        )
+        let vague = PhotoAssetDescriptor(
+            localIdentifier: "vague", capturedAt: epoch, latitude: cafe.latitude, longitude: cafe.longitude,
+            horizontalAccuracy: 900
+        )
+        let selection = PhotoFixSelection(
+            photos: [saved, vague, abroad, photo("mine", at: epoch, coordinate: cafe), photo("seen", at: epoch, coordinate: cafe)],
+            fixes: atHomeAllAlong,
+            handled: ["seen": epoch],
+            now: now
+        )
+        XCTAssertEqual(selection.accepted.map(\.localIdentifier), ["mine"])
+        XCTAssertEqual(Set(selection.handled.keys), ["seen", "vague", "abroad", "mine"])
+    }
+
     // MARK: - Helpers
+
+    /// Three weeks of outings a few stops long, with saved photos and photos without a
+    /// location mixed in the way a real library has them.
+    private func libraryAcrossManyDays() -> [PhotoAssetDescriptor] {
+        var assets: [PhotoAssetDescriptor] = []
+        for day in 0..<21 {
+            let morning = epoch.addingTimeInterval(Double(day) * 86_400 + 9 * 3_600)
+            let stops = [home, offset(home, northMeters: 900 + Double(day) * 40), offset(home, northMeters: 2_400)]
+            for (stopIndex, stop) in stops.enumerated() {
+                let arrival = morning.addingTimeInterval(Double(stopIndex) * 35 * 60)
+                for shot in 0..<(2 + (day + stopIndex) % 3) {
+                    assets.append(
+                        photo("d\(day)-s\(stopIndex)-\(shot)", at: arrival.addingTimeInterval(Double(shot) * 240), coordinate: stop)
+                    )
+                }
+            }
+            assets.append(
+                PhotoAssetDescriptor(
+                    localIdentifier: "saved-\(day)",
+                    capturedAt: morning.addingTimeInterval(20 * 60),
+                    latitude: saigon.latitude,
+                    longitude: saigon.longitude,
+                    isCameraCapture: false
+                )
+            )
+            assets.append(PhotoAssetDescriptor(localIdentifier: "nowhere-\(day)", capturedAt: morning.addingTimeInterval(5 * 3_600)))
+        }
+        return assets
+    }
+
+    private struct TimelineSnapshot: Equatable {
+        var visits: [String]
+        var photos: Set<String>
+        var moves: Int
+        var samples: Int
+    }
+
+    private func snapshot(_ context: ModelContext) throws -> TimelineSnapshot {
+        let visits = try context.fetch(FetchDescriptor<VisitPlace>(sortBy: [SortDescriptor(\.arrivalDate)]))
+        return TimelineSnapshot(
+            visits: visits.map { visit in
+                let photos = visit.photoAttachments.map(\.assetLocalIdentifier).sorted().joined(separator: ",")
+                return "\(Int(visit.arrivalDate.timeIntervalSince1970))-\(Int(visit.departureDate?.timeIntervalSince1970 ?? 0)):\(photos)"
+            },
+            photos: Set(try context.fetch(FetchDescriptor<PhotoAttachment>()).map(\.assetLocalIdentifier)),
+            moves: try context.fetchCount(FetchDescriptor<MoveSegment>()),
+            samples: try context.fetchCount(FetchDescriptor<LocationSample>())
+        )
+    }
 
     private func makeContext() throws -> (ModelContext, ModelContainer) {
         let schema = Schema(MovesTimelineSchema.models)

@@ -71,3 +71,25 @@ the copied-phone store-preservation test passed. Result bundle:
 `/tmp/Moves-phone-polish-final-tests.xcresult`. The broader integration chat owns
 the combined merge and pre-push suite. These post-walk polish changes are not yet
 installed on G17; build 44 remains the verified phone baseline.
+
+## November 25 record: Settings → Photos and the photo-history import
+
+Inspected on iPhone 18 Pro Max (iOS 27.0) with 4,000 synthetic geotagged photos
+loaded into the simulator library:
+
+| Flow | Observed result |
+|---|---|
+| Photos card, idle | Both toggles, the "photos used this week" line, and the history row render without clipping. |
+| Import sheet, setup | Date pickers, the saved-photos toggle, and counts; the count line names how many saved or imported photos are left out. |
+| Import running | Bar, "Importing now", "Imported back through …", and photos checked update per step. 4,005 photos finished in about 12 seconds; build 46 was at 58% after 150 seconds on the same library. |
+| Import finished | Card and sheet both show when it finished, how far back it reached, and what it added; survives relaunch. |
+| Paused, then Resume | Planted paused job shows a grey bar and "Paused"; Resume runs it to the end. |
+| Relaunch mid-import | Planted running job with a cursor in 2023 resumed on launch and imported only photos before the cursor (checked in the store). |
+| New photos | Photos added while the app was open were classed as camera photos and counted on the status line; one placed in another country from the demo fixes was refused. |
+| Dark appearance, largest text | Card and sheet stay legible; nothing overlaps. |
+
+Not inspected: a small phone (iPhone 17e), landscape, and the final copy of the
+status line ("used" in place of "added") and stacked paused buttons, which were
+changed after the last screenshots; the simulators were needed elsewhere. The
+time-remaining text needs more than two steps to appear and was not seen with
+4,000 photos. Evidence is under `docs/qa/2026-11-25/`.
