@@ -231,7 +231,10 @@ private final class MovesRuntime: ObservableObject {
         importQueue = DurableImportQueue(container: container)
         MovesIntentRuntime.shared.configure(modelContainer: container, captureManager: captureManager)
         MovesAppShortcuts.updateAppShortcutParameters()
-        if !ProcessInfo.processInfo.isRunningUnitTests { TimelineSchemaUpgrader.runIfNeeded(container: container) }
+        if !ProcessInfo.processInfo.isRunningUnitTests {
+            TimelineSchemaUpgrader.runIfNeeded(container: container)
+            TimelineSchemaUpgrader.removeRejectedPhotoStaysIfAny(container: container)
+        }
     }
 }
 

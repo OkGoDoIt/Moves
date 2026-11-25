@@ -8,8 +8,9 @@ import SwiftData
 /// launch: a UserDefaults version key skips work that already completed, and
 /// the individual steps are idempotent if the key is missing.
 enum TimelineSchemaUpgrader {
-    /// Step 4 settles Review questions; steps 5–7 are the place-identity repairs.
-    static let currentVersion = 7
+    /// Step 4 settles Review questions; steps 5–7 are the place-identity repairs; step 8
+    /// takes out trips drawn between photos hours apart.
+    static let currentVersion = 8
     static let userDefaultsKey = "moves.timelineSchemaVersion"
 
     @MainActor private static var running: Task<Void, Never>?
@@ -55,6 +56,29 @@ enum TimelineSchemaUpgrader {
         }
     }
 
+    /// Takes out stays a photo import built from photos it has since found are not the
+    /// owner's. Runs after any upgrade, and like it holds the timeline back until it is done.
+    @MainActor
+    static func removeRejectedPhotoStaysIfAny(container: ModelContainer, store: RejectedPhotoStore = RejectedPhotoStore()) {
+        let identifiers = store.load()
+        guard !identifiers.isEmpty else { return }
+        let earlier = running
+        running = Task.detached(priority: .userInitiated) {
+            await earlier?.value
+            let context = ModelContext(container)
+            context.autosaveEnabled = false
+            do {
+                try PhotoHistoryImporter.removeStays(builtOnlyFrom: identifiers, in: context)
+                if context.hasChanges {
+                    try context.save()
+                }
+                store.clear()
+            } catch {
+                print("Removing rejected photo stays failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
     /// Applies every backfill step. Exposed for tests; calling twice is a no-op
     /// besides rewriting the same derived values.
     static func upgrade(in context: ModelContext, from storedVersion: Int = 0) throws {
@@ -81,6 +105,9 @@ enum TimelineSchemaUpgrader {
         }
         if storedVersion < 7 {
             _ = try unifyAutomaticLabels(in: context)
+        }
+        if storedVersion < 8 {
+            _ = try PhotoHistoryImporter.removeImplausibleTrips(in: context)
         }
         if context.hasChanges {
             try context.save()

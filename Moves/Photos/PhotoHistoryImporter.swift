@@ -98,7 +98,12 @@ struct PhotoHistoryImporter {
         /// Skip a connecting move when the stays are closer than this.
         var minimumMoveDistance: CLLocationDistance = 80
         /// Two stays further apart in time than this are separate outings, not one trip.
-        var maximumMoveGap: TimeInterval = 24 * 60 * 60
+        /// After that nothing is known of the time between, and a line across it would be a
+        /// trip nobody recorded.
+        var maximumMoveGap: TimeInterval = 3 * 60 * 60
+        /// A flight is the exception: two photos far apart can only have one between them.
+        var maximumFlightGap: TimeInterval = 24 * 60 * 60
+        var minimumFlightDistance: CLLocationDistance = 150_000
         /// A stop the person removed is not rebuilt from photos taken this close to it.
         var removedStopMatchDistance: CLLocationDistance = 200
 
@@ -403,6 +408,100 @@ struct PhotoHistoryImporter {
         )
     }
 
+    /// How the owner got from one photo stop to the next, or `nil` when the photos don't
+    /// say there was one trip: too long a silence, or a speed nothing on the ground has over
+    /// a distance nobody flies.
+    static func tripMode(
+        distance: CLLocationDistance,
+        gap: TimeInterval,
+        configuration: Configuration = Configuration()
+    ) -> TransportMode? {
+        guard gap >= 0, distance >= configuration.minimumMoveDistance else { return nil }
+        let isFast = gap <= 0 || distance / gap * 3.6 > configuration.planeSpeedKilometersPerHour
+        if isFast, distance < configuration.minimumFlightDistance { return nil }
+        let mode = transportMode(distance: distance, duration: gap, configuration: configuration)
+        if gap <= configuration.maximumMoveGap { return mode }
+        return mode == .plane && gap <= configuration.maximumFlightGap ? mode : nil
+    }
+
+    // MARK: - Repairs at launch
+
+    /// Takes out photo-built trips an earlier version made across silences that `tripMode`
+    /// calls gaps. A trip the person has touched is theirs and stays.
+    ///
+    /// Only for before the timeline is on screen: it deletes rows.
+    @discardableResult
+    static func removeImplausibleTrips(in context: ModelContext) throws -> Int {
+        let photoInferred = TimelineItemOrigin.photoInferred.rawValue
+        let trips = try context.fetch(FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.originRaw == photoInferred }))
+        var removed = 0
+        for trip in trips where !trip.isTouchedByPerson {
+            let distance: CLLocationDistance
+            if let start = trip.startPlace, let end = trip.endPlace {
+                distance = LocationLogGeometry.distance(from: start.coordinate, to: end.coordinate)
+            } else {
+                distance = trip.distanceMeters
+            }
+            guard tripMode(distance: distance, gap: trip.endDate.timeIntervalSince(trip.startDate)) == nil else { continue }
+            context.delete(trip)
+            removed += 1
+        }
+        return removed
+    }
+
+    /// Takes out stays an earlier version built only from photos now known not to be the
+    /// owner's, with the trips to and from them. A stay the person has touched stays.
+    ///
+    /// Only for before the timeline is on screen: it deletes rows.
+    @discardableResult
+    static func removeStays(builtOnlyFrom identifiers: Set<String>, in context: ModelContext) throws -> Int {
+        let photoInferred = TimelineItemOrigin.photoInferred.rawValue
+        var stays: [UUID: VisitPlace] = [:]
+        let all = Array(identifiers)
+        for from in stride(from: 0, to: all.count, by: 200) {
+            let some = Array(all[from..<min(from + 200, all.count)])
+            let rows = try context.fetch(
+                FetchDescriptor<PhotoAttachment>(predicate: #Predicate { some.contains($0.assetLocalIdentifier) })
+            )
+            for row in rows {
+                guard let stay = row.visitPlace, stay.originRaw == photoInferred, !stay.isTouchedByPerson else { continue }
+                stays[stay.id] = stay
+            }
+        }
+
+        var removed = 0
+        for stay in stays.values {
+            let photos = stay.photoAttachments
+            guard photos.allSatisfy({ identifiers.contains($0.assetLocalIdentifier) }) else {
+                for photo in photos where identifiers.contains(photo.assetLocalIdentifier) {
+                    context.delete(photo)
+                }
+                continue
+            }
+            let trips = stay.outgoingMoves + stay.incomingMoves
+            guard trips.allSatisfy({ $0.origin == .photoInferred && !$0.isTouchedByPerson }) else { continue }
+            let from = stay.arrivalDate.addingTimeInterval(-1)
+            let through = (stay.departureDate ?? stay.arrivalDate).addingTimeInterval(1)
+            let library = LocationSampleSource.photoLibrary.rawValue
+            let fixes = try context.fetch(
+                FetchDescriptor<LocationSample>(
+                    predicate: #Predicate {
+                        $0.timestamp >= from && $0.timestamp <= through && $0.sourceRawValue == library
+                    }
+                )
+            )
+            for fix in fixes where LocationLogGeometry.distance(from: fix.coordinate, to: stay.coordinate) < 2_000 {
+                context.delete(fix)
+            }
+            for trip in trips {
+                context.delete(trip)
+            }
+            context.delete(stay)
+            removed += 1
+        }
+        return removed
+    }
+
     // MARK: - Write path
 
     /// What one batch reads once instead of asking the store about every photo.
@@ -424,7 +523,7 @@ struct PhotoHistoryImporter {
             let slack = configuration.visitMatchSlack
 
             let visitsFrom = range.start.addingTimeInterval(-Self.visitLookback)
-            let visitsThrough = range.end.addingTimeInterval(slack + configuration.maximumMoveGap)
+            let visitsThrough = range.end.addingTimeInterval(slack + configuration.maximumFlightGap)
             visits = try context.fetch(
                 FetchDescriptor<VisitPlace>(
                     predicate: #Predicate { $0.arrivalDate >= visitsFrom && $0.arrivalDate <= visitsThrough },
@@ -636,10 +735,8 @@ struct PhotoHistoryImporter {
         let startDate = start.departureDate ?? start.arrivalDate
         let endDate = end.arrivalDate
         let gap = endDate.timeIntervalSince(startDate)
-        guard gap >= 0, gap <= configuration.maximumMoveGap else { return false }
-
         let distance = LocationLogGeometry.distance(from: start.coordinate, to: end.coordinate)
-        guard distance >= configuration.minimumMoveDistance else { return false }
+        guard let mode = Self.tripMode(distance: distance, gap: gap, configuration: configuration) else { return false }
 
         if let startDay = start.dayTimeline, isProtected(startDay, step: &step) { return false }
         if let endDay = end.dayTimeline, isProtected(endDay, step: &step) { return false }
@@ -653,11 +750,7 @@ struct PhotoHistoryImporter {
             dedupeKey: "photo-\(start.id.uuidString)-\(end.id.uuidString)-\(Int(startDate.timeIntervalSince1970))",
             startDate: startDate,
             endDate: endDate,
-            transportMode: Self.transportMode(
-                distance: distance,
-                duration: gap,
-                configuration: configuration
-            ),
+            transportMode: mode,
             distanceMeters: distance,
             stepCount: nil
         )
@@ -725,6 +818,44 @@ extension DayTimeline {
         places.contains { $0.origin != .photoInferred }
             || moves.contains { $0.origin != .photoInferred }
             || samples.contains { $0.source != .photoLibrary && $0.source != .cameraPhoto }
+    }
+}
+
+private extension MoveSegment {
+    var isTouchedByPerson: Bool {
+        transportModeSource == .user
+            || reviewState == .confirmed
+            || manualRouteCoordinatesData != nil
+            || !(comment ?? "").isEmpty
+    }
+}
+
+private extension VisitPlace {
+    var isTouchedByPerson: Bool {
+        assignmentSource == .user
+            || reviewState == .confirmed
+            || !(userLabel ?? "").isEmpty
+            || !(comment ?? "").isEmpty
+    }
+}
+
+/// Photos found in the timeline that a later look at the library says are not the owner's.
+/// They are taken out at the next launch, before the timeline is on screen.
+struct RejectedPhotoStore: Sendable {
+    static let key = "photos.rejectedPhotos"
+    nonisolated(unsafe) var defaults: UserDefaults = .standard
+
+    func load() -> Set<String> {
+        Set(defaults.stringArray(forKey: Self.key) ?? [])
+    }
+
+    func add(_ identifiers: Set<String>) {
+        guard !identifiers.isEmpty else { return }
+        defaults.set(Array(load().union(identifiers)), forKey: Self.key)
+    }
+
+    func clear() {
+        defaults.removeObject(forKey: Self.key)
     }
 }
 

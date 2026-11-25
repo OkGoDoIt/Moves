@@ -25,13 +25,17 @@ enum PhotoHistoryBackgroundTask {
         }
     }
 
-    /// Asks for time while the phone is idle.
+    /// Asks for time while the phone is idle. A request that is already waiting is left
+    /// alone: replacing it would send it to the back of the line.
     static func scheduleResume() {
         guard !ProcessInfo.processInfo.isRunningUnitTests else { return }
-        let request = BGProcessingTaskRequest(identifier: resumeIdentifier)
-        request.requiresNetworkConnectivity = false
-        request.requiresExternalPower = false
-        try? BGTaskScheduler.shared.submit(request)
+        BGTaskScheduler.shared.getPendingTaskRequests { pending in
+            guard !pending.contains(where: { $0.identifier == resumeIdentifier }) else { return }
+            let request = BGProcessingTaskRequest(identifier: resumeIdentifier)
+            request.requiresNetworkConnectivity = false
+            request.requiresExternalPower = false
+            try? BGTaskScheduler.shared.submit(request)
+        }
     }
 
     static func cancelResume() {
@@ -82,19 +86,25 @@ enum PhotoHistoryBackgroundTask {
             task.setTaskCompleted(success: false)
             return
         }
-        task.progress.totalUnitCount = 1_000
+        task.progress.totalUnitCount = 1_000_000
         let reporting = Task { @MainActor in
-            // The system ends a task that shows no progress, and reading a large library
-            // comes before the first photo is imported.
+            // The system ends a task that looks stalled, and between two parts of a large
+            // library or two steps of the import there is nothing new to count. So the
+            // progress also creeps toward the next of them while it is being worked on.
+            var subtitle = ""
             while !Task.isCancelled, let job = controller.historyJob {
                 let isImportStarted = job.lastProgressAt != nil
-                let read = 100 * (isImportStarted ? 1 : controller.libraryReadShare)
-                let completed = min(Int64((read + 900 * job.fractionComplete).rounded(.down)), 999)
-                if completed > task.progress.completedUnitCount {
-                    task.progress.completedUnitCount = completed
+                let read = 100_000 * (isImportStarted ? 1 : controller.libraryReadShare)
+                let done = read + 900_000 * job.fractionComplete
+                let nextStretch = isImportStarted ? 4_000.0 : 1_000.0
+                let shown = Double(task.progress.completedUnitCount)
+                let creeping = shown + max((done + nextStretch - shown) * 0.05, 1)
+                task.progress.completedUnitCount = min(Int64(max(done, creeping)), 999_000)
+                if controller.continuingSubtitle != subtitle {
+                    subtitle = controller.continuingSubtitle
+                    task.updateTitle(controller.continuingTitle, subtitle: subtitle)
                 }
-                task.updateTitle(controller.continuingTitle, subtitle: controller.continuingSubtitle)
-                try? await Task.sleep(for: .seconds(1))
+                try? await Task.sleep(for: .milliseconds(500))
             }
         }
         let work = Task { @MainActor in
@@ -106,8 +116,9 @@ enum PhotoHistoryBackgroundTask {
             task.setTaskCompleted(success: !controller.isImporting)
         }
         task.expirationHandler = {
+            let reached = task.progress.completedUnitCount
             Task { @MainActor in
-                controller.endWork(with: .continuedTask)
+                controller.continuedTaskExpired(after: reached)
                 _ = await work.value
             }
         }

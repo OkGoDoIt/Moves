@@ -197,6 +197,10 @@ struct PhotoHistoryImportRunner: @unchecked Sendable {
     var maximumPageSize = 24_000
     /// A step that keeps stopping Moves is cut down to this many photos, then passed over.
     var minimumPageSize = 50
+    /// Photos per step whose camera model is read.
+    var modelSampleSize = 24
+    /// Where photos an earlier version used by mistake are noted.
+    var rejectedStore: RejectedPhotoStore?
     var configuration = PhotoHistoryImporter.Configuration()
 
     /// Tries before a step is made smaller, and before its photos are passed over.
@@ -288,6 +292,7 @@ struct PhotoHistoryImportRunner: @unchecked Sendable {
         // The rest of the page is looked at again in the next step, and counted there.
         let done = looked.filter { batch.isLast || $0.capturedAt >= batch.nextCursor }
         let possibleCount = batch.assets.count
+        try noteRejected(done, keeping: batch.assets)
         batch.assets = await withoutStrayCameras(batch.assets)
 
         let context = ModelContext(container)
@@ -304,6 +309,32 @@ struct PhotoHistoryImportRunner: @unchecked Sendable {
             next.earliestPhotoAt = min(job.earliestPhotoAt ?? oldest, oldest)
         }
         return try await moved(next, to: batch.nextCursor, isLast: batch.isLast)
+    }
+
+    /// An earlier version read some photos this one leaves out. The ones in the timeline are
+    /// noted here and taken out at the next launch: deleting a row that a screen may be
+    /// showing ends the app.
+    private func noteRejected(_ photos: [PhotoAssetDescriptor], keeping kept: [PhotoAssetDescriptor]) throws {
+        guard let rejectedStore, let first = photos.first?.capturedAt, let last = photos.last?.capturedAt else { return }
+        let keptIDs = Set(kept.map(\.localIdentifier))
+        // A copy of a photo that was used says the same place.
+        let rejected = Set(
+            photos.filter { !keptIDs.contains($0.localIdentifier) && $0.origin != .duplicate }.map(\.localIdentifier)
+        )
+        guard !rejected.isEmpty else { return }
+        let from = first.addingTimeInterval(-1)
+        let through = last.addingTimeInterval(1)
+        let context = ModelContext(container)
+        let attached = try context.fetch(
+            FetchDescriptor<PhotoAttachment>(predicate: #Predicate { $0.capturedAt >= from && $0.capturedAt <= through })
+        )
+        rejectedStore.add(
+            Set(
+                attached
+                    .filter { rejected.contains($0.assetLocalIdentifier) && $0.visitPlace?.origin == .photoInferred }
+                    .map(\.assetLocalIdentifier)
+            )
+        )
     }
 
     /// Leaves out a handful of photos that stop the import every time, so that the rest of
@@ -340,7 +371,10 @@ struct PhotoHistoryImportRunner: @unchecked Sendable {
     /// the month they were taken in.
     private func withoutStrayCameras(_ assets: [PhotoAssetDescriptor]) async -> [PhotoAssetDescriptor] {
         guard let rosterStore else { return assets }
-        let own = assets.filter { $0.origin == .camera || $0.origin == .archive }
+        // Each reading opens a file, so a few from across the step speak for the rest.
+        let candidates = assets.filter { $0.origin == .camera || $0.origin == .archive }
+        let spacing = max(candidates.count / modelSampleSize, 1)
+        let own = stride(from: 0, to: candidates.count, by: spacing).map { candidates[$0] }
         let models = await provider.cameraModels(for: own.map(\.localIdentifier))
         guard !models.isEmpty else { return assets }
 

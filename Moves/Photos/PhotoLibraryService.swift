@@ -540,6 +540,18 @@ final class PhotoLibraryController: ObservableObject {
         grants.remove(grant)
     }
 
+    /// The system ended the continued task. Whatever time is left is used, and the idle
+    /// task carries on from there.
+    func continuedTaskExpired(after progress: Int64) {
+        Self.log.notice("Continued task ended by the system at \(progress) of 1000000")
+        endWork(with: .continuedTask)
+        guard isImporting else { return }
+        PhotoHistoryBackgroundTask.scheduleResume()
+        if !grants.contains(.scene) {
+            workBriefly()
+        }
+    }
+
     /// Uses the seconds the system gives an app that just left the screen or was woken.
     private func workBriefly() {
         guard isImporting, !grants.contains(.brief) else { return }
@@ -589,7 +601,8 @@ final class PhotoLibraryController: ObservableObject {
         PhotoHistoryImportRunner(
             provider: service,
             container: modelContainer,
-            rosterStore: OwnCameraRosterStore(defaults: defaults)
+            rosterStore: OwnCameraRosterStore(defaults: defaults),
+            rejectedStore: RejectedPhotoStore(defaults: defaults)
         )
     }
 
@@ -637,6 +650,7 @@ final class PhotoLibraryController: ObservableObject {
                 self.setHistoryJob(job)
                 self.isHistoryImportWorking = true
                 let started = job
+                let began = Date.now
                 let origins = self.ledger?.value
                 if pace == nil {
                     pace = (.now, started.remainingPhotoCount, 0)
@@ -668,6 +682,7 @@ final class PhotoLibraryController: ObservableObject {
                             steps: measured.steps
                         )
                     }
+                    await self.restIfOffScreen(after: Date.now.timeIntervalSince(began))
                 } catch {
                     // The step wrote nothing. It is tried again, smaller each time, and the
                     // job's own count of starts decides when to pass its photos over.
@@ -702,6 +717,13 @@ final class PhotoLibraryController: ObservableObject {
         }
     }
 
+    /// Off screen the system ends an app that keeps the processor busy for more than 80% of
+    /// a minute, so the work takes breaks there.
+    private func restIfOffScreen(after worked: TimeInterval) async {
+        guard !grants.contains(.scene), worked > 0.2 else { return }
+        try? await Task.sleep(for: .seconds(min(worked * 0.6, 8)))
+    }
+
     /// Works out where every photo came from, or takes it from the cache. The library is
     /// read in parts that are kept as they are done, so being stopped costs one part.
     private func prepareLedger(for job: PhotoHistoryJob, runner: PhotoHistoryImportRunner) async {
@@ -734,11 +756,13 @@ final class PhotoLibraryController: ObservableObject {
         do {
             for index in pieces.indices {
                 guard isCurrent() else { return }
+                let pieceBegan = Date.now
                 setAttempts((historyJob?.ledgerAttempts ?? 0) + 1)
                 try await Task.detached(priority: .utility) {
                     try await runner.readPiece(index, of: pieces, for: job, cache: cache)
                 }.value
                 setAttempts(0)
+                await restIfOffScreen(after: Date.now.timeIntervalSince(pieceBegan))
                 libraryReadShare = Double(index + 1) / Double(pieces.count)
             }
             guard isCurrent() else { return }

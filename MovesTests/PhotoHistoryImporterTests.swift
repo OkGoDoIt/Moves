@@ -199,6 +199,67 @@ final class PhotoHistoryImporterTests: XCTestCase {
         XCTAssertEqual(moves[0].transportMode, .unknown)
     }
 
+    func testALongSilenceBetweenPhotosIsAGapAndNotATrip() throws {
+        let hour: TimeInterval = 3_600
+        XCTAssertEqual(PhotoHistoryImporter.tripMode(distance: 4_000, gap: 2 * hour), .unknown)
+        XCTAssertNil(PhotoHistoryImporter.tripMode(distance: 4_000, gap: 5 * hour))
+        XCTAssertNil(PhotoHistoryImporter.tripMode(distance: 400_000, gap: 12 * hour), "It could have been anything")
+        XCTAssertEqual(PhotoHistoryImporter.tripMode(distance: 9_000_000, gap: 20 * hour), .plane)
+        XCTAssertNil(PhotoHistoryImporter.tripMode(distance: 20_000, gap: 60), "Nobody does that")
+
+        // What an earlier version left behind is taken out, unless the person has touched it.
+        let (context, _) = try makeContext()
+        let day = DayTimeline(dayStart: epoch)
+        context.insert(day)
+        func stay(_ start: TimeInterval, at place: CLLocationCoordinate2D, photo: String) -> VisitPlace {
+            let visit = VisitPlace(
+                arrivalDate: epoch.addingTimeInterval(start), departureDate: epoch.addingTimeInterval(start + 600),
+                latitude: place.latitude, longitude: place.longitude, horizontalAccuracy: 30
+            )
+            visit.origin = .photoInferred
+            visit.dayTimeline = day
+            context.insert(visit)
+            let attachment = PhotoAttachment(
+                assetLocalIdentifier: photo, capturedAt: visit.arrivalDate, latitude: place.latitude, longitude: place.longitude
+            )
+            attachment.visitPlace = visit
+            attachment.dayTimeline = day
+            context.insert(attachment)
+            return visit
+        }
+        func trip(_ from: VisitPlace, _ to: VisitPlace, key: String) -> MoveSegment {
+            let move = MoveSegment(
+                dedupeKey: key, startDate: from.departureDate!, endDate: to.arrivalDate,
+                transportMode: .unknown, distanceMeters: 2_000, stepCount: nil
+            )
+            move.origin = .photoInferred
+            move.startPlace = from
+            move.endPlace = to
+            move.dayTimeline = day
+            context.insert(move)
+            return move
+        }
+        let one = stay(0, at: home, photo: "one")
+        let two = stay(2 * hour, at: cafe, photo: "two")
+        let three = stay(12 * hour, at: home, photo: "three")
+        let four = stay(20 * hour, at: cafe, photo: "four")
+        _ = trip(one, two, key: "short")
+        _ = trip(two, three, key: "long")
+        trip(three, four, key: "theirs").comment = "The slow train"
+        try context.save()
+
+        XCTAssertEqual(try PhotoHistoryImporter.removeImplausibleTrips(in: context), 1)
+        try context.save()
+        XCTAssertEqual(Set(try context.fetch(FetchDescriptor<MoveSegment>()).map(\.dedupeKey)), ["short", "theirs"])
+
+        // A stay that rested only on photos found not to be the owner's goes, with its trip.
+        XCTAssertEqual(try PhotoHistoryImporter.removeStays(builtOnlyFrom: ["two", "four"], in: context), 1)
+        try context.save()
+        let left = try context.fetch(FetchDescriptor<VisitPlace>()).map(\.id)
+        XCTAssertEqual(Set(left), [one.id, three.id, four.id], "A stay on a trip the person wrote about stays")
+        XCTAssertEqual(try context.fetch(FetchDescriptor<MoveSegment>()).map(\.dedupeKey), ["theirs"])
+    }
+
     func testSensorDayOverlapAttachesOnly() throws {
         let (context, _) = try makeContext()
         let day = DayTimeline(dayStart: epoch)
