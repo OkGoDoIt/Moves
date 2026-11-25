@@ -129,6 +129,8 @@ struct InsightsMoveRecord: Equatable, Sendable {
     var duration: TimeInterval
     var distanceMeters: Double
     var modeRaw: String
+    /// The clock where the trip began, for hour-of-day totals; nil when it left from no stop.
+    var timeZone: TimeZone? = nil
 
     var mode: TransportMode {
         TransportMode(rawValue: modeRaw) ?? .unknown
@@ -139,13 +141,15 @@ struct InsightsMoveRecord: Equatable, Sendable {
         endDate: Date,
         duration: TimeInterval,
         distanceMeters: Double,
-        mode: TransportMode
+        mode: TransportMode,
+        timeZone: TimeZone? = nil
     ) {
         self.startDate = startDate
         self.endDate = endDate
         self.duration = duration
         self.distanceMeters = distanceMeters
         self.modeRaw = mode.rawValue
+        self.timeZone = timeZone
     }
 
     init(_ move: MoveSegment) {
@@ -154,6 +158,8 @@ struct InsightsMoveRecord: Equatable, Sendable {
         duration = move.timelineDuration
         distanceMeters = max(move.distanceMeters, 0)
         modeRaw = move.transportMode.rawValue
+        // The start stop only: `placeTimeZone` would fall back to walking the whole day.
+        timeZone = move.startPlace.flatMap { PlaceTimeZone.timeZone(at: $0.coordinate) }
     }
 }
 
@@ -372,7 +378,8 @@ enum InsightsSnapshotBuilder {
 
         let geography = geographyCounts(in: currentDays)
         let groundDays = currentDays.map { day in
-            InsightsDayRecord(dayStart: day.dayStart, moves: day.moves.filter { $0.mode != .plane }, visits: [])
+            // Visits stay: a trip that left from no stop reads its hour on their clock.
+            InsightsDayRecord(dayStart: day.dayStart, moves: day.moves.filter { $0.mode != .plane }, visits: day.visits)
         }
         let groundDistanceByDay = dailyDistance(in: groundDays, calendar: calendar)
         let distanceByDay = dailyDistance(in: currentDays, calendar: calendar)
@@ -752,9 +759,25 @@ enum InsightsSnapshotBuilder {
         calendar: Calendar
     ) -> [TimeInterval] {
         var hours = Array(repeating: 0.0, count: 24)
+        // Each trip counts in the hours of the clock where it happened: a commute in San
+        // Francisco is a morning one, whatever zone the phone is in now.
+        var calendars: [TimeZone: Calendar] = [:]
+        func local(_ zone: TimeZone) -> Calendar {
+            if let cached = calendars[zone] { return cached }
+            let made = PlaceClock.calendar(calendar, in: zone)
+            calendars[zone] = made
+            return made
+        }
         for day in days {
+            // A trip that left from no stop reads on the clock of the day's first stay.
+            let dayZone = day.moves.contains { $0.timeZone == nil }
+                ? day.visits.lazy.compactMap { visit -> TimeZone? in
+                    guard let latitude = visit.latitude, let longitude = visit.longitude else { return nil }
+                    return PlaceTimeZone.timeZone(at: CLLocationCoordinate2D(latitude: latitude, longitude: longitude))
+                }.first
+                : nil
             for move in day.moves {
-                add(move, toHours: &hours, calendar: calendar)
+                add(move, toHours: &hours, calendar: local(move.timeZone ?? dayZone ?? calendar.timeZone))
             }
         }
         return hours

@@ -183,7 +183,7 @@ struct PlaceDetailView: View {
                             .font(.system(.body, design: .rounded).weight(.medium))
                     }
                 } header: {
-                    Text(String(localized: "Visits"))
+                    Text(PlaceVisitRow.withZone(String(localized: "Visits"), visits: visits))
                 }
             }
         }
@@ -253,7 +253,8 @@ struct PlaceDetailView: View {
     }
 
     private func statsGrid(summary: PlacesPlaceSummary) -> some View {
-        let last = summary.lastVisitAt.map(lastVisitText) ?? "—"
+        let zone = PlaceTimeZone.timeZone(at: summary.coordinate) ?? .autoupdatingCurrent
+        let last = summary.lastVisitAt.map { PlaceVisitRow.dayText(for: $0, in: zone, omittingThisYear: true) } ?? "—"
         return Grid(horizontalSpacing: 10, verticalSpacing: 10) {
             GridRow {
                 PlacesMetric(title: String(localized: "Visits"), value: summary.visitCount.formatted())
@@ -264,16 +265,6 @@ struct PlaceDetailView: View {
                 PlacesMetric(title: String(localized: "Last visit"), value: last)
             }
         }
-    }
-
-    private func lastVisitText(_ date: Date) -> String {
-        let calendar = Calendar.autoupdatingCurrent
-        if calendar.isDateInToday(date) { return String(localized: "Today") }
-        if calendar.isDateInYesterday(date) { return String(localized: "Yesterday") }
-        if calendar.isDate(date, equalTo: .now, toGranularity: .year) {
-            return date.formatted(.dateTime.month(.abbreviated).day())
-        }
-        return date.formatted(date: .abbreviated, time: .omitted)
     }
 
     private func region(for place: KnownPlace) -> MKCoordinateRegion {
@@ -287,7 +278,7 @@ struct PlaceDetailView: View {
 
     private func openVisit(_ visit: VisitPlace) {
         rootController.selectedTab = .timeline
-        rootController.requestedJumpDate = visit.arrivalDate
+        rootController.requestedJumpDate = PlaceVisitRow.timelineDay(of: visit)
     }
 
     /// The pill undoes exactly this step, even if something else wrote to the store since.
@@ -390,16 +381,19 @@ struct SuggestedPlaceDetailView: View {
                         ForEach(visits) { visit in
                             Button {
                                 rootController.selectedTab = .timeline
-                                rootController.requestedJumpDate = visit.arrivalDate
+                                rootController.requestedJumpDate = PlaceVisitRow.timelineDay(of: visit)
                             } label: {
                                 PlaceVisitRow(visit: visit)
                             }
                             .buttonStyle(.plain)
                         }
                     } header: {
-                        Text(visits.count == 1
-                            ? String(localized: "1 visit")
-                            : String(localized: "\(visits.count) visits"))
+                        Text(PlaceVisitRow.withZone(
+                            visits.count == 1
+                                ? String(localized: "1 visit")
+                                : String(localized: "\(visits.count) visits"),
+                            visits: visits
+                        ))
                     }
                 }
             }
@@ -421,8 +415,11 @@ struct SuggestedPlaceDetailView: View {
     }
 }
 
-private struct PlaceVisitRow: View {
+/// A visit to a place, dated and timed on the clock where it happened.
+struct PlaceVisitRow: View {
     let visit: VisitPlace
+
+    private var zone: TimeZone { visit.placeTimeZone }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -451,20 +448,53 @@ private struct PlaceVisitRow: View {
 
     /// Relative day or a date without the time, so the timestamp is not repeated.
     private var dayTitle: String {
-        let calendar = Calendar.autoupdatingCurrent
-        if calendar.isDateInToday(visit.arrivalDate) {
-            return String(localized: "Today")
-        }
-        if calendar.isDateInYesterday(visit.arrivalDate) {
-            return String(localized: "Yesterday")
-        }
-        return visit.arrivalDate.formatted(date: .abbreviated, time: .omitted)
+        Self.dayText(for: visit.arrivalDate, in: zone)
     }
 
     private var detailLine: String {
-        let time = visit.arrivalDate.formatted(date: .omitted, time: .shortened)
-        let duration = MovesStatisticsFormatting.duration(visit.stayDuration(now: .now))
-        return "\(time) · \(duration)"
+        Self.detailText(arrival: visit.arrivalDate, stay: visit.stayDuration(now: .now), in: zone)
+    }
+
+    /// "Today", "Yesterday", or the date `date` fell on in `zone`.
+    static func dayText(
+        for date: Date,
+        in zone: TimeZone,
+        omittingThisYear: Bool = false,
+        calendar: Calendar = .autoupdatingCurrent,
+        now: Date = .now
+    ) -> String {
+        // The visit's own date, as midnight on the phone's calendar, so Today and
+        // Yesterday compare with the phone's today like the Timeline's days do.
+        let day = PlaceClock.calendarDate(of: date, in: zone, on: calendar)
+        if calendar.isDate(day, inSameDayAs: now) { return String(localized: "Today") }
+        if let yesterday = calendar.date(byAdding: .day, value: -1, to: calendar.startOfDay(for: now)),
+           calendar.isDate(day, inSameDayAs: yesterday) {
+            return String(localized: "Yesterday")
+        }
+        let base: Date.FormatStyle = omittingThisYear && calendar.isDate(day, equalTo: now, toGranularity: .year)
+            ? .dateTime.month(.abbreviated).day()
+            : Date.FormatStyle(date: .abbreviated, time: .omitted)
+        return PlaceClock.format(day, base, in: calendar.timeZone)
+    }
+
+    /// "4:22 PM · 2 hr" on `zone`'s clock.
+    static func detailText(arrival: Date, stay: TimeInterval, in zone: TimeZone) -> String {
+        let time = PlaceClock.format(arrival, Date.FormatStyle(date: .omitted, time: .shortened), in: zone)
+        return "\(time) · \(MovesStatisticsFormatting.duration(stay))"
+    }
+
+    /// `title`, plus the zone the times below are read in when it is not the phone's,
+    /// as the Timeline's day header does ("Visits · PDT").
+    static func withZone(_ title: String, visits: [VisitPlace]) -> String {
+        guard let latest = visits.first,
+              let zone = PlaceClock.foreignAbbreviation(of: latest.placeTimeZone, at: latest.arrivalDate)
+        else { return title }
+        return "\(title) · \(zone)"
+    }
+
+    /// The Timeline day this visit is filed on, as the date the Timeline pages by.
+    static func timelineDay(of visit: VisitPlace) -> Date {
+        visit.dayTimeline?.calendarDate() ?? PlaceClock.calendarDate(of: visit.arrivalDate, in: visit.placeTimeZone)
     }
 }
 

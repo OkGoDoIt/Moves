@@ -235,7 +235,10 @@ final class StoreResilienceTests: XCTestCase {
         let days = try ModelContext(container).fetch(FetchDescriptor<DayTimeline>(sortBy: [SortDescriptor(\.dayStart)]))
         let walked = days.map { day in
             InsightsDayRecord(
-                dayStart: day.dayStart,
+                // The day's own date, as the loader reads it: since days are filed where
+                // they happened, `dayStart` of a day east of the phone falls on the date
+                // before and would merge two days into one.
+                dayStart: day.calendarDate(),
                 moves: day.moves.map(InsightsMoveRecord.init),
                 visits: day.places.map(InsightsVisitRecord.init)
             )

@@ -322,19 +322,35 @@ extension DayTimeline {
     /// The clock a day is read on: the zone where its first stay, trip, or fix happened.
     /// Today, and a day with nothing on it, read on the phone's own clock.
     var placeTimeZone: TimeZone {
-        let phone = Calendar.current.timeZone
-        guard dayKey != DayTimeline.makeDayKey(for: .now) else { return phone }
+        guard dayKey != DayTimeline.makeDayKey(for: .now) else { return Calendar.current.timeZone }
         let firstPlace = places.min { $0.arrivalDate < $1.arrivalDate }
         let firstMove = moves.min { $0.startDate < $1.startDate }
-        let candidates: [(Date, CLLocationCoordinate2D)] = [
-            firstPlace.map { ($0.arrivalDate, $0.coordinate) },
-            firstMove.flatMap { move in move.startPlace.map { (move.startDate, $0.coordinate) } },
-        ].compactMap { $0 }
+        return DayTimeline.clock(
+            dayKey: dayKey,
+            firstStay: firstPlace.map { ($0.arrivalDate, $0.coordinate) },
+            firstTripStart: firstMove.flatMap { move in move.startPlace.map { (move.startDate, $0.coordinate) } },
+            firstFix: {
+                guard let fix = samples.min(by: { $0.timestamp < $1.timestamp }) else { return nil }
+                return CLLocationCoordinate2D(latitude: fix.latitude, longitude: fix.longitude)
+            }
+        )
+    }
+
+    /// `placeTimeZone` from values already copied off the store, for readers that walk
+    /// every day at once: the first stay or trip start that day, else its first fix.
+    static func clock(
+        dayKey: String,
+        firstStay: (Date, CLLocationCoordinate2D)?,
+        firstTripStart: (Date, CLLocationCoordinate2D)?,
+        firstFix: () -> CLLocationCoordinate2D? = { nil }
+    ) -> TimeZone {
+        let phone = Calendar.current.timeZone
+        guard dayKey != DayTimeline.makeDayKey(for: .now) else { return phone }
+        let candidates = [firstStay, firstTripStart].compactMap { $0 }
         if let first = candidates.min(by: { $0.0 < $1.0 }), let zone = PlaceTimeZone.timeZone(at: first.1) {
             return zone
         }
-        if let fix = samples.min(by: { $0.timestamp < $1.timestamp }),
-           let zone = PlaceTimeZone.timeZone(at: CLLocationCoordinate2D(latitude: fix.latitude, longitude: fix.longitude)) {
+        if let fix = firstFix(), let zone = PlaceTimeZone.timeZone(at: fix) {
             return zone
         }
         return phone
@@ -342,10 +358,7 @@ extension DayTimeline {
 
     /// The zone's short name ("PDT") when this day's clock is not the phone's, else nil.
     var foreignTimeZoneAbbreviation: String? {
-        let zone = placeTimeZone
-        let moment = dayStart.addingTimeInterval(12 * 3600)
-        guard zone.secondsFromGMT(for: moment) != Calendar.current.timeZone.secondsFromGMT(for: moment) else { return nil }
-        return zone.abbreviation(for: moment) ?? zone.identifier
+        PlaceClock.foreignAbbreviation(of: placeTimeZone, at: dayStart.addingTimeInterval(12 * 3600))
     }
 
     /// The last known place from an earlier day, used when nothing was recorded on this day

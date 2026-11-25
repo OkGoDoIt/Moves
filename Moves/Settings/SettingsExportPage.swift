@@ -88,7 +88,8 @@ struct ExportSettingsPage: View {
         switch range {
         case .selectedDay:
             guard let selectedDay else { return String(localized: "No day selected") }
-            return selectedDay.dayStart.formatted(date: .complete, time: .omitted)
+            // The day's own date: `dayStart` on the phone's clock can be the date before.
+            return selectedDay.calendarDate().formatted(date: .complete, time: .omitted)
         case .allDays:
             let count = dayTimelines.count
             return count == 1 ? String(localized: "1 day") : String(localized: "\(count.formatted(.number)) days")

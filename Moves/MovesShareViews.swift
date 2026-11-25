@@ -258,8 +258,9 @@ private struct MovesShareSnapshot {
         let calendar = Calendar.autoupdatingCurrent
         let selectedTimelines: [DayTimeline]
         if period != .forever {
+            // By each day's own date: `dayStart` east of the phone falls on the date before.
             selectedTimelines = timelines.filter {
-                period.contains($0.dayStart, periodStart: periodStart, calendar: calendar)
+                period.contains($0.calendarDate(in: calendar), periodStart: periodStart, calendar: calendar)
             }
         } else {
             selectedTimelines = timelines
@@ -347,7 +348,7 @@ private struct MovesShareSnapshot {
             let score = distance + duration / 4 + Double(day.uniqueLocationCount) * 500 + Double(day.moves.count) * 250
             return MovesShareDay(
                 id: day.dayKey,
-                date: day.dayStart,
+                date: day.calendarDate(in: calendar),
                 distanceMeters: distance,
                 moveDuration: duration,
                 placeCount: day.uniqueLocationCount,
@@ -420,7 +421,7 @@ private struct MovesShareSnapshot {
             calendarDays = recordedDays.map { day in
                 MovesShareCalendarDay(
                     id: day.dayKey,
-                    date: day.dayStart,
+                    date: day.calendarDate(in: calendar),
                     placeCoordinates: day.places.map(\.coordinate),
                     tracks: day.moves.compactMap { tracksByID[$0.id] }.map {
                         MovesShareTrack(
@@ -456,7 +457,7 @@ private struct MovesShareSnapshot {
 
         let periodLabel: String
         if period == .forever {
-            let sortedDates = recordedDays.map(\.dayStart).sorted()
+            let sortedDates = recordedDays.map { $0.calendarDate(in: calendar) }.sorted()
             if let first = sortedDates.first, let last = sortedDates.last {
                 if calendar.isDate(first, inSameDayAs: last) {
                     periodLabel = first.formatted(.dateTime.day().month(.abbreviated).year())
@@ -838,7 +839,7 @@ struct MovesShareGalleryView: View {
     private var selectedTimelines: [DayTimeline] {
         guard selectedPeriod != .forever else { return dayTimelines }
         return dayTimelines.filter {
-            selectedPeriod.contains($0.dayStart, periodStart: selectedPeriodStart)
+            selectedPeriod.contains($0.calendarDate(), periodStart: selectedPeriodStart)
         }
     }
 
@@ -1085,7 +1086,7 @@ struct MovesShareGalleryView: View {
             )
             guard let timelines = try? context.fetch(descriptor) else { return nil }
             let days = timelines.filter { day in
-                (period == .forever || period.contains(day.dayStart, periodStart: periodStart))
+                (period == .forever || period.contains(day.calendarDate(), periodStart: periodStart))
                     && (!day.places.isEmpty || !day.moves.isEmpty)
             }
             guard !days.isEmpty else { return nil }

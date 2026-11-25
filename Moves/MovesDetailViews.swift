@@ -370,13 +370,15 @@ struct QuickLabelButton: View {
 }
 
 struct MoveMapDetailView: View {
-    private static let exportFilenameDateFormatter: DateFormatter = {
+    /// "2026-11-03-1622" for a trip file name, on `zone`'s clock.
+    static func exportFilenameTimestamp(_ date: Date, in zone: TimeZone) -> String {
         let formatter = DateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
         formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = zone
         formatter.dateFormat = "yyyy-MM-dd-HHmm"
-        return formatter
-    }()
+        return formatter.string(from: date)
+    }
 
     @EnvironmentObject private var undoController: AppUndoController
     @Environment(\.dismiss) private var dismiss
@@ -832,7 +834,8 @@ struct MoveMapDetailView: View {
         coordinates: [CLLocationCoordinate2D],
         privacyZones: [PrivacyZone] = []
     ) -> GPXShareFile? {
-        let timestamp = Self.exportFilenameDateFormatter.string(from: segment.timelineStartDate)
+        // Named by when the trip began on the clock where it did, as the Timeline shows it.
+        let timestamp = Self.exportFilenameTimestamp(segment.timelineStartDate, in: segment.placeTimeZone)
         guard let payload = TimelineExporter.makeMoveGPXPayload(
             move: segment,
             coordinates: coordinates,

@@ -139,8 +139,10 @@ struct TripDetailView: View {
                         }
                         .buttonStyle(.plain)
                     }
+                    // The day's times on the clock where it happened, as on the Timeline.
+                    .timelineClock(section.timeZone)
                 } header: {
-                    Text(section.dayStart.formatted(.dateTime.weekday(.wide).month(.abbreviated).day()))
+                    Text(section.title)
                 }
             }
         }
@@ -290,7 +292,13 @@ struct TripDetailView: View {
             var entries: [TimelineEntry] = visits.map(TimelineEntry.place) + moves.map(TimelineEntry.move)
             entries.sort { $0.startDate < $1.startDate }
             guard !entries.isEmpty else { return nil }
-            return TripDaySection(dayStart: day.dayStart, entries: entries)
+            return TripDaySection(
+                dayStart: day.dayStart,
+                date: day.calendarDate(in: calendar),
+                timeZone: day.placeTimeZone,
+                zoneAbbreviation: day.foreignTimeZoneAbbreviation,
+                entries: entries
+            )
         }
     }
 }
@@ -298,7 +306,19 @@ struct TripDetailView: View {
 /// One accordion day inside trip detail.
 struct TripDaySection: Identifiable {
     let dayStart: Date
+    /// The day's own date on the phone's calendar, for its header.
+    var date: Date
+    /// The clock the day's times read on, as on the Timeline.
+    var timeZone: TimeZone = .autoupdatingCurrent
+    /// "PDT" when that clock is not the phone's.
+    var zoneAbbreviation: String? = nil
     let entries: [TimelineEntry]
 
     var id: TimeInterval { dayStart.timeIntervalSinceReferenceDate }
+
+    /// "Tuesday, Nov 3", plus "· PDT" when the day is on another clock.
+    var title: String {
+        let text = date.formatted(.dateTime.weekday(.wide).month(.abbreviated).day())
+        return zoneAbbreviation.map { "\(text) · \($0)" } ?? text
+    }
 }

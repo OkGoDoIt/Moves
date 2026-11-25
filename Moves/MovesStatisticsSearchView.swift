@@ -6,6 +6,7 @@
 //  Statistics & Search sheet was retired in WS8.
 //
 
+import CoreLocation
 import Foundation
 import SwiftData
 
@@ -17,6 +18,8 @@ struct ConnectionVisit: Identifiable, Sendable {
     let title: String
     let comment: String?
     let locationKey: String
+    /// The clock where the stay happened.
+    let timeZone: TimeZone
 
     init(_ place: VisitPlace) {
         id = place.id
@@ -25,6 +28,7 @@ struct ConnectionVisit: Identifiable, Sendable {
         title = place.displayTitle
         comment = place.comment
         locationKey = MovesStatisticsSnapshot.locationKey(place)
+        timeZone = PlaceTimeZone.timeZone(at: place.coordinate) ?? .autoupdatingCurrent
     }
 }
 
@@ -39,6 +43,8 @@ struct ConnectionLeg: Identifiable, Sendable {
     let endKey: String?
     let startTitle: String?
     let endTitle: String?
+    /// The clock where the trip began: its start stop, else its end stop.
+    let timeZone: TimeZone
 
     var transportMode: TransportMode { TransportMode(rawValue: modeRaw) ?? .unknown }
     var duration: TimeInterval { max(endDate.timeIntervalSince(startDate), 0) }
@@ -53,6 +59,8 @@ struct ConnectionLeg: Identifiable, Sendable {
         endKey = MovesStatisticsSnapshot.locationKey(move.endPlace)
         startTitle = move.startPlace?.displayTitle
         endTitle = move.endPlace?.displayTitle
+        timeZone = (move.startPlace ?? move.endPlace).flatMap { PlaceTimeZone.timeZone(at: $0.coordinate) }
+            ?? .autoupdatingCurrent
     }
 }
 
@@ -78,6 +86,13 @@ struct MovesConnectionJourney: Identifiable, Sendable {
     var isDirect: Bool { legs.count == 1 }
     var originTitle: String { legs.first?.startTitle ?? "Unknown place" }
     var destinationTitle: String { legs.last?.endTitle ?? "Unknown place" }
+
+    /// When the journey set out, on the clock where it did, with the zone when that is
+    /// not the phone's.
+    func startText(_ base: Date.FormatStyle) -> String {
+        let zone = legs.first?.timeZone ?? .autoupdatingCurrent
+        return MovesStatisticsFormatting.withZone(PlaceClock.format(startDate, base, in: zone), zone, at: startDate)
+    }
 }
 
 struct MovesConnectionStatistics {
@@ -261,8 +276,9 @@ struct MovesStatisticsSnapshot: Sendable {
         if visit.title.localizedCaseInsensitiveContains(query) { return true }
         if visit.comment?.localizedCaseInsensitiveContains(query) == true { return true }
 
-        let dateText = visit.arrivalDate.formatted(date: .long, time: .shortened)
-        let numericDateText = visit.arrivalDate.formatted(date: .numeric, time: .shortened)
+        // A typed date finds the visits on that date where they happened.
+        let dateText = PlaceClock.format(visit.arrivalDate, Date.FormatStyle(date: .long, time: .shortened), in: visit.timeZone)
+        let numericDateText = PlaceClock.format(visit.arrivalDate, Date.FormatStyle(date: .numeric, time: .shortened), in: visit.timeZone)
         return dateText.localizedCaseInsensitiveContains(query)
             || numericDateText.localizedCaseInsensitiveContains(query)
     }
@@ -302,12 +318,28 @@ enum MovesStatisticsFormatting {
     }
 
     static func visitInterval(_ place: VisitPlace) -> String {
-        visitInterval(arrival: place.arrivalDate, departure: place.departureDate)
+        visitInterval(arrival: place.arrivalDate, departure: place.departureDate, timeZone: place.placeTimeZone)
     }
 
-    static func visitInterval(arrival arrivalDate: Date, departure departureDate: Date?) -> String {
-        let arrival = arrivalDate.formatted(date: .abbreviated, time: .shortened)
-        guard let departureDate else { return "Since \(arrival)" }
-        return "\(arrival) · \(duration(departureDate.timeIntervalSince(arrivalDate)))"
+    /// "Nov 3, 2025 at 4:22 PM · 2 hr" on the clock where the stay happened, ending with
+    /// the zone ("· PST") when that clock is not the phone's, as the Timeline's day header does.
+    static func visitInterval(
+        arrival arrivalDate: Date,
+        departure departureDate: Date?,
+        timeZone: TimeZone = .autoupdatingCurrent
+    ) -> String {
+        let arrival = PlaceClock.format(arrivalDate, Date.FormatStyle(date: .abbreviated, time: .shortened), in: timeZone)
+        let text: String
+        if let departureDate {
+            text = "\(arrival) · \(duration(departureDate.timeIntervalSince(arrivalDate)))"
+        } else {
+            text = "Since \(arrival)"
+        }
+        return withZone(text, timeZone, at: arrivalDate)
+    }
+
+    /// "Nov 3 at 4:22 PM · PST" when `zone` is not the phone's clock at `moment`, else `text`.
+    static func withZone(_ text: String, _ zone: TimeZone, at moment: Date) -> String {
+        PlaceClock.foreignAbbreviation(of: zone, at: moment).map { "\(text) · \($0)" } ?? text
     }
 }

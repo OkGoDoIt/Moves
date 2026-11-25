@@ -312,7 +312,8 @@ final class MovesIntentRuntime {
         )
         let days = try context.fetch(descriptor)
         guard let interval = period.dateInterval(containing: now) else { return days }
-        return days.filter { interval.holds($0.dayStart) }
+        // By each day's own date: a day east of the phone begins on the date before.
+        return days.filter { interval.holds($0.calendarDate()) }
     }
 
     func visitEntities(
@@ -401,6 +402,8 @@ struct VisitedPlaceEntity: IndexedEntity, URLRepresentableEntity {
     let name: String
     let visitedAt: Date
     let dayKey: String
+    /// The clock the visit's time is read on: where it happened. Never donated itself.
+    var timeZone: TimeZone = .autoupdatingCurrent
 
     init(place: VisitPlace) {
         id = place.id.uuidString
@@ -411,19 +414,22 @@ struct VisitedPlaceEntity: IndexedEntity, URLRepresentableEntity {
             ?? "Visited place"
         visitedAt = place.arrivalDate
         dayKey = place.dayTimeline?.dayKey ?? DayTimeline.makeDayKey(for: place.arrivalDate)
+        timeZone = place.placeTimeZone
     }
 
     var displayRepresentation: DisplayRepresentation {
-        DisplayRepresentation(
+        let when = PlaceClock.format(visitedAt, Date.FormatStyle(date: .abbreviated, time: .shortened), in: timeZone)
+        return DisplayRepresentation(
             title: "\(name)",
-            subtitle: "Visited \(visitedAt.formatted(date: .abbreviated, time: .shortened))"
+            subtitle: "Visited \(MovesStatisticsFormatting.withZone(when, timeZone, at: visitedAt))"
         )
     }
 
     var attributeSet: CSSearchableItemAttributeSet {
         let attributes = CSSearchableItemAttributeSet(contentType: .item)
         attributes.displayName = name
-        attributes.contentDescription = "A place visited on \(visitedAt.formatted(date: .long, time: .shortened))."
+        let when = PlaceClock.format(visitedAt, Date.FormatStyle(date: .long, time: .shortened), in: timeZone)
+        attributes.contentDescription = "A place visited on \(when)."
         attributes.contentCreationDate = visitedAt
         attributes.keywords = ["Moves", "visited place", dayKey]
         return attributes
@@ -625,6 +631,8 @@ struct VisitEntity: AppEntity {
     let name: String
     let arrival: Date
     let departure: Date?
+    /// The clock where the visit happened.
+    var timeZone: TimeZone = .autoupdatingCurrent
 
     init(visit: VisitPlace) {
         id = visit.id.uuidString
@@ -632,12 +640,14 @@ struct VisitEntity: AppEntity {
         name = label
         arrival = visit.arrivalDate
         departure = visit.departureDate
+        timeZone = visit.placeTimeZone
     }
 
     var displayRepresentation: DisplayRepresentation {
-        DisplayRepresentation(
+        let when = PlaceClock.format(arrival, Date.FormatStyle(date: .abbreviated, time: .shortened), in: timeZone)
+        return DisplayRepresentation(
             title: "\(name)",
-            subtitle: "Arrived \(arrival.formatted(date: .abbreviated, time: .shortened))"
+            subtitle: "Arrived \(MovesStatisticsFormatting.withZone(when, timeZone, at: arrival))"
         )
     }
 }
@@ -666,6 +676,8 @@ struct MoveEntity: AppEntity {
     let start: Date
     let end: Date
     let distanceMeters: Double
+    /// The clock where the move began.
+    var timeZone: TimeZone = .autoupdatingCurrent
 
     init(move: MoveSegment) {
         id = move.id.uuidString
@@ -675,12 +687,14 @@ struct MoveEntity: AppEntity {
         start = move.timelineStartDate
         end = move.endDate
         distanceMeters = move.distanceMeters
+        timeZone = move.placeTimeZone
     }
 
     var displayRepresentation: DisplayRepresentation {
-        DisplayRepresentation(
+        let when = PlaceClock.format(start, Date.FormatStyle(date: .omitted, time: .shortened), in: timeZone)
+        return DisplayRepresentation(
             title: "\(startName) to \(endName)",
-            subtitle: "\(mode) · \(start.formatted(date: .omitted, time: .shortened))"
+            subtitle: "\(mode) · \(MovesStatisticsFormatting.withZone(when, timeZone, at: start))"
         )
     }
 }

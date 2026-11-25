@@ -378,6 +378,123 @@ final class TimelineDayFilingTests: XCTestCase {
         XCTAssertNil(signal(walk, 1_000))
     }
 
+    // MARK: - Screens that list rows from many days
+
+    /// A home in San Francisco read on a phone in Vietnam: Places, Search, Review, and
+    /// Insights give the San Francisco date and hour, as the Timeline does.
+    func testListsReadAStayOnTheClockWhereItHappened() async throws {
+        // Monday 3 November 2025, 7:30 PM in San Francisco, is Tuesday 10:30 AM in Vietnam.
+        let arrival = date("2025-11-03 19:30", in: pacific)
+        let home = VisitPlace(
+            arrivalDate: arrival,
+            departureDate: date("2025-11-03 23:30", in: pacific),
+            latitude: sanFrancisco.latitude,
+            longitude: sanFrancisco.longitude,
+            horizontalAccuracy: 20
+        )
+        home.assignmentSource = .user
+        context.insert(home)
+        let homeDay = DayTimeline(containing: arrival, in: pacific)
+        context.insert(homeDay)
+        home.dayTimeline = homeDay
+        // Wednesday 5 November in Seoul begins at 10 PM on the 4th on the phone's clock.
+        let seoul = CLLocationCoordinate2D(latitude: 37.5665, longitude: 126.9780)
+        let seoulZone = TimeZone(identifier: "Asia/Seoul")!
+        let breakfast = VisitPlace(
+            arrivalDate: date("2025-11-05 08:00", in: seoulZone),
+            departureDate: date("2025-11-05 09:00", in: seoulZone),
+            latitude: seoul.latitude,
+            longitude: seoul.longitude,
+            horizontalAccuracy: 20
+        )
+        context.insert(breakfast)
+        let seoulDay = DayTimeline(containing: breakfast.arrivalDate, in: seoulZone)
+        context.insert(seoulDay)
+        breakfast.dayTimeline = seoulDay
+        let walk = MoveSegment(
+            dedupeKey: UUID().uuidString,
+            startDate: date("2025-11-03 08:10", in: pacific),
+            endDate: date("2025-11-03 08:40", in: pacific),
+            transportMode: .walking,
+            distanceMeters: 2_000,
+            stepCount: nil
+        )
+        context.insert(walk)
+        let morning = VisitPlace(
+            arrivalDate: date("2025-11-03 07:00", in: pacific),
+            departureDate: date("2025-11-03 08:10", in: pacific),
+            latitude: sanFrancisco.latitude,
+            longitude: sanFrancisco.longitude,
+            horizontalAccuracy: 20
+        )
+        context.insert(morning)
+        morning.dayTimeline = homeDay
+        walk.startPlace = morning
+        walk.endPlace = home
+        walk.dayTimeline = homeDay
+        try context.save()
+
+        let phone = Calendar.current
+        XCTAssertEqual(phone.timeZone.identifier, vietnam.identifier)
+        func onPacific(_ style: Date.FormatStyle) -> String { PlaceClock.format(arrival, style, in: pacific) }
+        func onPhone(_ style: Date.FormatStyle) -> String { PlaceClock.format(arrival, style, in: vietnam) }
+
+        // Places: the occupancy chart puts the arrival on Monday at 7 PM, not Tuesday at 10 AM.
+        let grid = OccupancyGrid.build(visits: [PlacesVisitRecord(home)], calendar: phone)
+        XCTAssertEqual(grid.counts[1][19], 1)
+        XCTAssertEqual(grid.counts[2][10], 0)
+
+        // Places: the visit list's date, time, and the zone named once in the header.
+        let later = date("2026-11-25 12:00", in: vietnam)
+        let dayStyle = Date.FormatStyle(date: .abbreviated, time: .omitted)
+        let timeStyle = Date.FormatStyle(date: .omitted, time: .shortened)
+        XCTAssertEqual(PlaceVisitRow.dayText(for: arrival, in: home.placeTimeZone, now: later), onPacific(dayStyle))
+        XCTAssertNotEqual(onPacific(dayStyle), onPhone(dayStyle))
+        XCTAssertTrue(PlaceVisitRow.detailText(arrival: arrival, stay: 4 * 3600, in: home.placeTimeZone).hasPrefix(onPacific(timeStyle)))
+        XCTAssertEqual(PlaceVisitRow.withZone("Visits", visits: [home]), "Visits · \(pacific.abbreviation(for: arrival)!)")
+        XCTAssertEqual(PlaceVisitRow.timelineDay(of: home), homeDay.calendarDate())
+        // On the 4th in Vietnam the visit was yesterday, though the phone's clock puts it this morning.
+        XCTAssertEqual(PlaceVisitRow.dayText(for: arrival, in: pacific, now: date("2025-11-04 12:00", in: vietnam)), String(localized: "Yesterday"))
+
+        // Search: "November 3" finds the day filed on the 3rd, and a typed time is that day's clock.
+        let corpus = try await MovesSearchCorpus.load(from: container)
+        let searchNow = date("2025-11-20 12:00", in: vietnam)
+        func search(_ text: String) -> [MovesSearchSection] {
+            MovesSearchIndex.results(
+                parsed: SearchQueryParser.parse(text, now: searchNow, calendar: phone),
+                corpus: corpus,
+                now: searchNow,
+                calendar: phone
+            )
+        }
+        let completeDay = Date.FormatStyle(date: .complete, time: .omitted)
+        let november3 = try XCTUnwrap(search("november 3").first { $0.title == String(localized: "Days") }?.hits.first)
+        XCTAssertEqual(november3.title, onPacific(completeDay))
+        XCTAssertEqual(november3.subtitle, String(localized: "\(1) places"))
+        XCTAssertEqual(november3.action, .day(homeDay.calendarDate()))
+
+        let seoulRow = try XCTUnwrap(search("11-05").first { $0.title == String(localized: "Days") }?.hits.first)
+        XCTAssertEqual(seoulRow.title, PlaceClock.format(breakfast.arrivalDate, completeDay, in: seoulZone))
+        XCTAssertNotEqual(seoulRow.title, PlaceClock.format(seoulDay.dayStart, completeDay, in: vietnam), "Not the date before")
+
+        let evening = try XCTUnwrap(search("november 3 7:30pm").first { $0.title == String(localized: "Moments") }?.hits.first)
+        XCTAssertEqual(evening.action, .moment(arrival))
+        XCTAssertTrue(evening.title.hasPrefix(onPacific(Date.FormatStyle(date: .abbreviated, time: .shortened))))
+        XCTAssertTrue(evening.title.hasSuffix(" · \(pacific.abbreviation(for: arrival)!)"))
+
+        // Review: the row's day and time are San Francisco's, with the zone at the end.
+        let when = ReviewInboxBuilder.whenText(start: arrival, duration: 4 * 3600, timeZone: home.placeTimeZone)
+        XCTAssertTrue(when.hasPrefix(onPacific(.dateTime.weekday(.abbreviated).month(.abbreviated).day())))
+        XCTAssertTrue(when.contains(onPacific(timeStyle)))
+        XCTAssertTrue(when.hasSuffix(" · \(pacific.abbreviation(for: arrival)!)"))
+
+        // Insights: the 8:10 AM walk counts in the 8 AM hour where it happened.
+        let source = try InsightsSourceLoader.load(from: container)
+        let snapshot = InsightsSnapshotBuilder.build(days: source.days, period: .all, now: later, calendar: phone)
+        XCTAssertEqual(snapshot.hourDurations[8], 30 * 60, accuracy: 1)
+        XCTAssertEqual(snapshot.hourDurations[23], 0, accuracy: 1)
+    }
+
     // MARK: - Helpers
 
     private let vietnam = TimeZone(identifier: "Asia/Ho_Chi_Minh")!

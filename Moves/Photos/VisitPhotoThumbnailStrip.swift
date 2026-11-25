@@ -3,6 +3,13 @@ import SwiftData
 import SwiftUI
 import UIKit
 
+/// A photo's time on the clock where it was taken, as the Timeline reads that day.
+enum PhotoClock {
+    static func timeText(_ attachment: PhotoAttachment) -> String {
+        PlaceClock.format(attachment.capturedAt, .dateTime.hour().minute(), in: attachment.placeTimeZone)
+    }
+}
+
 /// Up to four visit thumbnails plus a "+N" remainder, shown on storyline place rows.
 struct VisitPhotoThumbnailStrip: View {
     let attachments: [PhotoAttachment]
@@ -40,7 +47,7 @@ struct VisitPhotoThumbnailStrip: View {
                         .frame(width: 44, height: 44)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel(Text(attachment.capturedAt, format: .dateTime.hour().minute()))
+                    .accessibilityLabel(Text(PhotoClock.timeText(attachment)))
                 }
 
                 if overflowCount > 0 {
@@ -119,7 +126,7 @@ struct PhotoAttachmentRangeStrip: View {
                             .frame(width: thumbnailSize, height: thumbnailSize)
                         }
                         .buttonStyle(.plain)
-                        .accessibilityLabel(Text(attachment.capturedAt, format: .dateTime.hour().minute()))
+                        .accessibilityLabel(Text(PhotoClock.timeText(attachment)))
                     }
                 }
             }
@@ -262,7 +269,7 @@ struct VisitPhotoViewer: View {
                 Spacer()
 
                 if let attachment = attachments[safe: index] {
-                    Text(attachment.capturedAt, format: .dateTime.hour().minute())
+                    Text(PhotoClock.timeText(attachment))
                         .font(.system(size: 15, weight: .semibold, design: .rounded))
                         .foregroundStyle(.white)
                 }

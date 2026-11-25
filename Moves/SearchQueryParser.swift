@@ -8,8 +8,10 @@ enum SearchQueryParser {
         var freeText: String = ""
         /// Start of a matched calendar day.
         var day: Date?
-        /// Instant for moment search (`moves://at/`).
+        /// Instant for moment search (`moves://at/`), on the phone's clock.
         var moment: Date?
+        /// The time of day typed, so a moment can be read on the clock of the day it names.
+        var clock: ClockTime?
 
         var isEmpty: Bool {
             freeText.isEmpty && day == nil && moment == nil
@@ -18,9 +20,19 @@ enum SearchQueryParser {
         var hasTemporalMatch: Bool {
             day != nil || moment != nil
         }
+
+        /// The typed time on the day `moment` names, on that day's own clock: "Tue 3pm"
+        /// for a Tuesday in San Francisco means 3 PM there.
+        func moment(in zone: TimeZone, calendar: Calendar = .autoupdatingCurrent) -> Date? {
+            guard let moment, let clock else { return moment }
+            let key = DayTimeline.makeDayKey(for: moment, in: calendar.timeZone)
+            guard let start = TimelineDayFiling.startOfDay(forKey: key, in: zone) else { return moment }
+            return PlaceClock.calendar(calendar, in: zone)
+                .date(bySettingHour: clock.hour, minute: clock.minute, second: 0, of: start) ?? moment
+        }
     }
 
-    private struct ClockTime: Equatable {
+    struct ClockTime: Equatable, Sendable {
         var hour: Int
         var minute: Int
     }
@@ -61,7 +73,8 @@ enum SearchQueryParser {
         return ParsedQuery(
             freeText: freeText,
             day: day.map { calendar.startOfDay(for: $0) },
-            moment: moment
+            moment: moment,
+            clock: moment == nil ? nil : clock
         )
     }
 

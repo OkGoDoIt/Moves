@@ -91,9 +91,15 @@ struct OccupancyGrid: Equatable, Sendable {
 
         let confirmed = visits.filter { $0.assignmentSource == .user }
         if !confirmed.isEmpty {
+            // Hours and weekdays on the clock where each visit happened: a home in San
+            // Francisco charts its evenings, whatever zone the phone is in now.
+            var calendars: [TimeZone: Calendar] = [:]
             for visit in confirmed {
-                let weekday = calendar.component(.weekday, from: visit.arrivalDate) - 1
-                let hour = calendar.component(.hour, from: visit.arrivalDate)
+                let zone = visit.timeZone ?? calendar.timeZone
+                let local = calendars[zone] ?? PlaceClock.calendar(calendar, in: zone)
+                calendars[zone] = local
+                let weekday = local.component(.weekday, from: visit.arrivalDate) - 1
+                let hour = local.component(.hour, from: visit.arrivalDate)
                 guard weekday >= 0, weekday < weekdayCount, hour >= 0, hour < hourCount else { continue }
                 counts[weekday][hour] += 1
             }
@@ -166,6 +172,9 @@ struct PlacesVisitRecord: Equatable, Sendable, Identifiable {
 
     /// `name` as an optional, for helpers that read optional labels.
     var optionalName: String? { name }
+
+    /// The clock where this visit happened; nil for a coordinate that is not a real position.
+    var timeZone: TimeZone? { PlaceTimeZone.timeZone(at: coordinate) }
 
     /// Stay length; open visits run until `now`.
     func stayDuration(now: Date) -> TimeInterval {
@@ -690,7 +699,8 @@ enum PlacesIndexBuilder {
                 address: resolved.isPending ? String(localized: "Naming…") : address,
                 visitCount: visitCount,
                 lastVisitAt: lastVisitAt,
-                now: now
+                now: now,
+                placeCoordinate: coordinate
             )
         )
     }
@@ -719,6 +729,7 @@ enum PlacesIndexBuilder {
                 visitCount: cluster.visitCount,
                 lastVisitAt: cluster.lastVisitAt,
                 now: now,
+                placeCoordinate: cluster.coordinate,
                 distanceMeters: userCoordinate
                     .map { distance(from: cluster.coordinate, to: $0) }
                     .flatMap { $0 <= nearbyDistanceLimit ? $0 : nil }
@@ -769,13 +780,16 @@ enum PlacesIndexBuilder {
         lastVisitAt: Date?,
         now: Date,
         calendar: Calendar = .autoupdatingCurrent,
+        placeCoordinate: CLLocationCoordinate2D? = nil,
         distanceMeters: CLLocationDistance? = nil
     ) -> String {
         var parts: [String] = [
             visitCount == 1 ? String(localized: "1 visit") : String(localized: "\(visitCount) visits")
         ]
         if let lastVisitAt {
-            parts.append(shortDay(lastVisitAt, now: now, calendar: calendar))
+            // The date of the last visit where it happened, not on the phone's clock.
+            let zone = placeCoordinate.flatMap(PlaceTimeZone.timeZone(at:)) ?? calendar.timeZone
+            parts.append(shortDay(PlaceClock.calendarDate(of: lastVisitAt, in: zone, on: calendar), now: now, calendar: calendar))
         }
         if let distanceMeters {
             parts.append(String(localized: "\(MovesStatisticsFormatting.distance(distanceMeters)) away"))

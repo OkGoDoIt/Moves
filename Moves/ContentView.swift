@@ -1045,9 +1045,26 @@ struct ContentView: View {
         guard !dayTimelines.isEmpty else { return }
 
         // Every calendar day is in the list, in order: the day itself, else the nearest end.
-        let targetStart = Calendar.autoupdatingCurrent.startOfDay(for: date)
+        // A moment opens the day it is filed on where it happened, which can be another
+        // date on the phone's clock; a plain date is already the day's own date.
+        let calendar = Calendar.autoupdatingCurrent
+        let targetStart = rootController.requestedJumpMoment == date
+            ? PlaceClock.calendarDate(of: date, in: zoneWhere(at: date), on: calendar)
+            : calendar.startOfDay(for: date)
         let index = dayTimelines.firstIndex { $0.dayStart >= targetStart } ?? dayTimelines.count - 1
         select(dayAt: index)
+    }
+
+    /// The clock where the person was at `moment`: the zone of the last stay that began by
+    /// then, so a moment between two stays reads on the clock of the one before.
+    private func zoneWhere(at moment: Date) -> TimeZone {
+        var query = FetchDescriptor<VisitPlace>(
+            predicate: #Predicate { $0.arrivalDate <= moment && $0.dayTimeline != nil },
+            sortBy: [SortDescriptor(\.arrivalDate, order: .reverse)]
+        )
+        query.fetchLimit = 1
+        guard let visit = try? modelContext.fetch(query).first else { return .autoupdatingCurrent }
+        return PlaceTimeZone.timeZone(at: visit.coordinate) ?? .autoupdatingCurrent
     }
 
     /// Shows a day chosen by something other than a swipe. It does not rely on the page number
@@ -2035,7 +2052,7 @@ private struct RequestedMoveDetailView: View {
     @State private var didLoad = false
     var body: some View {
         Group {
-            if let move { MoveMapDetailView(segment: move) }
+            if let move { MoveMapDetailView(segment: move).timelineClock(move.placeTimeZone) }
             else if didLoad { ContentUnavailableView("Move unavailable", systemImage: "point.topleft.down.to.point.bottomright.curvepath") }
             else { ProgressView() }
         }

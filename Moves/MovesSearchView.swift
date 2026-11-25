@@ -1,3 +1,4 @@
+import CoreLocation
 import SwiftData
 import SwiftUI
 
@@ -195,6 +196,8 @@ struct MovesSearchCorpus: Sendable {
         let knownPlaceID: UUID?
         let arrivalDate: Date
         let departureDate: Date?
+        /// The clock where the stay happened.
+        var timeZone: TimeZone = .current
     }
 
     struct Move: Sendable {
@@ -211,6 +214,15 @@ struct MovesSearchCorpus: Sendable {
         let uniqueLocationCount: Int
         var visits: [Visit] = []
         var moves: [Move] = []
+        /// The clock the Timeline reads this day on (`DayTimeline.placeTimeZone`).
+        var timeZone: TimeZone = .current
+
+        /// The day's own date as midnight on `calendar`, as the Timeline pages by it.
+        /// `dayStart` is midnight where the day happened, which on the phone's clock can
+        /// fall on the date before.
+        func calendarDate(in calendar: Calendar) -> Date {
+            TimelineDayFiling.startOfDay(forKey: dayKey, in: calendar.timeZone) ?? calendar.startOfDay(for: dayStart)
+        }
     }
 
     var knownPlaces: [Place] = []
@@ -232,8 +244,14 @@ struct MovesSearchCorpus: Sendable {
             visitFetch.relationshipKeyPathsForPrefetching = [\.dayTimeline, \.knownPlace]
             var visits: [PersistentIdentifier: [Visit]] = [:]
             var buckets: [PersistentIdentifier: Set<String>] = [:]
+            // The first stay and trip start of each day, for the day's clock.
+            var firstStays: [PersistentIdentifier: (Date, CLLocationCoordinate2D)] = [:]
+            var firstTripStarts: [PersistentIdentifier: (Date, CLLocationCoordinate2D)] = [:]
+            let phone = Calendar.current.timeZone
             for visit in try context.fetch(visitFetch) {
                 guard let day = visit.dayTimeline?.persistentModelID else { continue }
+                let coordinate = visit.coordinate
+                if firstStays[day] == nil { firstStays[day] = (visit.arrivalDate, coordinate) }
                 visits[day, default: []].append(Visit(
                     id: visit.id,
                     title: visit.displayTitle,
@@ -241,7 +259,8 @@ struct MovesSearchCorpus: Sendable {
                     comment: visit.comment,
                     knownPlaceID: visit.knownPlace?.id,
                     arrivalDate: visit.arrivalDate,
-                    departureDate: visit.departureDate
+                    departureDate: visit.departureDate,
+                    timeZone: PlaceTimeZone.timeZone(at: coordinate) ?? phone
                 ))
                 // Matches `DayTimeline.uniqueLocationCount`: ~10 m buckets.
                 buckets[day, default: []].insert(
@@ -254,6 +273,9 @@ struct MovesSearchCorpus: Sendable {
             var moves: [PersistentIdentifier: [Move]] = [:]
             for move in try context.fetch(moveFetch) {
                 guard let day = move.dayTimeline?.persistentModelID else { continue }
+                if firstTripStarts[day] == nil, let start = move.startPlace {
+                    firstTripStarts[day] = (move.startDate, start.coordinate)
+                }
                 moves[day, default: []].append(Move(
                     id: move.id,
                     comment: move.comment,
@@ -263,14 +285,19 @@ struct MovesSearchCorpus: Sendable {
                 ))
             }
 
-            corpus.days = try context.fetch(FetchDescriptor<DayTimeline>(sortBy: [SortDescriptor(\.dayStart)])).map { day in
+            corpus.days = try context.fetch(FetchDescriptor<DayTimeline>(sortBy: [SortDescriptor(\.dayKey)])).map { day in
                 let id = day.persistentModelID
                 return Day(
                     dayKey: day.dayKey,
                     dayStart: day.dayStart,
                     uniqueLocationCount: buckets[id]?.count ?? 0,
                     visits: visits[id] ?? [],
-                    moves: moves[id] ?? []
+                    moves: moves[id] ?? [],
+                    timeZone: DayTimeline.clock(
+                        dayKey: day.dayKey,
+                        firstStay: firstStays[id],
+                        firstTripStart: firstTripStarts[id]
+                    )
                 )
             }
             return corpus
@@ -299,7 +326,7 @@ enum MovesSearchIndex {
         if !dayHits.isEmpty {
             sections.append(MovesSearchSection(title: String(localized: "Days"), hits: dayHits))
         }
-        let moments = momentHits(parsed: parsed)
+        let moments = momentHits(parsed: parsed, days: corpus.days, calendar: calendar)
         if !moments.isEmpty {
             sections.append(MovesSearchSection(title: String(localized: "Moments"), hits: moments))
         }
@@ -353,7 +380,7 @@ enum MovesSearchIndex {
                         id: "visit-\(visit.id.uuidString)",
                         kind: .place,
                         title: visit.title,
-                        subtitle: MovesStatisticsFormatting.visitInterval(arrival: visit.arrivalDate, departure: visit.departureDate),
+                        subtitle: visitInterval(visit),
                         symbolName: "mappin",
                         action: .visit(visit.id)
                     )
@@ -377,13 +404,15 @@ enum MovesSearchIndex {
         let needle = parsed.freeText
         if needle.count >= 3 {
             for timeline in days.reversed() {
-                let label = timeline.dayStart.formatted(date: .complete, time: .omitted)
-                let numeric = timeline.dayStart.formatted(date: .numeric, time: .omitted)
+                // The day's own date, never `dayStart` read on the phone's clock.
+                let date = timeline.calendarDate(in: calendar)
+                let label = PlaceClock.format(date, Date.FormatStyle(date: .complete, time: .omitted), in: calendar.timeZone)
+                let numeric = PlaceClock.format(date, Date.FormatStyle(date: .numeric, time: .omitted), in: calendar.timeZone)
                 if label.localizedCaseInsensitiveContains(needle)
                     || numeric.localizedCaseInsensitiveContains(needle)
                     || timeline.dayKey.localizedCaseInsensitiveContains(needle) {
                     if hits.contains(where: { $0.id == "day-\(timeline.dayKey)" }) { continue }
-                    hits.append(dayHit(for: timeline.dayStart, timelines: days, calendar: calendar))
+                    hits.append(dayHit(for: date, timelines: days, calendar: calendar))
                 }
                 if hits.count >= resultLimit { break }
             }
@@ -392,11 +421,21 @@ enum MovesSearchIndex {
     }
 
     private static func momentHits(
-        parsed: SearchQueryParser.ParsedQuery
+        parsed: SearchQueryParser.ParsedQuery,
+        days: [MovesSearchCorpus.Day],
+        calendar: Calendar
     ) -> [MovesSearchHit] {
-        guard let moment = parsed.moment else { return [] }
-        let title = moment.formatted(date: .abbreviated, time: .shortened)
-        let weekday = moment.formatted(.dateTime.weekday(.wide))
+        guard let typed = parsed.moment else { return [] }
+        // The time typed means the clock of the day it names, as that day reads on the Timeline.
+        let key = DayTimeline.makeDayKey(for: typed, in: calendar.timeZone)
+        let zone = days.last { $0.dayKey == key }?.timeZone ?? calendar.timeZone
+        let moment = parsed.moment(in: zone, calendar: calendar) ?? typed
+        let title = MovesStatisticsFormatting.withZone(
+            PlaceClock.format(moment, Date.FormatStyle(date: .abbreviated, time: .shortened), in: zone),
+            zone,
+            at: moment
+        )
+        let weekday = PlaceClock.format(moment, .dateTime.weekday(.wide), in: zone)
         return [
             MovesSearchHit(
                 id: "moment-\(moment.timeIntervalSince1970)",
@@ -426,7 +465,7 @@ enum MovesSearchIndex {
                         id: "note-\(visit.id.uuidString)",
                         kind: .note,
                         title: comment,
-                        subtitle: "\(visit.title) · \(MovesStatisticsFormatting.visitInterval(arrival: visit.arrivalDate, departure: visit.departureDate))",
+                        subtitle: "\(visit.title) · \(visitInterval(visit))",
                         symbolName: "note.text",
                         action: .visit(visit.id)
                     )
@@ -459,8 +498,10 @@ enum MovesSearchIndex {
         timelines: [MovesSearchCorpus.Day],
         calendar: Calendar
     ) -> MovesSearchHit {
+        // `date` is a date on the phone's calendar; the day filed under that date is the
+        // one with the same key, wherever it happened.
         let start = calendar.startOfDay(for: date)
-        let key = DayTimeline.makeDayKey(for: start)
+        let key = DayTimeline.makeDayKey(for: start, in: calendar.timeZone)
         let timeline = timelines.first { $0.dayKey == key }
         let subtitle: String
         if let timeline {
@@ -472,10 +513,18 @@ enum MovesSearchIndex {
         return MovesSearchHit(
             id: "day-\(key)",
             kind: .day,
-            title: start.formatted(date: .complete, time: .omitted),
+            title: PlaceClock.format(start, Date.FormatStyle(date: .complete, time: .omitted), in: calendar.timeZone),
             subtitle: subtitle,
             symbolName: "calendar",
             action: .day(start)
+        )
+    }
+
+    private static func visitInterval(_ visit: MovesSearchCorpus.Visit) -> String {
+        MovesStatisticsFormatting.visitInterval(
+            arrival: visit.arrivalDate,
+            departure: visit.departureDate,
+            timeZone: visit.timeZone
         )
     }
 

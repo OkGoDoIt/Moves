@@ -88,7 +88,7 @@ enum ReviewInboxBuilder {
                     kind: .move(move),
                     section: .trips,
                     title: tripTitle(move),
-                    when: whenText(start: move.timelineStartDate, duration: move.timelineDuration),
+                    when: whenText(start: move.timelineStartDate, duration: move.timelineDuration, timeZone: move.placeTimeZone),
                     question: String(localized: "How did you travel?"),
                     date: move.startDate,
                     thumbnail: .path(
@@ -155,18 +155,25 @@ enum ReviewInboxBuilder {
             kind: .visit(visit),
             section: section,
             title: title,
-            when: whenText(start: visit.arrivalDate, duration: TimelineReviewHeuristics.stayDuration(of: visit)),
+            when: whenText(
+                start: visit.arrivalDate,
+                duration: TimelineReviewHeuristics.stayDuration(of: visit),
+                timeZone: visit.placeTimeZone
+            ),
             question: question,
             date: visit.arrivalDate,
             thumbnail: .spot(visit.coordinate, path: pathCoordinates(around: visit))
         )
     }
 
-    static func whenText(start: Date, duration: TimeInterval?) -> String {
-        let day = start.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day())
-        let time = start.formatted(date: .omitted, time: .shortened)
-        guard let duration else { return "\(day) · \(time)" }
-        return "\(day) · \(time) · \(durationText(duration))"
+    /// On the clock where the stay or trip happened, ending with the zone ("· PST") when
+    /// that is not the phone's, as the Timeline's day header does.
+    static func whenText(start: Date, duration: TimeInterval?, timeZone: TimeZone = .autoupdatingCurrent) -> String {
+        let day = PlaceClock.format(start, .dateTime.weekday(.abbreviated).month(.abbreviated).day(), in: timeZone)
+        let time = PlaceClock.format(start, Date.FormatStyle(date: .omitted, time: .shortened), in: timeZone)
+        var text = "\(day) · \(time)"
+        if let duration { text += " · \(durationText(duration))" }
+        return MovesStatisticsFormatting.withZone(text, timeZone, at: start)
     }
 
     /// Same compact form as the timeline's "Stayed 42m": `<1m`, `26m`, `1h 5m`.

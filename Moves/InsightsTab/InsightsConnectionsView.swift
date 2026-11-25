@@ -15,6 +15,7 @@ private struct ConnectionLegDestination: View {
     var body: some View {
         if let move = moves.first {
             MoveMapDetailView(segment: move)
+                .timelineClock(move.placeTimeZone)
         } else {
             ContentUnavailableView(
                 String(localized: "Trip Not Found"),
@@ -276,7 +277,7 @@ private struct ConnectionJourneyRow: View {
                     .font(.system(size: 14, weight: .semibold, design: .rounded))
                     .foregroundStyle(.primary)
                     .lineLimit(2)
-                Text(journey.startDate.formatted(date: .abbreviated, time: .shortened))
+                Text(journey.startText(Date.FormatStyle(date: .abbreviated, time: .shortened)))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text("\(MovesStatisticsFormatting.duration(journey.duration)) · \(MovesStatisticsFormatting.distance(journey.distanceMeters)) · \(journey.isDirect ? String(localized: "Direct") : String(localized: "\(journey.legs.count) legs"))")
@@ -356,7 +357,7 @@ private struct ConnectionJourneyDetailView: View {
                 SettingsCard(title: String(localized: "Journey")) {
                     Text("\(journey.originTitle) → \(journey.destinationTitle)")
                         .font(.system(size: 18, weight: .bold, design: .rounded))
-                    Text(journey.startDate.formatted(date: .complete, time: .shortened))
+                    Text(journey.startText(Date.FormatStyle(date: .complete, time: .shortened)))
                         .foregroundStyle(.secondary)
 
                     HStack(spacing: 10) {

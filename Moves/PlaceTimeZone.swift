@@ -428,6 +428,53 @@ extension MoveSegment {
     }
 }
 
+extension PhotoAttachment {
+    /// The clock the photo's time is read on: where it was taken, else its stay or day.
+    var placeTimeZone: TimeZone {
+        if let latitude, let longitude,
+           let zone = PlaceTimeZone.timeZone(at: CLLocationCoordinate2D(latitude: latitude, longitude: longitude)) {
+            return zone
+        }
+        return visitPlace?.placeTimeZone ?? dayTimeline?.placeTimeZone ?? Calendar.current.timeZone
+    }
+}
+
+/// Reads a row's date and time on the clock of the place where it happened, the way the
+/// Timeline tab does, for screens that list rows from many days and places at once.
+enum PlaceClock {
+    /// `base` formatting on `zone`'s clock.
+    static func style(_ base: Date.FormatStyle, in zone: TimeZone) -> Date.FormatStyle {
+        var style = base
+        style.timeZone = zone
+        return style
+    }
+
+    /// `date` formatted with `base` on `zone`'s clock.
+    static func format(_ date: Date, _ base: Date.FormatStyle, in zone: TimeZone) -> String {
+        date.formatted(style(base, in: zone))
+    }
+
+    /// The zone's short name ("PDT") at `moment` when that clock is not the phone's, else nil.
+    static func foreignAbbreviation(of zone: TimeZone, at moment: Date, phone: TimeZone = .current) -> String? {
+        guard zone.secondsFromGMT(for: moment) != phone.secondsFromGMT(for: moment) else { return nil }
+        return zone.abbreviation(for: moment) ?? zone.identifier
+    }
+
+    /// The date `moment` falls on where it happened, as midnight of that date on `calendar`.
+    /// Use it to compare with today, or to group beside `DayTimeline.calendarDate(in:)`.
+    static func calendarDate(of moment: Date, in zone: TimeZone, on calendar: Calendar = .current) -> Date {
+        let key = TimelineDayFiling.dayKey(for: moment, in: zone)
+        return TimelineDayFiling.startOfDay(forKey: key, in: calendar.timeZone) ?? calendar.startOfDay(for: moment)
+    }
+
+    /// A calendar for hour and weekday arithmetic on `zone`'s clock, keeping the rest of `calendar`.
+    static func calendar(_ calendar: Calendar = .current, in zone: TimeZone) -> Calendar {
+        var calendar = calendar
+        calendar.timeZone = zone
+        return calendar
+    }
+}
+
 /// Which day a moment is filed under, and when that day starts, in a given zone.
 enum TimelineDayFiling {
     static func calendar(in zone: TimeZone) -> Calendar {

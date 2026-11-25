@@ -559,7 +559,7 @@ struct MapTabView: View {
                 Image(systemName: route.transportMode.symbolName)
                     .foregroundStyle(MovesPalette.transport(route.transportMode))
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(route.startDate.formatted(.dateTime.weekday(.abbreviated).hour().minute()))
+                    Text(routeStartText(route))
                         .font(.system(size: 13, weight: .semibold, design: .rounded))
                     Text(calloutSubtitle(route))
                         .font(.system(size: 11, weight: .medium, design: .rounded))
@@ -584,6 +584,16 @@ struct MapTabView: View {
         .shadow(color: .black.opacity(0.1), radius: 10, y: 3)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(calloutSubtitle(route))
+    }
+
+    /// "Tue 4:22 PM" on the clock where the trip began, with the zone when it is not the phone's.
+    private func routeStartText(_ route: MapDisplayedRoute) -> String {
+        let zone = route.rendered.coordinates.first.flatMap(PlaceTimeZone.timeZone(at:)) ?? .autoupdatingCurrent
+        return MovesStatisticsFormatting.withZone(
+            PlaceClock.format(route.startDate, .dateTime.weekday(.abbreviated).hour().minute(), in: zone),
+            zone,
+            at: route.startDate
+        )
     }
 
     private func calloutSubtitle(_ route: MapDisplayedRoute) -> String {
