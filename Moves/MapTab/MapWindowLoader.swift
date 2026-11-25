@@ -77,6 +77,11 @@ final class MapWindowLoader {
         let moveCount: Int
     }
 
+    /// Leaving the app: whatever a load in flight finds afterwards is dropped.
+    func suspend() {
+        loadGeneration += 1
+    }
+
     func load(
         selection: MapRangeSelection,
         modelContext: ModelContext,

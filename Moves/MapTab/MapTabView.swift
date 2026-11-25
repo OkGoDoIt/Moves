@@ -9,6 +9,7 @@ struct MapTabView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.openURL) private var openURL
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var controller: MovesRootController
     @Query(sort: \DayTimeline.dayStart, order: .forward) private var dayTimelines: [DayTimeline]
     @AppStorage(MapRouteShadingSettings.shadeRoutesBySpeedKey) private var shadeRoutesBySpeed = true
@@ -126,14 +127,13 @@ struct MapTabView: View {
     }
 
     /// More trips or stays in the range than polylines and annotations can carry smoothly.
-    /// Counted from the activity index once it is ready, from the last load before that.
+    /// Counted from the activity index only. Until it is ready the range counts as large, which
+    /// is the cheap path: deciding from the loader's own output would make the two feed each other.
     private var rangeIsLarge: Bool {
         let threshold = MapCoverageRenderer.routeRasterThreshold
         _ = coverage.indexGeneration
-        if let counts = coverage.counts(interval: selection.focus, modes: modeFilter) {
-            return counts.tracks > threshold || counts.stays > threshold
-        }
-        return displayedRoutes.count > threshold || loader.visits.count > threshold
+        guard let counts = coverage.counts(interval: selection.focus, modes: modeFilter) else { return true }
+        return counts.tracks > threshold || counts.stays > threshold
     }
 
     private static func displayedRoute(from track: MapActivityTrack) -> MapDisplayedRoute {
@@ -195,7 +195,8 @@ struct MapTabView: View {
             // Every scrubber tick changes the key. This task is cancelled by the next one,
             // so a drag only loads once it pauses.
             try? await Task.sleep(for: .milliseconds(120))
-            guard !Task.isCancelled else { return }
+            // Nothing loads while the app is leaving or away; the key changes on return.
+            guard !Task.isCancelled, scenePhase == .active else { return }
             // Know the range's size before choosing between polylines and the bitmap.
             await coverage.prepare(container: modelContext.container)
             guard !Task.isCancelled else { return }
@@ -227,6 +228,20 @@ struct MapTabView: View {
         }
         .onChange(of: selection) { _, _ in
             MapPerformanceProbe.shared.activity("range")
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                coverage.resume()
+                requestCoverage()
+            } else {
+                // Leaving must be instant: the watchdog kills an app whose main thread stays
+                // busy while its scene moves to the background, and that stops capture too.
+                let started = CACurrentMediaTime()
+                coverage.suspend()
+                loader.suspend()
+                MapPerformanceProbe.shared.mark("suspend for \(phase == .background ? "background" : "inactive")", since: started)
+                MapPerformanceProbe.shared.watchMainThread("leaving the app")
+            }
         }
         .onChange(of: coverage.latestActivity?.latitude) { _, _ in
             fitCamera()
@@ -308,6 +323,7 @@ struct MapTabView: View {
             selection.granularity.rawValue,
             zoomBucket,
             rangeIsLarge ? "large" : "small",
+            scenePhase == .active ? "active" : "away",
             String(dayTimelines.count)
         ]
         .joined(separator: "|")

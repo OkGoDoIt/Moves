@@ -234,6 +234,66 @@ final class MapCoverageRendererTests: XCTestCase {
         }
     }
 
+    func testTenYearsOfHistoryStillDrawsEachLayerQuickly() throws {
+        // 20,000 trips of 25 points (500,000 route points) and 30,000 stays over ten years,
+        // spread across a few cities, viewed at city and region zoom.
+        var generator = SystemRandomNumberGenerator()
+        let cities = [center, CLLocationCoordinate2D(latitude: 10.78, longitude: 106.70), CLLocationCoordinate2D(latitude: 13.75, longitude: 100.50)]
+        let decade = 10 * 365 * 86_400.0
+        let spread = 0.2 / 360 * MKMapSize.world.width
+        var index = MapActivityIndex()
+        index.tracks = (0..<20_000).map { number -> MapActivityTrack in
+            let city = MercatorPoint(cities[number % cities.count])
+            var x = city.x + Double.random(in: -spread...spread, using: &generator)
+            var y = city.y + Double.random(in: -spread...spread, using: &generator)
+            let points = (0..<25).map { _ -> MercatorPoint in
+                x += Double.random(in: -spread / 30...spread / 30, using: &generator)
+                y += Double.random(in: -spread / 30...spread / 30, using: &generator)
+                return MercatorPoint(x: x, y: y)
+            }
+            let start = Date(timeIntervalSince1970: 1_500_000_000 + Double(number) / 20_000 * decade)
+            return MapActivityTrack(start: start, end: start.addingTimeInterval(1_800), mode: number % 2 == 0 ? .walking : .automotive,
+                                    chunks: MapActivityIndex.chunks(for: points))
+        }
+        index.stays = (0..<30_000).map { number in
+            let city = MercatorPoint(cities[number % cities.count])
+            let arrival = Date(timeIntervalSince1970: 1_500_000_000 + Double(number) / 30_000 * decade)
+            return MapActivityStay(point: MercatorPoint(x: city.x + Double.random(in: -spread...spread, using: &generator),
+                                                        y: city.y + Double.random(in: -spread...spread, using: &generator)),
+                                   arrival: arrival, departure: arrival.addingTimeInterval(3_600))
+        }
+        let allTime = DateInterval(start: .distantPast, end: .distantFuture)
+        var started = Date()
+        let subset = index.subset(interval: allTime, modes: nil, includeUndated: false)
+        print("stress subset: \(Int(Date().timeIntervalSince(started) * 1_000)) ms")
+        for metersPerPoint in [30.0, 800] {
+            for layer in [MapCoverageLayer.routes, .heat, .fog] {
+                started = Date()
+                let raster = try MapCoverageRenderer.render(subset, request: request(layer, metersPerPoint: metersPerPoint))
+                let elapsed = Date().timeIntervalSince(started)
+                XCTAssertNotNil(raster)
+                // Routes re-strokes every trip per viewport, which does not hold at this size
+                // (about 1–2 s here); it is logged, not asserted, until it draws from
+                // pre-aggregated tiles.
+                if layer != .routes {
+                    XCTAssertLessThan(elapsed, 1.0, "\(layer) at \(metersPerPoint) m/pt took \(elapsed) s")
+                }
+                print("stress render \(layer) \(metersPerPoint) m/pt: \(Int(elapsed * 1_000)) ms")
+            }
+        }
+        started = Date()
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("stress-\(UUID().uuidString).bin")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try MapActivityIndexCache.save(index, signature: "stress", to: url)
+        let saved = Date().timeIntervalSince(started)
+        started = Date()
+        let loaded = MapActivityIndexCache.load(from: url)
+        let read = Date().timeIntervalSince(started)
+        XCTAssertEqual(loaded?.index.tracks.count, 20_000)
+        XCTAssertLessThan(read, 1.0, "Opening the Map reads the saved index in \(read) s")
+        print("stress saved index: write \(Int(saved * 1_000)) ms, read \(Int(read * 1_000)) ms")
+    }
+
     func testUndatedCoverageBecomesPointsInsideItsCell() throws {
         var bytes = Data(repeating: 0, count: 512)
         bytes[0] = 0x80
@@ -437,8 +497,9 @@ final class MapCoverageRendererTests: XCTestCase {
         // Photos two days apart joined by an invented trip.
         XCTAssertFalse(rule(2 * 86_400, 300, 0, false))
         XCTAssertFalse(rule(7 * 3_600, 50_000, 0, false))
-        // A crawl: 5 km in 8 hours with nothing recorded.
-        XCTAssertFalse(rule(5 * 3_600, 5_000, 0, false))
+        // A crawl: 3 km in 5 hours with nothing recorded.
+        XCTAssertFalse(rule(5 * 3_600, 3_000, 0, false))
+        XCTAssertTrue(rule(5 * 3_600, 1_500, 0, false), "Short enough to be a slow wander")
         // Ordinary trips, with or without fixes.
         XCTAssertTrue(rule(40 * 60, 12_000, 0, false))
         XCTAssertTrue(rule(30 * 60, 1_500, 0, false))
@@ -535,6 +596,27 @@ final class MapCoverageRendererTests: XCTestCase {
         XCTAssertNotNil(controller.cachedRaster(for: update(base)))
         NotificationCenter.default.post(name: UIApplication.didReceiveMemoryWarningNotification, object: nil)
         XCTAssertNil(controller.cachedRaster(for: update(base)))
+    }
+
+    @MainActor
+    func testLeavingTheAppStopsAllMapWorkAndStartsNoneUntilBack() throws {
+        let controller = MapCoverageController()
+        controller.adopt(MapActivityIndex())
+        let update = MapCoverageController.Update(
+            container: try makeContainer(), revision: 1, request: request(.heat, metersPerPoint: 20),
+            interval: DateInterval(start: .distantPast, end: .distantFuture), modes: nil, includeUndated: false
+        )
+        controller.update(update)
+        XCTAssertTrue(controller.hasQueuedWork)
+        let started = CACurrentMediaTime()
+        controller.suspend()
+        XCTAssertLessThan(CACurrentMediaTime() - started, 0.005, "Suspending does no work that scales with history")
+        XCTAssertFalse(controller.hasQueuedWork)
+        controller.update(update)
+        XCTAssertFalse(controller.hasQueuedWork, "Nothing new starts while leaving")
+        controller.resume()
+        controller.update(update)
+        XCTAssertTrue(controller.hasQueuedWork)
     }
 
     private func makeContainer() throws -> ModelContainer {

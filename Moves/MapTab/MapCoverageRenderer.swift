@@ -901,10 +901,35 @@ final class MapCoverageController {
     /// Shows a cached bitmap at once when one covers the camera; otherwise starts a render after
     /// `delay`, reusing the index unless the store changed. A stale index draws while a fresh one
     /// builds.
+    /// True while the app is leaving the foreground: nothing new is built or drawn.
+    private(set) var isSuspended = false
+
+    /// Leaving the app must be instant: stop every build and render, and start nothing new.
+    func suspend() {
+        isSuspended = true
+        renderTask?.cancel()
+        renderTask = nil
+        deferredBuild?.cancel()
+        deferredBuild = nil
+        indexTask?.cancel()
+    }
+
+    /// Back in the foreground; the next update draws again.
+    func resume() {
+        isSuspended = false
+    }
+
+    /// Whether a render or deferred rebuild is queued.
+    var hasQueuedWork: Bool {
+        renderTask != nil || deferredBuild != nil
+    }
+
     func update(_ update: Update, delay: Duration = .milliseconds(40)) {
         lastUpdate = update
         wantedRevision = update.revision
         renderTask?.cancel()
+        renderTask = nil
+        guard !isSuspended else { return }
         if let cached = cachedRaster(for: update) {
             if raster?.image !== cached.image {
                 raster = cached
@@ -974,7 +999,7 @@ final class MapCoverageController {
 
     private func render(_ update: Update) async {
         guard let index = await currentIndex(container: update.container) else { return }
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled, !isSuspended else { return }
         let subset = subset(for: update, in: index)
         let key = rasterKey(for: update)
         let request = update.request
@@ -986,7 +1011,7 @@ final class MapCoverageController {
         } onCancel: {
             work.cancel()
         }
-        guard !Task.isCancelled, let result else { return }
+        guard !Task.isCancelled, !isSuspended, let result else { return }
         raster = result
         rasterGeneration += 1
         MapPerformanceProbe.shared.layerDrawn(request.layer)
@@ -1007,7 +1032,7 @@ final class MapCoverageController {
             hasTriedSavedIndex = true
             await loadSavedIndex(container: container)
         }
-        if builtRevision != wantedRevision, indexTask == nil {
+        if builtRevision != wantedRevision, indexTask == nil, !isSuspended {
             if index != nil, let finished = lastBuildFinished, Date().timeIntervalSince(finished) < Self.minimumRebuildInterval {
                 scheduleDeferredBuild(container: container, after: Self.minimumRebuildInterval - Date().timeIntervalSince(finished))
             } else {
@@ -1024,7 +1049,9 @@ final class MapCoverageController {
         let started = DispatchTime.now().uptimeNanoseconds
         guard let signature = MapActivityIndexCache.signature(for: container) else { return }
         let loaded = await Task.detached(priority: .userInitiated) { () -> (index: MapActivityIndex, isFresh: Bool)? in
-            guard var saved = MapActivityIndexCache.load() else { return nil }
+            // A copy saved for another store (another account or a test store) is never shown.
+            guard var saved = MapActivityIndexCache.load(),
+                  saved.signature.split(separator: "|").first == signature.split(separator: "|").first else { return nil }
             saved.index.undatedCoverage = (try? MapActivityIndexBuilder.undatedCoverageChunks(from: FogCoverageArchive.load())) ?? []
             saved.index.fingerprint = saved.index.computedFingerprint()
             return (saved.index, saved.signature == signature)
@@ -1108,6 +1135,8 @@ final class MapCoverageController {
                     }
                 }
             case .failure(let error):
+                // Cancelled on the way to the background: build again once back.
+                guard !(error is CancellationError) else { return }
                 Self.log.error("index build failed: \(String(describing: error), privacy: .public)")
                 self.loadFailed = self.index == nil
             }

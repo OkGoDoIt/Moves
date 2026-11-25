@@ -64,6 +64,32 @@ final class MapPerformanceProbe {
         worstCallback = max(worstCallback, seconds)
     }
 
+    private var watchTimer: DispatchSourceTimer?
+
+    /// Ticks the main queue every 10 ms for `seconds` and logs the longest gap, flagging anything
+    /// over 100 ms. Used when the app leaves the foreground, where a busy main thread gets the
+    /// app killed by the scene-update watchdog.
+    func watchMainThread(_ label: String, for seconds: Double = 2) {
+        watchTimer?.cancel()
+        let started = CACurrentMediaTime()
+        var last = started
+        var worst: CFTimeInterval = 0
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now(), repeating: .milliseconds(10))
+        timer.setEventHandler { [weak self] in
+            let now = CACurrentMediaTime()
+            worst = max(worst, now - last)
+            last = now
+            guard now - started > seconds else { return }
+            self?.watchTimer?.cancel()
+            self?.watchTimer = nil
+            let ms = worst * 1_000
+            Self.log.notice("\(label, privacy: .public): longest main-thread gap \(ms, format: .fixed(precision: 1), privacy: .public) ms\(ms > 100 ? " — over budget" : "", privacy: .public)")
+        }
+        watchTimer = timer
+        timer.resume()
+    }
+
     /// A new bitmap is on screen: time since the tab opened, or since the camera settled.
     func layerDrawn(_ layer: MapCoverageLayer) {
         if let openedAt {
