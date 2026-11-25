@@ -98,21 +98,6 @@ final class PhotoHistoryImporterTests: XCTestCase {
         XCTAssertEqual(fetched.map(\.localIdentifier), ["in"])
     }
 
-    func testPreviewDoesNotRequireAPhotoLibrary() {
-        let assets = [
-            photo("a", at: epoch, coordinate: home),
-            photo("b", at: epoch.addingTimeInterval(5 * 60), coordinate: home),
-        ]
-        let preview = PhotoHistoryImporter.preview(
-            assets: assets,
-            in: DateInterval(start: epoch.addingTimeInterval(-1), end: epoch.addingTimeInterval(3_600))
-        )
-        XCTAssertEqual(preview.geotaggedPhotoCount, 2)
-        XCTAssertEqual(preview.estimatedVisitCount, 1)
-        XCTAssertEqual(preview.dayCount, 1)
-        XCTAssertTrue(preview.summary.contains("geotagged photos"))
-    }
-
     // MARK: - Persistence
 
     func testImportCreatesPhotoInferredVisitAndAttachments() throws {
@@ -393,7 +378,7 @@ final class PhotoHistoryImporterTests: XCTestCase {
         let (_, container) = try makeContext()
         var runner = PhotoHistoryImportRunner(provider: FakePhotoAssetProvider(assets: assets), container: container)
         runner.pageSize = 9
-        var job = try await runner.makeJob(in: interval, includesSavedPhotos: false)
+        var job = try await runner.counted(job(over: interval))
         XCTAssertEqual(job.totalPhotoCount, assets.count)
 
         var steps = 0
@@ -425,6 +410,46 @@ final class PhotoHistoryImporterTests: XCTestCase {
         XCTAssertEqual(resumed.samples, expected.samples)
         XCTAssertFalse(resumed.photos.contains { $0.hasPrefix("saved") }, "Saved photos are left out")
         XCTAssertEqual(job.earliestPhotoAt, camera.map(\.capturedAt).min())
+    }
+
+    func testAnImportOutlivesTheVersionThatBeganIt() throws {
+        let defaults = UserDefaults(suiteName: "photo-history-\(UUID().uuidString)")!
+        // Exactly what an earlier version left behind.
+        let saved = #"{"rangeEnd":798397200,"rangeStart":167158800,"cursor":781534444.688,"remainingPhotoCount":305617,"totalPhotoCount":319809,"state":"paused","report":{"reusedVisitCount":2,"attachedPhotoCount":11907,"dayOnlyAttachmentCount":315,"createdMoveCount":698,"geotaggedPhotoCount":11907,"sensorDaySkipCount":0,"createdVisitCount":751},"unfinishedStepStarts":0,"includesSavedPhotos":false,"earliestPhotoAt":781534444.688,"id":"6903FBE2-620E-41F3-8E3A-0FD5F520CC67"}"#
+        defaults.set(Data(saved.utf8), forKey: PhotoHistoryJobStore.key)
+        let job = try XCTUnwrap(PhotoHistoryJobStore(defaults: defaults).load())
+        XCTAssertEqual(job.state, .paused)
+        XCTAssertEqual(job.report.createdVisitCount, 751)
+        XCTAssertEqual(job.checkedPhotoCount, 14_192)
+        XCTAssertNotEqual(job.rules, PhotoHistoryJob.currentRules, "It read fewer photos than this version does")
+
+        // One that had stopped on an error carries on.
+        defaults.set(Data(saved.replacingOccurrences(of: "paused", with: "failed").utf8), forKey: PhotoHistoryJobStore.key)
+        XCTAssertEqual(PhotoHistoryJobStore(defaults: defaults).load()?.state, .running)
+    }
+
+    func testPhotosThatKeepStoppingTheImportAreTakenInSmallerStepsAndThenPassedOver() async throws {
+        let assets = libraryAcrossManyDays()
+        let (_, container) = try makeContext()
+        var runner = PhotoHistoryImportRunner(provider: FakePhotoAssetProvider(assets: assets), container: container)
+        runner.pageSize = 64
+        runner.minimumPageSize = 4
+        let interval = DateInterval(start: epoch.addingTimeInterval(-1), end: epoch.addingTimeInterval(90 * 24 * 3_600))
+        var job = try await runner.counted(job(over: interval))
+
+        job.unfinishedStepStarts = 1
+        let whole = try await runner.runStep(job)
+        job.unfinishedStepStarts = PhotoHistoryImportRunner.triesAtFullSize + 1
+        let smaller = try await runner.runStep(job)
+        XCTAssertGreaterThan(smaller.cursor, whole.cursor, "A step that failed before takes fewer photos")
+        XCTAssertLessThan(smaller.cursor, job.cursor)
+
+        job.unfinishedStepStarts = PhotoHistoryImportRunner.triesBeforePassingOver + 1
+        let past = try await runner.runStep(job)
+        XCTAssertEqual(past.unreadablePhotoCount, 4)
+        XCTAssertLessThan(past.cursor, job.cursor)
+        XCTAssertEqual(past.unfinishedStepStarts, 0)
+        XCTAssertEqual(past.state, .running)
     }
 
     func testAStepNeverEndsInTheMiddleOfAnOuting() {
@@ -604,16 +629,19 @@ final class PhotoHistoryImporterTests: XCTestCase {
         )
         // No file names at all, or a library without one screenshot: the older rule stands.
         XCTAssertTrue(photo.resolved(with: nil).isCameraCapture)
-        XCTAssertTrue(photo.resolved(with: OwnDeviceLedger(entries: [])).isCameraCapture)
-        let noScreenshots = OwnDeviceLedger(entries: (0..<50).map {
-            CameraRollEntry(addedAt: added.addingTimeInterval(Double($0)), number: 4_317 + $0, isScreenshot: false)
-        })
+        XCTAssertTrue(photo.resolved(with: PhotoOriginLedger(entries: [])).isCameraCapture)
+        func taken(_ step: Int, number: Int, isScreenshot: Bool) -> LibraryRollEntry {
+            let time = added.addingTimeInterval(Double(step))
+            return LibraryRollEntry(capturedAt: time, addedAt: time, number: number, isScreenshot: isScreenshot)
+        }
+        let noScreenshots = PhotoOriginLedger(entries: (0..<50).map { taken($0, number: 4_317 + $0, isScreenshot: false) })
         XCTAssertTrue(photo.resolved(with: noScreenshots).isCameraCapture)
 
         // With screenshots on another counter, this photo is someone else's.
-        let elsewhere = OwnDeviceLedger(entries: (0..<50).map {
-            CameraRollEntry(addedAt: added.addingTimeInterval(Double($0)), number: 100 + $0, isScreenshot: $0 % 5 == 0)
-        } + [CameraRollEntry(addedAt: added, number: 4_317, isScreenshot: false)])
+        let elsewhere = PhotoOriginLedger(
+            entries: (0..<50).map { taken($0, number: 100 + $0, isScreenshot: $0 % 5 == 0) }
+                + [taken(0, number: 4_317, isScreenshot: false)]
+        )
         let resolved = photo.resolved(with: elsewhere)
         XCTAssertFalse(resolved.isCameraCapture)
         XCTAssertTrue(resolved.isFromAnotherDevice)
@@ -633,8 +661,9 @@ final class PhotoHistoryImporterTests: XCTestCase {
         }
         let mine = (0..<6).map { shot("mine-\($0)", minute: Double($0) * 3, number: 2_000 + $0 * 2, at: home) }
         let theirs = (0..<6).map { shot("theirs-\($0)", minute: Double($0) * 3 + 1, number: 6_500 + $0, at: saigon) }
-        let screenshots = (0..<6).map {
-            CameraRollEntry(addedAt: epoch.addingTimeInterval(Double($0) * 180 + 30), number: 2_001 + $0 * 2, isScreenshot: true)
+        let screenshots = (0..<6).map { (index: Int) -> LibraryRollEntry in
+            let time = epoch.addingTimeInterval(Double(index) * 180 + 30)
+            return LibraryRollEntry(capturedAt: time, addedAt: time, number: 2_001 + index * 2, isScreenshot: true)
         }
         let defaults = UserDefaults(suiteName: "photo-roster-\(UUID().uuidString)")!
         let provider = FakePhotoAssetProvider(
@@ -645,11 +674,7 @@ final class PhotoHistoryImporterTests: XCTestCase {
         let runner = PhotoHistoryImportRunner(
             provider: provider, container: container, rosterStore: OwnCameraRosterStore(defaults: defaults)
         )
-        // Even when saved photos are asked for.
-        var job = try await runner.makeJob(
-            in: DateInterval(start: epoch.addingTimeInterval(-60), end: epoch.addingTimeInterval(3_600)),
-            includesSavedPhotos: true
-        )
+        var job = job(over: DateInterval(start: epoch.addingTimeInterval(-60), end: epoch.addingTimeInterval(3_600)))
         let ledger = try await runner.makeLedger(for: job)
         job = try await runner.runStep(job, ledger: ledger)
 
@@ -657,6 +682,92 @@ final class PhotoHistoryImporterTests: XCTestCase {
         XCTAssertEqual(attached, Set(mine.map(\.localIdentifier)))
         XCTAssertEqual(job.otherDevicePhotoCount, 6)
         XCTAssertEqual(OwnCameraRosterStore(defaults: defaults).load().periods(calendar: gmt).map(\.model), ["iPhone 17"])
+    }
+
+    /// A library the way a move from another service leaves it: years of photos added on
+    /// one day, a partner's among them, and a few that friends sent.
+    func testImportedPhotosAreJudgedByTheCounterTheyCarry() {
+        let imported = epoch.addingTimeInterval(900 * 86_400)
+        var entries: [LibraryRollEntry] = []
+        func add(_ time: Date, _ number: Int?, shot: Bool = false, at place: CLLocationCoordinate2D? = nil, added: Date? = nil) {
+            entries.append(
+                LibraryRollEntry(
+                    capturedAt: time, addedAt: added ?? imported, number: number, isScreenshot: shot,
+                    place: place.map { PhotoPlace(latitude: $0.latitude, longitude: $0.longitude, accuracy: 10) }
+                )
+            )
+        }
+        // Mine, with a hole of 45 numbers every few days, across 300 days.
+        func mine(_ index: Int) -> (Date, Int) {
+            (epoch.addingTimeInterval(Double(index) * 21_600), (3_000 + index + index / 20 * 45) % 10_000)
+        }
+        for index in 0..<1_200 {
+            add(mine(index).0, mine(index).1, shot: index % 15 == 0, at: home)
+        }
+        // My partner's phone, on a counter of its own and often elsewhere.
+        func theirs(_ index: Int) -> (Date, Int) { (epoch.addingTimeInterval(Double(index) * 43_200 + 300), (8_200 + index) % 10_000) }
+        for index in 0..<500 {
+            add(theirs(index).0, theirs(index).1, at: index % 3 == 0 ? saigon : home)
+        }
+        // My old phone, in someone else's hands with a few of my screenshots still to come.
+        func old(_ index: Int) -> (Date, Int) { (epoch.addingTimeInterval(100 * 86_400 + Double(index) * 3_600 + 120), 5_900 + index) }
+        for index in 0..<60 {
+            add(old(index).0, old(index).1, shot: index % 25 == 0, at: saigon)
+        }
+        // From before any of it, without a counter: an old camera.
+        let older = epoch.addingTimeInterval(-400 * 86_400)
+        for index in 0..<100 { add(older.addingTimeInterval(Double(index) * 60), nil) }
+
+        let ledger = PhotoOriginLedger(entries: entries.shuffled())
+        func share(_ count: Int, _ item: (Int) -> (Date, Int), _ origin: PhotoOrigin) -> Double {
+            let hits = (0..<count).count { ledger.origin(capturedAt: item($0).0, addedAt: imported, number: item($0).1) == origin }
+            return Double(hits) / Double(count)
+        }
+        XCTAssertGreaterThan(share(1_200, mine, .archive), 0.97)
+        XCTAssertGreaterThan(share(500, theirs, .otherDevice), 0.97)
+        XCTAssertEqual(share(60, old, .otherDevice), 1, "A second phone that was elsewhere is not the one in my pocket")
+        XCTAssertEqual(ledger.origin(capturedAt: older, addedAt: imported, number: nil), .presumed)
+        XCTAssertEqual(
+            ledger.origin(capturedAt: older, addedAt: imported.addingTimeInterval(40 * 86_400), number: nil), .received,
+            "One photo that arrived by itself is not a backup"
+        )
+        XCTAssertEqual(ledger.origin(capturedAt: mine(40).0, addedAt: imported, number: nil), .received)
+        XCTAssertEqual(CameraRollEntry.number(inFileName: "IMG_4317(1).HEIC", allowingSuffix: true), 4_317)
+        XCTAssertNil(CameraRollEntry.number(inFileName: "IMG_20140101_120000.jpg", allowingSuffix: true))
+
+        // It survives being put away and read back.
+        let cache = PhotoOriginLedgerCache(directory: FileManager.default.temporaryDirectory.appending(path: UUID().uuidString))
+        let job = UUID()
+        cache.save(ledger, for: job)
+        XCTAssertNil(cache.load(for: UUID()))
+        XCTAssertEqual(cache.load(for: job)?.origin(capturedAt: mine(40).0, addedAt: imported, number: mine(40).1), .archive)
+        cache.clear()
+        XCTAssertNil(cache.load(for: job))
+    }
+
+    func testPhotosThatPutTheOwnerInTwoPlacesAreLeftOut() {
+        func shot(_ id: String, minute: Double, at place: CLLocationCoordinate2D, accuracy: Double? = 8, _ origin: PhotoOrigin) -> PhotoAssetDescriptor {
+            var photo = PhotoAssetDescriptor(
+                localIdentifier: id, capturedAt: epoch.addingTimeInterval(minute * 60),
+                latitude: place.latitude, longitude: place.longitude, horizontalAccuracy: accuracy
+            )
+            photo.origin = origin
+            return photo
+        }
+        let photos = [
+            shot("home", minute: 0, at: home, .camera),
+            shot("vague", minute: 5, at: home, accuracy: 400, .camera),
+            shot("imported elsewhere", minute: 10, at: saigon, .archive),
+            shot("imported here", minute: 12, at: offset(home, northMeters: 600), .archive),
+            shot("drive", minute: 30, at: offset(home, northMeters: 25_000), .camera),
+            shot("stale", minute: 34, at: offset(home, northMeters: -60_000), .camera),
+            shot("drive on", minute: 38, at: offset(home, northMeters: 30_000), .camera),
+            shot("flight", minute: 38 + 180, at: offset(home, northMeters: 1_500_000), .camera),
+        ]
+        XCTAssertEqual(
+            PhotoTrailFilter.possible(photos).map(\.localIdentifier),
+            ["home", "imported here", "drive", "drive on", "flight"]
+        )
     }
 
     func testRosterFollowsAReplacementPhoneAndDoubtsAStray() {
@@ -684,6 +795,10 @@ final class PhotoHistoryImporterTests: XCTestCase {
     }
 
     // MARK: - Helpers
+
+    private func job(over interval: DateInterval) -> PhotoHistoryJob {
+        PhotoHistoryJob(rangeStart: interval.start, rangeEnd: interval.end, cursor: interval.end)
+    }
 
     /// Three weeks of outings a few stops long, with saved photos and photos without a
     /// location mixed in the way a real library has them.

@@ -51,16 +51,19 @@ struct PhotoAssetDescriptor: Sendable, Hashable, Identifiable {
     let longitude: Double?
     /// Accuracy the camera recorded with the fix, when it recorded one.
     let horizontalAccuracy: Double?
-    /// Taken with the library owner's own phone rather than saved, imported, or taken by
-    /// another device that shares the library.
-    var isCameraCapture: Bool
-    /// Taken by a camera, but on a device other than the owner's phone: a partner's phone
-    /// in an iCloud Shared Library, or a second device on the account. Never the owner's place.
-    var isFromAnotherDevice = false
+    /// How the photo came to be in the library. Until a ledger has settled it, a photo
+    /// added when it was taken is the owner's and any other is not.
+    var origin: PhotoOrigin
     /// When the photo entered the library.
     var addedAt: Date?
     /// The counter in a camera file name such as `IMG_4317.HEIC`.
     var rollNumber: Int?
+
+    /// Taken with the library owner's own phone and added right then.
+    var isCameraCapture: Bool { origin == .camera }
+    /// Taken by a partner's phone in an iCloud Shared Library, a friend's, or a second
+    /// device on the account. Never the owner's place.
+    var isFromAnotherDevice: Bool { origin == .otherDevice }
 
     init(
         localIdentifier: String,
@@ -77,26 +80,16 @@ struct PhotoAssetDescriptor: Sendable, Hashable, Identifiable {
         self.latitude = latitude
         self.longitude = longitude
         self.horizontalAccuracy = horizontalAccuracy
-        self.isCameraCapture = isCameraCapture
+        self.origin = isCameraCapture ? .camera : .received
         self.addedAt = addedAt
         self.rollNumber = rollNumber
     }
 
-    /// The same photo with its origin settled by the camera-roll ledger.
-    ///
-    /// Without a ledger (no file names, or no screenshots to tell the owner's phone by) a
-    /// photo added when it was taken keeps counting as the owner's. With one, only a photo
-    /// on the owner's own counter does; a photo on another counter is another device's, and
-    /// one with no counter at all is treated like a saved photo.
-    func resolved(with ledger: OwnDeviceLedger?) -> PhotoAssetDescriptor {
-        guard let ledger, ledger.ownItemCount > 0, isCameraCapture else { return self }
+    /// The same photo with its origin settled by the library's ledger.
+    func resolved(with ledger: PhotoOriginLedger?) -> PhotoAssetDescriptor {
+        guard let ledger, addedAt != nil else { return self }
         var photo = self
-        if let addedAt, let rollNumber {
-            photo.isCameraCapture = ledger.contains(addedAt: addedAt, number: rollNumber)
-            photo.isFromAnotherDevice = !photo.isCameraCapture
-        } else {
-            photo.isCameraCapture = false
-        }
+        photo.origin = ledger.origin(capturedAt: capturedAt, addedAt: addedAt, number: rollNumber)
         return photo
     }
 
@@ -104,6 +97,11 @@ struct PhotoAssetDescriptor: Sendable, Hashable, Identifiable {
         guard let latitude, let longitude else { return nil }
         let coordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
         return CLLocationCoordinate2DIsValid(coordinate) ? coordinate : nil
+    }
+
+    var place: PhotoPlace? {
+        guard let coordinate else { return nil }
+        return PhotoPlace(latitude: coordinate.latitude, longitude: coordinate.longitude, accuracy: horizontalAccuracy)
     }
 
     /// Timed point used by `LocationLogSegmenter` during photo-history backfill.
@@ -152,9 +150,10 @@ protocol PhotoAssetProviding: Sendable {
     func newestAssets(in interval: DateInterval, limit: Int) async throws -> PhotoAssetPage
     /// How many photos, geotagged or not, were captured inside `interval`.
     func photoCount(in interval: DateInterval) async throws -> Int
-    /// Every camera-named photo, video, and screenshot added to the library when it was
-    /// taken, inside `interval`. Empty when file names cannot be read.
-    func cameraRoll(in interval: DateInterval) async throws -> [CameraRollEntry]
+    /// Capture time of the oldest photo in the library.
+    func earliestPhotoDate() async throws -> Date?
+    /// Every photo, video, and screenshot captured inside `interval`, whatever its origin.
+    func libraryRoll(in interval: DateInterval) async throws -> [LibraryRollEntry]
     /// The camera model written in each photo's file, for the photos whose original is
     /// already on this device. Nothing is downloaded.
     func cameraModels(for identifiers: [String]) async -> [String: String]
@@ -163,13 +162,13 @@ protocol PhotoAssetProviding: Sendable {
 extension PhotoAssetProviding {
     /// The ledger for photos inside `interval`. It reads some weeks either side, because
     /// a run is recognized by what surrounds it.
-    func ownDeviceLedger(around interval: DateInterval) async throws -> OwnDeviceLedger {
+    func originLedger(around interval: DateInterval) async throws -> PhotoOriginLedger {
         let margin: TimeInterval = 45 * 24 * 60 * 60
         let padded = DateInterval(
             start: interval.start.addingTimeInterval(-margin),
             end: interval.end.addingTimeInterval(margin)
         )
-        return OwnDeviceLedger(entries: try await cameraRoll(in: padded))
+        return PhotoOriginLedger(entries: try await libraryRoll(in: padded))
     }
 }
 
@@ -177,16 +176,26 @@ extension PhotoAssetProviding {
 struct FakePhotoAssetProvider: PhotoAssetProviding {
     var assets: [PhotoAssetDescriptor]
     /// Screenshots and other camera-roll items that are not geotagged photos.
-    var otherRollEntries: [CameraRollEntry] = []
+    var otherRollEntries: [LibraryRollEntry] = []
     /// Camera model by identifier, for the photos whose file is "on the device".
     var models: [String: String] = [:]
 
-    func cameraRoll(in interval: DateInterval) async throws -> [CameraRollEntry] {
-        let photos = assets.compactMap { asset -> CameraRollEntry? in
-            guard let addedAt = asset.addedAt, let number = asset.rollNumber else { return nil }
-            return CameraRollEntry(addedAt: addedAt, number: number, isScreenshot: false)
+    func earliestPhotoDate() async throws -> Date? {
+        assets.map(\.capturedAt).min()
+    }
+
+    func libraryRoll(in interval: DateInterval) async throws -> [LibraryRollEntry] {
+        let photos = assets.compactMap { asset -> LibraryRollEntry? in
+            guard let addedAt = asset.addedAt else { return nil }
+            return LibraryRollEntry(
+                capturedAt: asset.capturedAt,
+                addedAt: addedAt,
+                number: asset.rollNumber,
+                isScreenshot: false,
+                place: asset.place
+            )
         }
-        return (photos + otherRollEntries).filter { interval.contains($0.addedAt) }
+        return (photos + otherRollEntries).filter { interval.contains($0.capturedAt) }
     }
 
     func cameraModels(for identifiers: [String]) async -> [String: String] {

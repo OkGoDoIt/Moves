@@ -12,32 +12,53 @@ struct PhotoHistoryJob: Codable, Equatable, Sendable {
         case running
         case paused
         case finished
-        case failed
     }
+
+    /// Raised when the rules for which photos count change enough to read the library again.
+    static let currentRules = 2
+
+    /// Photos taken in the last week are the live timeline's, which still rebuilds it.
+    static let liveDays = 7
+    /// Cameras with a dead clock date their photos to the year they were built.
+    static let earliestDate = Date(timeIntervalSince1970: 946_684_800)
 
     var id = UUID()
     var rangeStart: Date
     var rangeEnd: Date
-    /// Also reads photos that were saved, received, or imported rather than taken.
-    var includesSavedPhotos: Bool
     /// Photos captured at or after this are done; the import continues backward from here.
     var cursor: Date
-    /// Photos in the range, with or without a location, when the import began.
-    var totalPhotoCount: Int
-    var remainingPhotoCount: Int
+    /// Photos in the range, with or without a location, once they have been counted.
+    var totalPhotoCount = 0
+    var remainingPhotoCount = 0
+    var isCounted = false
     var state: State = .running
     var report = PhotoHistoryImportReport()
     var message: String?
     var finishedAt: Date?
+    /// When a step last finished.
+    var lastProgressAt: Date?
     /// Photos passed over because another device took them.
     var otherDevicePhotoCount = 0
+    /// Photos passed over because they were saved or sent by someone.
+    var receivedPhotoCount = 0
+    /// Photos passed over because the place or time in them can't be right.
+    var conflictingPhotoCount = 0
+    /// Photos given up on after several tries.
+    var unreadablePhotoCount = 0
     /// Capture time of the oldest photo imported so far.
     var earliestPhotoAt: Date?
-    /// Times the step at `cursor` began without finishing. Two means it is the step
-    /// itself that stops Moves, so the import waits to be resumed by hand.
+    /// Times the step at `cursor` began, counting the one under way.
     var unfinishedStepStarts = 0
-    /// Times reading the camera roll began without finishing.
+    /// Times reading the library began without finishing.
     var ledgerAttempts = 0
+    var rules = Self.currentRules
+
+    /// A job over the whole library, up to the days the live timeline is still writing.
+    static func wholeLibrary(now: Date = .now, calendar: Calendar = .current) -> PhotoHistoryJob {
+        let today = calendar.startOfDay(for: now)
+        let end = calendar.date(byAdding: .day, value: -liveDays, to: today) ?? today
+        return PhotoHistoryJob(rangeStart: earliestDate, rangeEnd: end, cursor: end)
+    }
 
     var fractionComplete: Double {
         guard state != .finished else { return 1 }
@@ -50,7 +71,44 @@ struct PhotoHistoryJob: Codable, Equatable, Sendable {
     }
 
     var isUnfinished: Bool {
-        state == .running || state == .paused || state == .failed
+        state != .finished
+    }
+}
+
+extension PhotoHistoryJob {
+    /// A job outlives the version of Moves that began it. Everything that was not in the
+    /// first version falls back to its default, so an update never loses the import.
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        func count(_ key: CodingKeys) -> Int {
+            (try? values.decodeIfPresent(Int.self, forKey: key)) ?? 0
+        }
+        func date(_ key: CodingKeys) -> Date? {
+            (try? values.decodeIfPresent(Date.self, forKey: key)) ?? nil
+        }
+        self.init(
+            id: (try? values.decode(UUID.self, forKey: .id)) ?? UUID(),
+            rangeStart: try values.decode(Date.self, forKey: .rangeStart),
+            rangeEnd: try values.decode(Date.self, forKey: .rangeEnd),
+            cursor: try values.decode(Date.self, forKey: .cursor)
+        )
+        totalPhotoCount = count(.totalPhotoCount)
+        remainingPhotoCount = count(.remainingPhotoCount)
+        isCounted = (try? values.decode(Bool.self, forKey: .isCounted)) ?? (totalPhotoCount > 0)
+        // An import that stopped on an error in an earlier version carries on.
+        state = (try? values.decode(State.self, forKey: .state)) ?? .running
+        report = (try? values.decode(PhotoHistoryImportReport.self, forKey: .report)) ?? PhotoHistoryImportReport()
+        message = (try? values.decodeIfPresent(String.self, forKey: .message)) ?? nil
+        finishedAt = date(.finishedAt)
+        lastProgressAt = date(.lastProgressAt)
+        otherDevicePhotoCount = count(.otherDevicePhotoCount)
+        receivedPhotoCount = count(.receivedPhotoCount)
+        conflictingPhotoCount = count(.conflictingPhotoCount)
+        unreadablePhotoCount = count(.unreadablePhotoCount)
+        earliestPhotoAt = date(.earliestPhotoAt)
+        unfinishedStepStarts = count(.unfinishedStepStarts)
+        ledgerAttempts = count(.ledgerAttempts)
+        rules = (try? values.decode(Int.self, forKey: .rules)) ?? 1
     }
 }
 
@@ -137,57 +195,70 @@ struct PhotoHistoryImportRunner: @unchecked Sendable {
     var pageSize = 1_500
     /// A step grows until it ends between outings, but not past this many photos.
     var maximumPageSize = 24_000
+    /// A step that keeps stopping Moves is cut down to this many photos, then passed over.
+    var minimumPageSize = 50
     var configuration = PhotoHistoryImporter.Configuration()
 
-    func makeJob(in interval: DateInterval, includesSavedPhotos: Bool) async throws -> PhotoHistoryJob {
-        let count = try await provider.photoCount(in: interval)
-        return PhotoHistoryJob(
-            rangeStart: interval.start,
-            rangeEnd: interval.end,
-            includesSavedPhotos: includesSavedPhotos,
-            cursor: interval.end,
-            totalPhotoCount: count,
-            remainingPhotoCount: count
+    /// Tries before a step is made smaller, and before its photos are passed over.
+    static let triesAtFullSize = 2
+    static let triesBeforePassingOver = 6
+
+    /// Finds where the library begins and how much there is to do.
+    func counted(_ job: PhotoHistoryJob) async throws -> PhotoHistoryJob {
+        var next = job
+        if let earliest = try await provider.earliestPhotoDate() {
+            next.rangeStart = min(max(earliest, PhotoHistoryJob.earliestDate), job.rangeEnd)
+        }
+        next.totalPhotoCount = try await provider.photoCount(
+            in: DateInterval(start: next.rangeStart, end: next.rangeEnd)
         )
+        next.remainingPhotoCount = next.totalPhotoCount
+        next.isCounted = true
+        return next
     }
 
-    /// Which camera-roll items are the owner's phone, for the whole of the job's range.
-    ///
-    /// Nothing about it is saved: it is rebuilt from the library whenever the import
-    /// starts or resumes, so an interruption while it is being worked out costs nothing.
-    func makeLedger(for job: PhotoHistoryJob) async throws -> OwnDeviceLedger {
-        try await provider.ownDeviceLedger(around: DateInterval(start: job.rangeStart, end: job.rangeEnd))
+    /// Where every photo in the job's range came from.
+    func makeLedger(for job: PhotoHistoryJob) async throws -> PhotoOriginLedger {
+        try await provider.originLedger(around: DateInterval(start: job.rangeStart, end: job.rangeEnd))
     }
 
     /// Imports the newest photos before the job's cursor and returns the job moved past them.
-    func runStep(_ job: PhotoHistoryJob, ledger: OwnDeviceLedger? = nil) async throws -> PhotoHistoryJob {
-        var limit = pageSize
+    func runStep(_ job: PhotoHistoryJob, ledger: PhotoOriginLedger? = nil) async throws -> PhotoHistoryJob {
+        // The same photos have stopped Moves before. Take fewer at a time to get past them.
+        let failures = max(job.unfinishedStepStarts - 1, 0)
+        let isCautious = failures >= Self.triesAtFullSize
+        if failures >= Self.triesBeforePassingOver {
+            return try await passOver(job)
+        }
+        var limit = isCautious
+            ? max(pageSize >> (2 * (failures - Self.triesAtFullSize + 1)), minimumPageSize)
+            : pageSize
+        let largest = isCautious ? limit : maximumPageSize
+
         var found: PhotoHistoryPaging.Batch?
-        var otherDeviceCount = 0
+        var looked: [PhotoAssetDescriptor] = []
         while found == nil {
             let page = try await provider.newestAssets(
                 in: DateInterval(start: job.rangeStart, end: max(job.cursor, job.rangeStart)),
                 limit: limit
             )
             try Task.checkCancellation()
-            let photos = page.assets.map { $0.resolved(with: ledger) }
-            // Another device's photo is someone else's whereabouts however it is asked for.
-            let usable = job.includesSavedPhotos
-                ? photos.filter { !$0.isFromAnotherDevice }
-                : photos.filter(\.isCameraCapture)
-            otherDeviceCount = photos.count(where: \.isFromAnotherDevice)
+            looked = page.assets.map { $0.resolved(with: ledger) }
             found = PhotoHistoryPaging.batch(
                 from: page,
-                usable: usable,
+                usable: PhotoTrailFilter.possible(looked.filter(\.origin.isOwn)),
                 cursor: job.cursor,
                 start: job.rangeStart,
                 limit: limit,
                 stayGap: configuration.stayGap,
-                mayCutAnOuting: limit >= maximumPageSize
+                mayCutAnOuting: limit >= largest
             )
             limit *= 2
         }
         guard var batch = found else { return job }
+        // The rest of the page is looked at again in the next step, and counted there.
+        let done = looked.filter { batch.isLast || $0.capturedAt >= batch.nextCursor }
+        let possibleCount = batch.assets.count
         batch.assets = await withoutStrayCameras(batch.assets)
 
         let context = ModelContext(container)
@@ -197,19 +268,39 @@ struct PhotoHistoryImportRunner: @unchecked Sendable {
 
         var next = job
         next.report = job.report + stepReport
-        next.otherDevicePhotoCount += otherDeviceCount
-        next.unfinishedStepStarts = 0
-        next.cursor = batch.nextCursor
+        next.otherDevicePhotoCount += done.count(where: \.isFromAnotherDevice) + possibleCount - batch.assets.count
+        next.receivedPhotoCount += done.count { $0.origin == .received }
+        next.conflictingPhotoCount += max(done.count(where: \.origin.isOwn) - possibleCount, 0)
         if let oldest = batch.assets.first?.capturedAt {
             next.earliestPhotoAt = min(job.earliestPhotoAt ?? oldest, oldest)
         }
-        if batch.isLast {
+        return try await moved(next, to: batch.nextCursor, isLast: batch.isLast)
+    }
+
+    /// Leaves out a handful of photos that stop the import every time, so that the rest of
+    /// the library is not held up by them.
+    private func passOver(_ job: PhotoHistoryJob) async throws -> PhotoHistoryJob {
+        let range = DateInterval(start: job.rangeStart, end: max(job.cursor, job.rangeStart))
+        let page = try await provider.newestAssets(in: range, limit: minimumPageSize)
+        var next = job
+        next.unreadablePhotoCount += page.scannedCount
+        let isLast = page.scannedCount < minimumPageSize
+        return try await moved(next, to: page.earliestScannedAt ?? job.rangeStart, isLast: isLast)
+    }
+
+    private func moved(_ job: PhotoHistoryJob, to cursor: Date, isLast: Bool) async throws -> PhotoHistoryJob {
+        var next = job
+        next.unfinishedStepStarts = 0
+        next.message = nil
+        next.cursor = cursor
+        next.lastProgressAt = .now
+        if isLast {
             next.remainingPhotoCount = 0
             next.state = .finished
             next.finishedAt = .now
         } else {
             next.remainingPhotoCount = try await provider.photoCount(
-                in: DateInterval(start: job.rangeStart, end: max(batch.nextCursor, job.rangeStart))
+                in: DateInterval(start: job.rangeStart, end: max(cursor, job.rangeStart))
             )
         }
         return next
@@ -220,7 +311,7 @@ struct PhotoHistoryImportRunner: @unchecked Sendable {
     /// the month they were taken in.
     private func withoutStrayCameras(_ assets: [PhotoAssetDescriptor]) async -> [PhotoAssetDescriptor] {
         guard let rosterStore else { return assets }
-        let own = assets.filter(\.isCameraCapture)
+        let own = assets.filter { $0.origin == .camera || $0.origin == .archive }
         let models = await provider.cameraModels(for: own.map(\.localIdentifier))
         guard !models.isEmpty else { return assets }
 
@@ -232,7 +323,7 @@ struct PhotoHistoryImportRunner: @unchecked Sendable {
         }
         rosterStore.save(roster)
         return assets.filter { photo in
-            guard photo.isCameraCapture, let model = models[photo.localIdentifier] else { return true }
+            guard let model = models[photo.localIdentifier] else { return true }
             return !roster.isStray(model: model, capturedAt: photo.capturedAt)
         }
     }

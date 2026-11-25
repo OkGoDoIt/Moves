@@ -2,25 +2,6 @@ import CoreLocation
 import Foundation
 import SwiftData
 
-/// Counts shown before a photo-history import starts writing.
-struct PhotoHistoryPreview: Sendable, Equatable {
-    /// Photos the import will read.
-    var geotaggedPhotoCount = 0
-    /// Saved, received, or imported photos the import leaves out.
-    var skippedPhotoCount = 0
-    /// Photos another device took, which are never read.
-    var otherDevicePhotoCount = 0
-    var estimatedVisitCount = 0
-    var dayCount = 0
-
-    var summary: String {
-        let photos = geotaggedPhotoCount.formatted(.number)
-        let visits = estimatedVisitCount.formatted(.number)
-        let days = dayCount.formatted(.number)
-        return "\(photos) geotagged photos → about \(visits) visits across \(days) days"
-    }
-}
-
 /// Result of attaching photos and, optionally, creating photo-inferred days.
 struct PhotoHistoryImportReport: Sendable, Equatable, Codable {
     var geotaggedPhotoCount = 0
@@ -154,30 +135,7 @@ struct PhotoHistoryImporter {
         self.calendar = calendar
     }
 
-    // MARK: - Preview / segment (pure)
-
-    /// Counts geotagged photos, inferred stays, and distinct days without writing.
-    static func preview(
-        assets: [PhotoAssetDescriptor],
-        in interval: DateInterval,
-        includesSavedPhotos: Bool = false,
-        configuration: Configuration = Configuration()
-    ) -> PhotoHistoryPreview {
-        let geotagged = Self.geotagged(assets, in: interval)
-        let otherDevices = geotagged.count(where: \.isFromAnotherDevice)
-        let filtered = includesSavedPhotos
-            ? geotagged.filter { !$0.isFromAnotherDevice }
-            : geotagged.filter(\.isCameraCapture)
-        let stays = clusterStays(filtered, configuration: configuration)
-        let days = Set(stays.map { DayTimeline.makeDayKey(for: $0.arrivalDate) })
-        return PhotoHistoryPreview(
-            geotaggedPhotoCount: filtered.count,
-            skippedPhotoCount: geotagged.count - filtered.count - otherDevices,
-            otherDevicePhotoCount: otherDevices,
-            estimatedVisitCount: stays.count,
-            dayCount: days.count
-        )
-    }
+    // MARK: - Segment (pure)
 
     /// Groups geotagged photos into stays using photo thresholds.
     static func clusterStays(

@@ -203,6 +203,8 @@
 		FA00000130A0000100000001 /* PhotoAsset.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA00000130A0000100000000 /* PhotoAsset.swift */; };
 		FA00000130A0000300000003 /* PhotoFixes.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA00000130A0000300000002 /* PhotoFixes.swift */; };
 		FA00000130A0000300000005 /* OwnDeviceLedger.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA00000130A0000300000004 /* OwnDeviceLedger.swift */; };
+		FA00000130A0000300000007 /* PhotoOriginLedger.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA00000130A0000300000006 /* PhotoOriginLedger.swift */; };
+		FA00000130A0000300000009 /* PhotoHistoryBackgroundTask.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA00000130A0000300000008 /* PhotoHistoryBackgroundTask.swift */; };
 		FA00000130A0000300000001 /* PhotoHistoryImportJob.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA00000130A0000300000000 /* PhotoHistoryImportJob.swift */; };
 		FA00000130A0000100000003 /* PhotoLibraryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA00000130A0000100000002 /* PhotoLibraryService.swift */; };
 		FA00000130A0000100000005 /* PhotoHistoryImporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA00000130A0000100000004 /* PhotoHistoryImporter.swift */; };
@@ -502,6 +504,8 @@
 		FA00000130A0000100000000 /* PhotoAsset.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoAsset.swift; sourceTree = "<group>"; };
 		FA00000130A0000300000002 /* PhotoFixes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoFixes.swift; sourceTree = "<group>"; };
 		FA00000130A0000300000004 /* OwnDeviceLedger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OwnDeviceLedger.swift; sourceTree = "<group>"; };
+		FA00000130A0000300000006 /* PhotoOriginLedger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoOriginLedger.swift; sourceTree = "<group>"; };
+		FA00000130A0000300000008 /* PhotoHistoryBackgroundTask.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoHistoryBackgroundTask.swift; sourceTree = "<group>"; };
 		FA00000130A0000300000000 /* PhotoHistoryImportJob.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoHistoryImportJob.swift; sourceTree = "<group>"; };
 		FA00000130A0000100000002 /* PhotoLibraryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoLibraryService.swift; sourceTree = "<group>"; };
 		FA00000130A0000100000004 /* PhotoHistoryImporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoHistoryImporter.swift; sourceTree = "<group>"; };
@@ -916,6 +920,8 @@
 				FA00000130A0000100000000 /* PhotoAsset.swift */,
 				FA00000130A0000300000002 /* PhotoFixes.swift */,
 				FA00000130A0000300000004 /* OwnDeviceLedger.swift */,
+				FA00000130A0000300000006 /* PhotoOriginLedger.swift */,
+				FA00000130A0000300000008 /* PhotoHistoryBackgroundTask.swift */,
 				FA00000130A0000300000000 /* PhotoHistoryImportJob.swift */,
 				FA00000130A0000100000002 /* PhotoLibraryService.swift */,
 				FA00000130A0000100000004 /* PhotoHistoryImporter.swift */,
@@ -1328,6 +1334,8 @@
 				FA00000130A0000100000001 /* PhotoAsset.swift in Sources */,
 				FA00000130A0000300000003 /* PhotoFixes.swift in Sources */,
 				FA00000130A0000300000005 /* OwnDeviceLedger.swift in Sources */,
+				FA00000130A0000300000007 /* PhotoOriginLedger.swift in Sources */,
+				FA00000130A0000300000009 /* PhotoHistoryBackgroundTask.swift in Sources */,
 				FA00000130A0000300000001 /* PhotoHistoryImportJob.swift in Sources */,
 				FA00000130A0000100000003 /* PhotoLibraryService.swift in Sources */,
 				FA00000130A0000100000005 /* PhotoHistoryImporter.swift in Sources */,

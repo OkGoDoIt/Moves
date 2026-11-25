@@ -1,4 +1,34 @@
+import CoreLocation
 import Foundation
+
+/// The location in a photo.
+struct PhotoPlace: Sendable, Hashable {
+    var latitude: Double
+    var longitude: Double
+    /// `nil` when the camera did not record one.
+    var accuracy: Double?
+
+    var coordinate: CLLocationCoordinate2D {
+        CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+    }
+
+    /// Whether one person could not have taken a photo here and one at `other`, `seconds`
+    /// apart, traveling no faster than `speed`.
+    func conflicts(
+        with other: PhotoPlace,
+        seconds: TimeInterval,
+        speed: Double,
+        slack: CLLocationDistance
+    ) -> Bool {
+        let vagueness = min((accuracy ?? 50) + (other.accuracy ?? 50), 1_000)
+        let allowed = slack + vagueness + speed * seconds
+        // A degree is at least this many meters, so most pairs need no trigonometry.
+        guard abs(latitude - other.latitude) * 110_000 > allowed
+            || abs(longitude - other.longitude) * 111_400 > allowed * 0.7
+        else { return false }
+        return LocationLogGeometry.distance(from: coordinate, to: other.coordinate) > allowed
+    }
+}
 
 /// One item on a phone's camera roll, as far as its file name and dates tell.
 ///
@@ -11,13 +41,19 @@ struct CameraRollEntry: Sendable, Equatable {
     /// The counter value in the file name, 0 through 9999.
     var number: Int
     var isScreenshot: Bool
+    /// Where a photo says it was taken.
+    var place: PhotoPlace?
 
     /// The counter in a camera file name such as `IMG_4317.HEIC`, or `nil` for any other name.
-    static func number(inFileName name: String?) -> Int? {
+    ///
+    /// A backup keeps the number but may add to the name: `IMG_4317(1).HEIC`,
+    /// `IMG_4317-edited.JPG`. `allowingSuffix` reads those too.
+    static func number(inFileName name: String?, allowingSuffix: Bool = false) -> Int? {
         guard let name, name.count >= 9, name.hasPrefix("IMG_") else { return nil }
         let digits = name.dropFirst(4).prefix(4)
         guard digits.count == 4, digits.allSatisfy(\.isASCII), digits.allSatisfy(\.isNumber),
-              name.dropFirst(8).first == "."
+              let next = name.dropFirst(8).first,
+              next == "." || (allowingSuffix && "(-_".contains(next))
         else { return nil }
         return Int(digits)
     }
@@ -35,7 +71,7 @@ struct CameraRollEntry: Sendable, Equatable {
 ///
 /// The counter carries over when a phone is replaced, so the owner's run continues across
 /// phones without a list of models.
-struct OwnDeviceLedger: Sendable {
+struct OwnDeviceLedger: Sendable, Codable {
     struct Configuration: Sendable {
         /// The next file on a device is at most this far ahead: deleted shots leave holes.
         var adjacentJump = 30.0
@@ -52,11 +88,40 @@ struct OwnDeviceLedger: Sendable {
         var continuationGap: TimeInterval = 30 * 24 * 60 * 60
         /// Share of a run's length the owner's other runs may overlap before it is another device.
         var concurrencyShare = 0.05
+        /// Joins a run to the one that counts on from it, up to this far ahead. Zero keeps
+        /// every run separate.
+        var joinJump = 0
+        var joinGap: TimeInterval = 24 * 60 * 60
+        var joinOverlap: TimeInterval = 12 * 60 * 60
+        /// Screenshots a run needs for its length, so two strays don't claim a long one.
+        var minimumScreenshotShare = 0.0
+        /// Doubts runs that put the owner in two places at once.
+        var checksPlaces = false
+        /// Two photos this close in time are compared.
+        var placeReach: TimeInterval = 30 * 60
+        /// Anyone gets around a town this fast; two phones further apart than that are apart.
+        var placeSpeed = 10.0
+        var placeSlack: CLLocationDistance = 500
+        /// Screenshots this long before and after a run say how much it is the owner's.
+        var screenshotReach: TimeInterval = 7 * 24 * 60 * 60
 
         init() {}
+
+        /// For photos that reached the library long after they were taken. Their order is
+        /// only known from their capture times, which are shifted here and there, and a
+        /// backup has holes, so one phone's counter arrives in more and shorter pieces.
+        static var archive: Configuration {
+            var configuration = Configuration()
+            configuration.joinJump = 50
+            configuration.minimumScreenshotShare = 0.003
+            configuration.checksPlaces = true
+            return configuration
+        }
     }
 
     private let own: Set<UInt64>
+    /// Items on runs that disagree about the place with a run that is more the owner's.
+    private let contested: Set<UInt64>
     /// Camera-roll items on the owner's runs, and on anyone else's.
     let ownItemCount: Int
     let otherItemCount: Int
@@ -66,6 +131,11 @@ struct OwnDeviceLedger: Sendable {
 
     func contains(addedAt: Date, number: Int) -> Bool {
         own.contains(Self.key(addedAt: addedAt, number: number))
+    }
+
+    /// The item's phone was somewhere else than the owner's at some point in the run.
+    func isContested(addedAt: Date, number: Int) -> Bool {
+        contested.contains(Self.key(addedAt: addedAt, number: number))
     }
 
     init(entries: [CameraRollEntry], configuration: Configuration = Configuration()) {
@@ -135,8 +205,17 @@ struct OwnDeviceLedger: Sendable {
             live.removeAll { time - runs[$0].end > configuration.runLifetime }
         }
 
-        for index in runs.indices {
-            runs[index].isOwn = runs[index].screenshots >= configuration.minimumScreenshots
+        let chains = Self.chains(of: runs, configuration: configuration)
+        var screenshots: [Int: Int] = [:]
+        var lengths: [Int: Int] = [:]
+        for (index, chain) in chains.enumerated() {
+            screenshots[chain, default: 0] += runs[index].screenshots
+            lengths[chain, default: 0] += runs[index].count
+        }
+        for (index, chain) in chains.enumerated() {
+            let shots = screenshots[chain] ?? 0
+            runs[index].isOwn = shots >= configuration.minimumScreenshots
+                && Double(shots) >= configuration.minimumScreenshotShare * Double(lengths[chain] ?? 0)
         }
 
         // The owner has one phone. A run that fills a pause in the owner's runs and counts on
@@ -167,13 +246,23 @@ struct OwnDeviceLedger: Sendable {
             if !changed { break }
         }
 
+        let doubted = configuration.checksPlaces
+            ? Self.contestedRuns(runs, chains: chains, items: items, runOfItem: runOfItem, configuration: configuration)
+            : []
         var own = Set<UInt64>()
+        var contested = Set<UInt64>()
         var ownCount = 0
-        for (index, item) in items.enumerated() where runs[runOfItem[index]].isOwn {
-            own.insert(Self.key(addedAt: item.addedAt, number: item.number))
-            ownCount += 1
+        for (index, item) in items.enumerated() {
+            let key = Self.key(addedAt: item.addedAt, number: item.number)
+            if doubted.contains(runOfItem[index]) {
+                contested.insert(key)
+            } else if runs[runOfItem[index]].isOwn {
+                own.insert(key)
+                ownCount += 1
+            }
         }
         self.own = own
+        self.contested = contested
         ownItemCount = ownCount
         otherItemCount = items.count - ownCount
     }
@@ -188,6 +277,97 @@ struct OwnDeviceLedger: Sendable {
         var isOwn = false
     }
 
+    /// Runs that were somewhere else while another run, more the owner's, was taking photos.
+    ///
+    /// An old phone still in use carries the owner's screenshots too, and a partner's run
+    /// can fit a pause in the owner's. Nobody is in two places, so where two runs disagree
+    /// the one with fewer screenshots around that time is not the phone in the owner's
+    /// pocket, and none of it is used.
+    private static func contestedRuns(
+        _ runs: [Run],
+        chains: [Int],
+        items: [CameraRollEntry],
+        runOfItem: [Int],
+        configuration: Configuration
+    ) -> Set<Int> {
+        var screenshotTimes: [Int: [TimeInterval]] = [:]
+        for (index, item) in items.enumerated() where item.isScreenshot {
+            screenshotTimes[chains[runOfItem[index]], default: []]
+                .append(item.addedAt.timeIntervalSinceReferenceDate)
+        }
+        let strength = runs.indices.map { index -> Int in
+            guard let times = screenshotTimes[chains[index]] else { return 0 }
+            let from = runs[index].start - configuration.screenshotReach
+            let through = runs[index].end + configuration.screenshotReach
+            return times.partitioningIndex { $0 > through } - times.partitioningIndex { $0 >= from }
+        }
+
+        let placed = items.indices.filter { items[$0].place != nil }
+        var contested = Set<Int>()
+        for (position, index) in placed.enumerated() {
+            let run = runOfItem[index]
+            guard let place = items[index].place else { continue }
+            // A burst on one phone does not hide the other one behind it for long.
+            for next in placed[(position + 1)...].prefix(80) {
+                let seconds = items[next].addedAt.timeIntervalSince(items[index].addedAt)
+                if seconds > configuration.placeReach { break }
+                let other = runOfItem[next]
+                guard chains[run] != chains[other], strength[run] != strength[other] else { continue }
+                let weaker = strength[run] < strength[other] ? run : other
+                guard !contested.contains(weaker), let otherPlace = items[next].place,
+                      place.conflicts(
+                        with: otherPlace,
+                        seconds: seconds,
+                        speed: configuration.placeSpeed,
+                        slack: configuration.placeSlack
+                      )
+                else { continue }
+                contested.insert(weaker)
+            }
+        }
+        return contested
+    }
+
+    /// Which runs are pieces of one longer run. Each run is followed by at most one other:
+    /// the one that begins soonest after it on the counter, around when it ended.
+    private static func chains(of runs: [Run], configuration: Configuration) -> [Int] {
+        var chains = Array(runs.indices)
+        guard configuration.joinJump > 0 else { return chains }
+
+        let byStart = runs.indices.sorted { runs[$0].start < runs[$1].start }
+        let starts = byStart.map { runs[$0].start }
+        var candidates: [(jump: Int, gap: TimeInterval, from: Int, to: Int)] = []
+        for index in runs.indices {
+            let run = runs[index]
+            let earliest = max(run.start + 1, run.end - configuration.joinOverlap)
+            var position = starts.partitioningIndex { $0 >= earliest }
+            while position < byStart.count, starts[position] <= run.end + configuration.joinGap {
+                let next = byStart[position]
+                position += 1
+                guard next != index else { continue }
+                let jump = forward(from: run.head, to: runs[next].first)
+                let quietDays = max(0, runs[next].start - run.end) / 86_400
+                guard jump >= 1, Double(jump) <= Double(configuration.joinJump) * (1 + quietDays) else { continue }
+                candidates.append((jump, abs(runs[next].start - run.end), index, next))
+            }
+        }
+        candidates.sort { ($0.jump, $0.gap, $0.from) < ($1.jump, $1.gap, $1.from) }
+
+        var hasFollower = Set<Int>()
+        var leader: [Int: Int] = [:]
+        for candidate in candidates where !hasFollower.contains(candidate.from) && leader[candidate.to] == nil {
+            hasFollower.insert(candidate.from)
+            leader[candidate.to] = candidate.from
+        }
+        // A run starts after the one it follows, so its leader is settled before it is.
+        for index in byStart {
+            if let leader = leader[index] {
+                chains[index] = chains[leader]
+            }
+        }
+        return chains
+    }
+
     /// How far `to` is ahead of `from` on a counter that wraps at 10,000; negative when behind.
     private static func forward(from: Int, to: Int) -> Int {
         let distance = ((to - from) % 10_000 + 10_000) % 10_000
@@ -200,7 +380,7 @@ struct OwnDeviceLedger: Sendable {
     }
 }
 
-private extension Array {
+extension Array {
     /// Index of the first element for which `predicate` is true, in an array where every
     /// element after that one is true as well.
     func partitioningIndex(where predicate: (Element) -> Bool) -> Int {

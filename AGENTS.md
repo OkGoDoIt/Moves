@@ -157,11 +157,21 @@ That rule alone cannot tell the owner's phone from a partner's in an iCloud Shar
 (public PhotoKit exposes neither the library scope nor the camera model). `OwnDeviceLedger`
 does it from the camera's file counter (`IMG_4317`): each device counts upward on its own,
 screenshots share the counter and mark the owner's run, and a run alongside the owner's is
-another device. It is rebuilt from the library on every import start, resume, and new-photo
-check and is never stored. Measured on a 381,000-item library with Shared Library ground
-truth (2023 on): 1.4% of the other phone's photos kept, 0.8% of the owner's dropped. When
-it cannot tell (no file names, or no screenshots) `PhotoAssetDescriptor.resolved(with:)`
-falls back to the added-when-taken rule. `OwnCameraRoster` reads the camera model from
+another device. Measured on a 381,000-item library with Shared Library ground truth (2023
+on): 1.4% of the other phone's photos kept, 0.8% of the owner's dropped. When it cannot
+tell (no file names, or no screenshots) `PhotoOriginLedger` falls back to the
+added-when-taken rule.
+
+Photos added long after they were taken (a Google Photos move brought 110,000 of them into
+that library) are judged by `PhotoOriginLedger`, which puts everything on one counter
+ordered by capture time. Backups keep the number (`IMG_4317(1).HEIC`), so older phones
+continue the owner's run. A copy of a photo already there is skipped; a photo without a
+counter is used only when it came in a large backup and predates the owner's counter. Two
+rules keep wrong places out: where two runs put the owner in two places at once, the run
+with fewer screenshots is dropped whole (`OwnDeviceLedger.contestedRuns`), and
+`PhotoTrailFilter` drops fixes vaguer than 100 m and ones that need an impossible speed.
+Known-wrong places left in that library: 85 of 182,000 photos used. The ledger is cached in
+Caches while an import is under way, nowhere else. `OwnCameraRoster` reads the camera model from
 originals already on the phone (first kilobytes only, never from iCloud), labels the
 owner's phones over the years, drops a model that is a stranger to its month, and makes a
 new model wait for three photos in a row before its fixes are used. Do not replace this
@@ -170,10 +180,14 @@ with private PhotoKit property sets without asking Roger: he chose public API on
 - **History.** `PhotoHistoryJob` (UserDefaults, never the timeline store) records the range
   and how far back the import has got. `PhotoHistoryImportRunner` runs it newest photo
   first, about 1,500 photos per step, one save per step; a step grows until it ends between
-  outings so no stay is cut in two. `PhotoLibraryController` runs steps only while a scene
-  is active, each under a background-task assertion (a suspended write in the App Group
-  container is a `0xdead10cc` kill), resumes a running job on the next activation, and
-  pauses a job whose step was interrupted twice. `PhotoHistoryImporter.importStep` reads a
+  outings so no stay is cut in two. Starting takes one tap and covers the whole library;
+  from then on only the person's own Pause stops it. `PhotoLibraryController` runs steps
+  while it holds a `WorkGrant` (on screen, a continued-processing task, an idle processing
+  task, or the seconds after leaving or a location wake; see `PhotoHistoryBackgroundTask`),
+  each under a background-task assertion (a suspended write in the App Group container is a
+  `0xdead10cc` kill). Photos that keep stopping a step are taken in smaller steps and after
+  six tries passed over. New `PhotoHistoryJob` fields must decode with a default, or an
+  update loses the import. `PhotoHistoryImporter.importStep` reads a
   step's visits, attachments, and removal tombstones once; do not reintroduce per-photo
   fetches or per-stay saves, which made the first importer take minutes per thousand
   photos. History samples are `.photoLibrary` and still never feed stay inference.

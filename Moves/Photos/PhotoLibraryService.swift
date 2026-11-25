@@ -51,9 +51,19 @@ actor PhotoLibraryService: PhotoAssetProviding {
         return Self.fetch(in: interval).count
     }
 
-    func cameraRoll(in interval: DateInterval) async throws -> [CameraRollEntry] {
+    func earliestPhotoDate() async throws -> Date? {
+        guard hasReadAccess else { return nil }
+        let options = PHFetchOptions()
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
+        options.predicate = NSPredicate(format: "creationDate != nil")
+        options.includeAssetSourceTypes = [.typeUserLibrary]
+        options.fetchLimit = 1
+        return PHAsset.fetchAssets(with: .image, options: options).firstObject?.creationDate
+    }
+
+    func libraryRoll(in interval: DateInterval) async throws -> [LibraryRollEntry] {
         guard hasReadAccess else { return [] }
-        var entries: [CameraRollEntry] = []
+        var entries: [LibraryRollEntry] = []
         Self.fetch(in: interval, stillsOnly: false).enumerateObjects { asset, _, stop in
             if Task.isCancelled {
                 stop.pointee = true
@@ -61,16 +71,26 @@ actor PhotoLibraryService: PhotoAssetProviding {
             }
             // PhotoKit objects pile up across a library of hundreds of thousands otherwise.
             autoreleasepool {
-                guard let capturedAt = asset.creationDate,
-                      let addedAt = asset.addedDate,
-                      PhotoCaptureClassifier.isCameraCapture(capturedAt: capturedAt, addedAt: addedAt),
-                      let number = CameraRollEntry.number(inFileName: Self.originalFileName(of: asset))
-                else { return }
+                guard let capturedAt = asset.creationDate, let addedAt = asset.addedDate else { return }
+                let name = Self.originalFileName(of: asset)
+                let number = Self.rollNumber(fileName: name, capturedAt: capturedAt, addedAt: addedAt)
                 entries.append(
-                    CameraRollEntry(
+                    LibraryRollEntry(
+                        capturedAt: capturedAt,
                         addedAt: addedAt,
                         number: number,
+                        // A camera never makes a PNG; a screenshot from an old phone may
+                        // have lost its mark on the way through a backup, but not its name.
                         isScreenshot: asset.mediaSubtypes.contains(.photoScreenshot)
+                            || (number != nil && name?.lowercased().hasSuffix(".png") == true),
+                        // Only photos on the counter are compared by place.
+                        place: number == nil || asset.mediaType != .image ? nil : asset.location.map { location in
+                            PhotoPlace(
+                                latitude: location.coordinate.latitude,
+                                longitude: location.coordinate.longitude,
+                                accuracy: location.horizontalAccuracy > 0 ? location.horizontalAccuracy : nil
+                            )
+                        }
                     )
                 )
             }
@@ -172,6 +192,14 @@ actor PhotoLibraryService: PhotoAssetProviding {
         return PHAssetResource.assetResources(for: asset).first?.originalFilename
     }
 
+    /// The camera's counter. A file that went through a backup may carry a suffix.
+    private static func rollNumber(fileName: String?, capturedAt: Date, addedAt: Date) -> Int? {
+        CameraRollEntry.number(
+            inFileName: fileName,
+            allowingSuffix: !PhotoCaptureClassifier.isCameraCapture(capturedAt: capturedAt, addedAt: addedAt)
+        )
+    }
+
     /// Items in the person's own library: all of `interval` oldest first, or only its
     /// newest few. Shared albums and photos synced from a computer belong to other
     /// libraries and are left out.
@@ -210,10 +238,7 @@ actor PhotoLibraryService: PhotoAssetProviding {
             page.earliestScannedAt = min(page.earliestScannedAt ?? capturedAt, capturedAt)
             // A screenshot shows a place; it wasn't taken there.
             guard !asset.mediaSubtypes.contains(.photoScreenshot), let location = asset.location else { return }
-            let addedWhenTaken = PhotoCaptureClassifier.isCameraCapture(
-                capturedAt: capturedAt,
-                addedAt: asset.addedDate
-            )
+            let addedAt = asset.addedDate
             page.assets.append(
                 PhotoAssetDescriptor(
                     localIdentifier: asset.localIdentifier,
@@ -221,11 +246,15 @@ actor PhotoLibraryService: PhotoAssetProviding {
                     latitude: location.coordinate.latitude,
                     longitude: location.coordinate.longitude,
                     horizontalAccuracy: location.horizontalAccuracy > 0 ? location.horizontalAccuracy : nil,
-                    isCameraCapture: addedWhenTaken,
-                    addedAt: asset.addedDate,
-                    rollNumber: addedWhenTaken
-                        ? CameraRollEntry.number(inFileName: Self.originalFileName(of: asset))
-                        : nil
+                    isCameraCapture: PhotoCaptureClassifier.isCameraCapture(capturedAt: capturedAt, addedAt: addedAt),
+                    addedAt: addedAt,
+                    rollNumber: addedAt.flatMap { added in
+                        Self.rollNumber(
+                            fileName: Self.originalFileName(of: asset),
+                            capturedAt: capturedAt,
+                            addedAt: added
+                        )
+                    }
                 )
             )
         }
@@ -293,7 +322,6 @@ final class PhotoLibraryController: ObservableObject {
     @Published private(set) var authorizationStatus: PHAuthorizationStatus
     /// The history import in progress, paused, or just finished.
     @Published private(set) var historyJob: PhotoHistoryJob?
-    @Published private(set) var isPreparingHistoryImport = false
     /// True while a step of the history import is being written.
     @Published private(set) var isHistoryImportWorking = false
     /// How long the rest of the history import should take at the pace so far.
@@ -304,7 +332,6 @@ final class PhotoLibraryController: ObservableObject {
     @Published private(set) var ownCameraPeriods: [OwnCameraRoster.Period] = []
     @Published private(set) var isCheckingRecentPhotos = false
     @Published private(set) var fixStatus = PhotoFixStatus()
-    @Published private(set) var lastErrorMessage: String?
 
     let modelContainer: ModelContainer
     let service: PhotoLibraryService
@@ -319,8 +346,14 @@ final class PhotoLibraryController: ObservableObject {
     private var recentPassTask: Task<Void, Never>?
     private var needsAnotherRecentPass = false
     private var lastRecentPassAt: Date?
-    private var isSceneActive = false
+    private var grants: Set<WorkGrant> = []
+    /// Where the job's photos came from; `nil` inside when it could not be worked out.
+    private var ledger: (job: UUID, value: PhotoOriginLedger?)?
+    private let ledgerCache = PhotoOriginLedgerCache.standard
     private var sampleObserver: NSObjectProtocol?
+
+    /// The process's one controller, for background tasks, which start without a view.
+    private(set) static weak var current: PhotoLibraryController?
 
     /// Counts only. Where a photo was taken never reaches the log.
     private static let log = Logger(subsystem: MovesAppIdentity.bundleIdentifier, category: "Photos")
@@ -341,16 +374,10 @@ final class PhotoLibraryController: ObservableObject {
         ownCameraPeriods = OwnCameraRosterStore(defaults: defaults).load().periods()
         refreshFixStatus()
 
-        var job = jobStore.load()
-        if var interrupted = job, interrupted.state == .running, interrupted.unfinishedStepStarts >= 2 {
-            interrupted.state = .paused
-            interrupted.message = String(localized: "The import stopped twice at the same photos.")
-            jobStore.save(interrupted)
-            job = interrupted
-        }
-        historyJob = job
+        historyJob = jobStore.load()
 
         guard !ProcessInfo.processInfo.isRunningUnitTests else { return }
+        Self.current = self
         // The phone is woken for new fixes while Moves is closed. That is the moment to
         // look for photos taken since the last look.
         sampleObserver = NotificationCenter.default.addObserver(
@@ -360,6 +387,9 @@ final class PhotoLibraryController: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor in
                 await self?.processRecentPhotosAfterNewFixes()
+                if UIApplication.shared.applicationState == .background {
+                    self?.workBriefly()
+                }
             }
         }
     }
@@ -381,6 +411,10 @@ final class PhotoLibraryController: ObservableObject {
         historyJob?.state == .running
     }
 
+    private var mayWork: Bool {
+        hasReadAccess && !grants.isEmpty
+    }
+
     /// Starts the PhotoKit change observer. Safe to call more than once.
     func start() {
         authorizationStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
@@ -397,9 +431,19 @@ final class PhotoLibraryController: ObservableObject {
     }
 
     func sceneChanged(isActive: Bool) {
-        isSceneActive = isActive
         if isActive {
+            authorizationStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+            grants.insert(.scene)
+            if isImporting {
+                requestContinuing()
+            }
             continueHistoryImport()
+        } else {
+            grants.remove(.scene)
+            if isImporting {
+                PhotoHistoryBackgroundTask.scheduleResume()
+                workBriefly()
+            }
         }
     }
 
@@ -430,59 +474,112 @@ final class PhotoLibraryController: ObservableObject {
 
     // MARK: - History import
 
-    /// Counts what an import of `interval` would read. Runs off the main actor: the
-    /// library can hold tens of thousands of photos.
-    func previewHistory(in interval: DateInterval, includesSavedPhotos: Bool) async throws -> PhotoHistoryPreview {
-        let service = service
-        return try await importWorkerValue(Task.detached(priority: .userInitiated) {
-            let ledger = try await service.ownDeviceLedger(around: interval)
-            let assets = try await service.geotaggedAssets(in: interval).map { $0.resolved(with: ledger) }
-            try Task.checkCancellation()
-            return PhotoHistoryImporter.preview(
-                assets: assets,
-                in: interval,
-                includesSavedPhotos: includesSavedPhotos
-            )
-        })
-    }
-
-    func startHistoryImport(in interval: DateInterval, includesSavedPhotos: Bool) {
-        guard !isImporting, !isPreparingHistoryImport else { return }
-        isPreparingHistoryImport = true
-        lastErrorMessage = nil
-        let runner = historyRunner
-        Task {
-            defer { isPreparingHistoryImport = false }
-            do {
-                setHistoryJob(try await runner.makeJob(in: interval, includesSavedPhotos: includesSavedPhotos))
-                continueHistoryImport()
-            } catch {
-                lastErrorMessage = error.localizedDescription
-            }
-        }
+    /// Begins importing the whole library. Returns at once: the job is written down before
+    /// anything is read, and from then on it finishes on its own.
+    func startHistoryImport() {
+        guard !isImporting else { return }
+        ledgerCache.clear()
+        ledger = nil
+        setHistoryJob(.wholeLibrary())
+        requestContinuing()
+        continueHistoryImport()
     }
 
     /// Stops after the step that is running. Nothing already saved is undone.
     func pauseHistoryImport() {
         guard var job = historyJob, job.state == .running else { return }
         job.state = .paused
-        job.message = nil
         setHistoryJob(job)
+        PhotoHistoryBackgroundTask.cancelResume()
     }
 
     func resumeHistoryImport() {
-        guard var job = historyJob, job.state == .paused || job.state == .failed else { return }
+        guard var job = historyJob, job.state == .paused else { return }
+        guard job.rules == PhotoHistoryJob.currentRules else {
+            // Begun by a version that read fewer photos. What it added is kept and is
+            // recognized when it comes by again.
+            startHistoryImport()
+            return
+        }
         job.state = .running
         job.message = nil
         job.unfinishedStepStarts = 0
         setHistoryJob(job)
+        requestContinuing()
         continueHistoryImport()
     }
 
-    /// Forgets a finished or abandoned import. What it already added stays.
-    func clearHistoryImport() {
-        guard historyJob?.state != .running else { return }
-        setHistoryJob(nil)
+    // MARK: Time to work in
+
+    /// What lets the import work right now. Without any, the loop ends after its step.
+    enum WorkGrant: Hashable {
+        /// Moves is on screen.
+        case scene
+        /// The system lets a started import go on after the person leaves.
+        case continuedTask
+        /// The phone is idle.
+        case processingTask
+        /// A few seconds after leaving Moves, or after a wake for a new fix.
+        case brief
+    }
+
+    /// Holds `grant` until the import is done or the grant is taken back.
+    func workUntilDone(with grant: WorkGrant) async {
+        grants.insert(grant)
+        continueHistoryImport()
+        while isImporting, grants.contains(grant) {
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+        grants.remove(grant)
+    }
+
+    func endWork(with grant: WorkGrant) {
+        grants.remove(grant)
+    }
+
+    /// Uses the seconds the system gives an app that just left the screen or was woken.
+    private func workBriefly() {
+        guard isImporting, !grants.contains(.brief) else { return }
+        var identifier = UIBackgroundTaskIdentifier.invalid
+        identifier = UIApplication.shared.beginBackgroundTask(withName: "Photo history import") { [weak self] in
+            self?.endWork(with: .brief)
+            UIApplication.shared.endBackgroundTask(identifier)
+            identifier = .invalid
+        }
+        guard identifier != .invalid else { return }
+        Task {
+            grants.insert(.brief)
+            continueHistoryImport()
+            // A step takes a second or two and is protected by a request of its own, so
+            // stopping with time to spare means none is cut off.
+            while isImporting, grants.contains(.brief), UIApplication.shared.backgroundTimeRemaining > 12 {
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+            grants.remove(.brief)
+            if identifier != .invalid {
+                UIApplication.shared.endBackgroundTask(identifier)
+                identifier = .invalid
+            }
+        }
+    }
+
+    private func requestContinuing() {
+        guard !grants.contains(.continuedTask), UIApplication.shared.applicationState != .background else { return }
+        do {
+            try PhotoHistoryBackgroundTask.requestContinuing(title: continuingTitle, subtitle: continuingSubtitle)
+        } catch {
+            Self.log.error("Continuing in the background was refused: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    var continuingTitle: String { String(localized: "Importing photo history") }
+
+    var continuingSubtitle: String {
+        guard let job = historyJob, job.cursor < job.rangeEnd else {
+            return String(localized: "Finding the photos your phone took")
+        }
+        let reached = job.cursor.formatted(.dateTime.month(.wide).year())
+        return String(localized: "Back to \(reached)")
     }
 
     private var historyRunner: PhotoHistoryImportRunner {
@@ -498,55 +595,53 @@ final class PhotoLibraryController: ObservableObject {
         jobStore.save(job)
     }
 
-    /// Works through the job while Moves is open. Leaving the app ends the loop after
-    /// the current step, and coming back starts it again from the saved cursor.
+    /// Works through the job for as long as something allows it. Losing every grant ends
+    /// the loop after the current step, and the next one starts it again from the saved
+    /// cursor. An error is tried again; nothing but the person pausing it stops the import
+    /// for good.
     private func continueHistoryImport() {
-        guard historyTask == nil, isSceneActive, hasReadAccess, historyJob?.state == .running else { return }
+        guard historyTask == nil, mayWork, historyJob?.state == .running else { return }
         let runner = historyRunner
         historyTask = Task { [weak self] in
             await TimelineSchemaUpgrader.waitUntilFinished()
             var wroteAnything = false
             var pace: (since: Date, remaining: Int, steps: Int)?
-            var ledger: (job: UUID, value: OwnDeviceLedger?)?
-            while let self, !Task.isCancelled, self.isSceneActive,
+            while let self, !Task.isCancelled, self.mayWork,
                   var job = self.historyJob, job.state == .running {
-                if ledger?.job != job.id {
-                    // Working out which photos the owner's phone took reads the whole
-                    // range once. If that itself has stopped Moves twice, the import goes
-                    // on without it rather than never finishing.
-                    if job.ledgerAttempts < 2 {
-                        job.ledgerAttempts += 1
-                        self.setHistoryJob(job)
-                        self.isReadingLibrary = true
-                        let reading = job
-                        let built = try? await Task.detached(priority: .utility) {
-                            try await runner.makeLedger(for: reading)
-                        }.value
-                        self.isReadingLibrary = false
-                        ledger = (job.id, built)
-                        Self.log.info(
-                            "Camera roll read: \(built?.ownItemCount ?? 0) items from this phone, \(built?.otherItemCount ?? 0) from other devices"
-                        )
-                        guard var current = self.historyJob, current.id == job.id else { continue }
-                        current.ledgerAttempts = 0
-                        self.setHistoryJob(current)
+                if job.rules != PhotoHistoryJob.currentRules {
+                    self.setHistoryJob(.wholeLibrary())
+                    continue
+                }
+                if !job.isCounted {
+                    self.isReadingLibrary = true
+                    let uncounted = job
+                    let counted = try? await Task.detached(priority: .utility) { try await runner.counted(uncounted) }.value
+                    guard var current = self.historyJob, current.id == job.id else { continue }
+                    guard let counted else {
+                        try? await Task.sleep(for: .seconds(5))
                         continue
                     }
-                    ledger = (job.id, nil)
-                    Self.log.error("Camera roll could not be read twice; importing without it")
+                    current = counted
+                    current.state = self.historyJob?.state ?? current.state
+                    self.setHistoryJob(current)
+                    continue
+                }
+                if self.ledger?.job != job.id {
+                    guard await self.prepareLedger(for: job, runner: runner) else { break }
+                    continue
                 }
                 job.unfinishedStepStarts += 1
                 self.setHistoryJob(job)
                 self.isHistoryImportWorking = true
                 let started = job
-                let ownDevices = ledger?.value
+                let origins = self.ledger?.value
                 if pace == nil {
                     pace = (.now, started.remainingPhotoCount, 0)
                 }
                 do {
                     let advanced = try await Self.withStoreWriteTime(named: "Photo history") {
                         try await Task.detached(priority: .utility) {
-                            try await runner.runStep(started, ledger: ownDevices)
+                            try await runner.runStep(started, ledger: origins)
                         }.value
                     }
                     wroteAnything = true
@@ -557,7 +652,7 @@ final class PhotoLibraryController: ObservableObject {
                         merged.state = .paused
                     }
                     self.setHistoryJob(merged)
-                    Self.log.info(
+                    Self.log.notice(
                         "Photo history step done: \(merged.checkedPhotoCount) of \(merged.totalPhotoCount) photos checked, \(merged.state.rawValue, privacy: .public)"
                     )
                     if var measured = pace {
@@ -571,11 +666,14 @@ final class PhotoLibraryController: ObservableObject {
                         )
                     }
                 } catch {
-                    guard var current = self.historyJob, current.id == started.id else { continue }
-                    current.state = .failed
-                    current.message = error.localizedDescription
-                    self.setHistoryJob(current)
+                    // The step wrote nothing. It is tried again, smaller each time, and the
+                    // job's own count of starts decides when to pass its photos over.
                     Self.log.error("Photo history step failed: \(error.localizedDescription, privacy: .public)")
+                    guard var current = self.historyJob, current.id == started.id else { continue }
+                    current.message = String(localized: "Trying again: \(error.localizedDescription)")
+                    self.setHistoryJob(current)
+                    self.isHistoryImportWorking = false
+                    try? await Task.sleep(for: .seconds(min(2 << current.unfinishedStepStarts, 30)))
                 }
             }
             guard let self else { return }
@@ -586,13 +684,65 @@ final class PhotoLibraryController: ObservableObject {
             self.ownCameraPeriods = OwnCameraRosterStore(defaults: self.defaults).load().periods()
             if wroteAnything {
                 PhotoHistoryImporter.announceChanges()
-                if self.historyJob?.state == .finished {
+            }
+            if self.historyJob?.state == .finished {
+                self.ledger = nil
+                self.ledgerCache.clear()
+                PhotoHistoryBackgroundTask.cancelResume()
+                if wroteAnything {
                     RouteMatchBackgroundTask.scheduleAfterImport()
                 }
+                return
             }
-            // The scene can come back between the loop's last check and here.
-            self.continueHistoryImport()
+            // A grant can arrive between the loop's last check and here.
+            if self.ledger != nil || self.grants != [.brief] {
+                self.continueHistoryImport()
+            }
         }
+    }
+
+    /// Works out where every photo came from, which reads the whole library once, or takes
+    /// it from the cache. Returns `false` when there is no time for that now.
+    private func prepareLedger(for job: PhotoHistoryJob, runner: PhotoHistoryImportRunner) async -> Bool {
+        let cache = ledgerCache
+        if let cached = await Task.detached(priority: .utility, operation: { cache.load(for: job.id) }).value {
+            ledger = (job.id, cached)
+            return true
+        }
+        guard grants != [.brief] else { return false }
+
+        // If reading it has itself stopped Moves this often, the import goes on with only
+        // the photos that were added when they were taken rather than never finishing.
+        guard job.ledgerAttempts < 4 else {
+            ledger = (job.id, nil)
+            Self.log.error("The library could not be read; importing without its history")
+            return true
+        }
+        var attempt = job
+        attempt.ledgerAttempts += 1
+        setHistoryJob(attempt)
+        isReadingLibrary = true
+        let began = Date.now
+        let built = try? await Task.detached(priority: .utility) {
+            let ledger = try await runner.makeLedger(for: attempt)
+            cache.save(ledger, for: attempt.id)
+            return ledger
+        }.value
+        isReadingLibrary = false
+        guard historyJob?.id == job.id else { return true }
+        if let built {
+            ledger = (job.id, built)
+            Self.log.notice(
+                "Library read in \(Date.now.timeIntervalSince(began), format: .fixed(precision: 1)) s: \(built.camera.ownItemCount) items from this phone, \(built.camera.otherItemCount) from other phones; with imports \(built.archive.ownItemCount) and \(built.archive.otherItemCount)"
+            )
+            if var current = historyJob {
+                current.ledgerAttempts = 0
+                setHistoryJob(current)
+            }
+        } else {
+            try? await Task.sleep(for: .seconds(5))
+        }
+        return true
     }
 
     /// The first step also warms caches, so the estimate starts with the second.
@@ -662,7 +812,7 @@ final class PhotoLibraryController: ObservableObject {
             // photo added when it was taken still counts.
             let service = service
             let ledger = try? await Task.detached(priority: .utility) {
-                try await service.ownDeviceLedger(around: interval)
+                try await service.originLedger(around: interval)
             }.value
             let assets = found.map { $0.resolved(with: ledger) }
 
