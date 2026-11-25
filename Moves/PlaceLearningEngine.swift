@@ -458,7 +458,7 @@ enum PlaceLearningEngine {
         let centerLongitude = forGeometry.map(\.longitude).reduce(0, +) / Double(forGeometry.count)
         let center = CLLocationCoordinate2D(latitude: centerLatitude, longitude: centerLongitude)
         let distances = forGeometry.map { distance(from: center, to: $0.coordinate) }
-        let radius = clampRadius(percentile(distances, 0.9) * radiusGrowthFactor)
+        let radius = clampRadius(footprintReach(distances) * radiusGrowthFactor)
 
         return Footprint(
             centerLatitude: centerLatitude,
@@ -563,9 +563,17 @@ enum PlaceLearningEngine {
     }
 
     static func shouldSuppress(_ label: String, nearbyPlaces: [KnownPlace]) -> Bool {
-        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
-        return suppressedAutoLabels(from: nearbyPlaces).contains(trimmed)
+        if suppressedAutoLabels(from: nearbyPlaces).contains(trimmed.lowercased()) { return true }
+        // Compare the way every other label comparison does, so "135-137 X" stays
+        // rejected once it is written as "135–137 X".
+        let key = PlaceDisplayNamer.labelComparisonKey(trimmed)
+        return nearbyPlaces.contains { place in
+            place.rejectedAutoLabels.contains { rejected in
+                !isSameName(rejected, place.name) && PlaceDisplayNamer.labelComparisonKey(rejected) == key
+            }
+        }
     }
 
     static func clampRadius(_ radius: CLLocationDistance) -> CLLocationDistance {
@@ -644,11 +652,8 @@ enum PlaceLearningEngine {
         place.rejectedAutoLabels.append(trimmed)
     }
 
-    private static func isSameName(_ lhs: String, _ rhs: String) -> Bool {
-        lhs.trimmingCharacters(in: .whitespacesAndNewlines).compare(
-            rhs.trimmingCharacters(in: .whitespacesAndNewlines),
-            options: [.caseInsensitive, .diacriticInsensitive]
-        ) == .orderedSame
+    static func isSameName(_ lhs: String, _ rhs: String) -> Bool {
+        PlaceDisplayNamer.labelComparisonKey(lhs) == PlaceDisplayNamer.labelComparisonKey(rhs)
     }
 
     private static func confirmedVisits(on place: KnownPlace, including visit: VisitPlace) -> [VisitSnapshot] {
@@ -660,5 +665,290 @@ enum PlaceLearningEngine {
             snapshots.append(VisitSnapshot(visit))
         }
         return snapshots
+    }
+}
+
+// MARK: - Place identity: one real place, one name
+
+extension PlaceLearningEngine {
+    /// Below this many visits a footprint reaches the farthest one; above it, the 90th
+    /// percentile, so one stray centre in a long history cannot stretch it.
+    static let smallFootprintSampleCount = 30
+
+    /// Two stays are the same spot within `40 m + max(their accuracies)`, never past 100 m.
+    static let sameSpotBaseDistance: CLLocationDistance = 40
+    static let sameSpotMaximumDistance: CLLocationDistance = 100
+    /// A cluster grown stay by stay stays within this of the stay it grew from, so a
+    /// chain of stops along one street cannot swallow the neighbours.
+    static let clusterRadius: CLLocationDistance = 150
+    /// Fixes vaguer than this say little about where in a building someone was.
+    static let robustCenterAccuracyLimit: CLLocationAccuracy = 50
+
+    /// Plain values of one stay, for label reuse and clustering.
+    struct StaySnapshot: Equatable, Sendable, Identifiable {
+        var id: UUID
+        var latitude: Double
+        var longitude: Double
+        var horizontalAccuracy: Double
+        var arrivalDate: Date
+        var departureDate: Date?
+        /// The automatic label the stay shows, if any.
+        var label: String?
+
+        var coordinate: CLLocationCoordinate2D {
+            CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+        }
+
+        /// Time spent there. Open or instant stays still count for a minute.
+        var weight: TimeInterval {
+            guard let departureDate else { return 60 }
+            return max(departureDate.timeIntervalSince(arrivalDate), 60)
+        }
+
+        init(
+            id: UUID = UUID(),
+            latitude: Double,
+            longitude: Double,
+            horizontalAccuracy: Double,
+            arrivalDate: Date,
+            departureDate: Date?,
+            label: String?
+        ) {
+            self.id = id
+            self.latitude = latitude
+            self.longitude = longitude
+            self.horizontalAccuracy = horizontalAccuracy
+            self.arrivalDate = arrivalDate
+            self.departureDate = departureDate
+            self.label = label
+        }
+
+        init(_ visit: VisitPlace, label: String?) {
+            self.init(
+                id: visit.id,
+                latitude: visit.latitude,
+                longitude: visit.longitude,
+                horizontalAccuracy: visit.horizontalAccuracy,
+                arrivalDate: visit.arrivalDate,
+                departureDate: visit.departureDate,
+                label: label
+            )
+        }
+    }
+
+    /// How far apart two stays can be and still be the same spot.
+    static func sameSpotDistance(
+        _ lhsAccuracy: CLLocationAccuracy,
+        _ rhsAccuracy: CLLocationAccuracy
+    ) -> CLLocationDistance {
+        min(sameSpotBaseDistance + max(max(lhsAccuracy, 0), max(rhsAccuracy, 0)), sameSpotMaximumDistance)
+    }
+
+    static func isSameSpot(_ lhs: StaySnapshot, _ rhs: StaySnapshot) -> Bool {
+        distance(from: lhs.coordinate, to: rhs.coordinate)
+            <= sameSpotDistance(lhs.horizontalAccuracy, rhs.horizontalAccuracy)
+    }
+
+    /// The automatic label to reuse for `target`: among other stays at the same spot,
+    /// the label under which the most time was spent, ties to the most recent. Nil when
+    /// nothing nearby has one, and the caller geocodes.
+    static func reusableLabel(
+        for target: StaySnapshot,
+        among others: [StaySnapshot],
+        isSuppressed: (String) -> Bool = { _ in false }
+    ) -> String? {
+        let nearby = others.filter { other in
+            other.id != target.id
+                && PlaceDisplayNamer.meaningful(other.label) != nil
+                && isSameSpot(target, other)
+        }
+        return dominantLabel(among: nearby, isSuppressed: isSuppressed)
+    }
+
+    /// Time-weighted winning label among `stays`, written in its readable form.
+    static func dominantLabel(
+        among stays: [StaySnapshot],
+        isSuppressed: (String) -> Bool = { _ in false }
+    ) -> String? {
+        struct Tally {
+            var weight: TimeInterval = 0
+            var latest: Date = .distantPast
+            var label = ""
+        }
+        var tallies: [String: Tally] = [:]
+        for stay in stays {
+            guard let raw = PlaceDisplayNamer.meaningful(stay.label) else { continue }
+            let label = PlaceDisplayNamer.normalizedAutomaticLabel(raw)
+            guard !isSuppressed(label) else { continue }
+            let key = PlaceDisplayNamer.labelComparisonKey(label)
+            var tally = tallies[key] ?? Tally()
+            tally.weight += stay.weight
+            if stay.arrivalDate >= tally.latest {
+                tally.latest = stay.arrivalDate
+                tally.label = label
+            }
+            tallies[key] = tally
+        }
+        return tallies
+            .sorted { lhs, rhs in
+                if abs(lhs.value.weight - rhs.value.weight) > 0.5 { return lhs.value.weight > rhs.value.weight }
+                if lhs.value.latest != rhs.value.latest { return lhs.value.latest > rhs.value.latest }
+                return lhs.key < rhs.key
+            }
+            .first?
+            .value
+            .label
+    }
+
+    /// Stays reachable from `seed` one same-spot step at a time, all within
+    /// `clusterRadius` of it. The seed itself is not returned.
+    static func cluster(
+        around seed: StaySnapshot,
+        among candidates: [StaySnapshot],
+        radius: CLLocationDistance = clusterRadius
+    ) -> [StaySnapshot] {
+        var remaining = candidates.filter { candidate in
+            candidate.id != seed.id && distance(from: seed.coordinate, to: candidate.coordinate) <= radius
+        }
+        var members: [StaySnapshot] = []
+        var frontier = [seed]
+        while let current = frontier.popLast() {
+            var index = 0
+            while index < remaining.count {
+                if isSameSpot(current, remaining[index]) {
+                    let joined = remaining.remove(at: index)
+                    members.append(joined)
+                    frontier.append(joined)
+                } else {
+                    index += 1
+                }
+            }
+        }
+        return members
+    }
+
+    /// One label per real place across history: each cluster grows from its longest stay
+    /// and every member takes the cluster's time-weighted label. Returns only the stays
+    /// whose label changes, so running it again on its own result changes nothing.
+    static func unifiedLabels(
+        for stays: [StaySnapshot],
+        isSuppressed: (String, CLLocationCoordinate2D) -> Bool = { _, _ in false }
+    ) -> [UUID: String] {
+        let labeled = stays.filter { PlaceDisplayNamer.meaningful($0.label) != nil }
+        let ordered = labeled.sorted { lhs, rhs in
+            if abs(lhs.weight - rhs.weight) > 0.5 { return lhs.weight > rhs.weight }
+            if lhs.arrivalDate != rhs.arrivalDate { return lhs.arrivalDate < rhs.arrivalDate }
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+        var claimed = Set<UUID>()
+        var changes: [UUID: String] = [:]
+        for anchor in ordered where !claimed.contains(anchor.id) {
+            let unclaimed = ordered.filter { !claimed.contains($0.id) }
+            let members = [anchor] + cluster(around: anchor, among: unclaimed)
+            for member in members { claimed.insert(member.id) }
+            guard let label = dominantLabel(
+                among: members,
+                isSuppressed: { isSuppressed($0, anchor.coordinate) }
+            ) else { continue }
+            for member in members where member.label != label {
+                changes[member.id] = label
+            }
+        }
+        return changes
+    }
+
+    /// Per-axis median of the stay's own fixes no vaguer than 50 m. Nil with fewer than
+    /// two such fixes, and the caller keeps its earlier rule.
+    static func robustCenter(
+        of fixes: [(latitude: Double, longitude: Double, accuracy: Double)]
+    ) -> CLLocationCoordinate2D? {
+        let good = fixes.filter { $0.accuracy >= 0 && $0.accuracy <= robustCenterAccuracyLimit }
+        guard good.count >= 2 else { return nil }
+        return CLLocationCoordinate2D(
+            latitude: median(good.map(\.latitude)),
+            longitude: median(good.map(\.longitude))
+        )
+    }
+
+    static func median(_ values: [Double]) -> Double {
+        let sorted = values.sorted()
+        guard !sorted.isEmpty else { return 0 }
+        let middle = sorted.count / 2
+        if sorted.count.isMultiple(of: 2) {
+            return (sorted[middle - 1] + sorted[middle]) / 2
+        }
+        return sorted[middle]
+    }
+
+    /// How far the footprint must reach. Small histories reach their farthest visit so
+    /// every visit assigned to the place stays inside it.
+    static func footprintReach(_ distances: [CLLocationDistance]) -> CLLocationDistance {
+        guard !distances.isEmpty else { return 0 }
+        if distances.count <= smallFootprintSampleCount {
+            return distances.max() ?? 0
+        }
+        return percentile(distances, 0.9)
+    }
+
+    // MARK: Duplicate confirmed places
+
+    struct DuplicateCandidate: Equatable, Sendable {
+        var id: UUID
+        var name: String
+        var latitude: Double
+        var longitude: Double
+        var footprintRadius: Double
+        var createdAt: Date
+
+        var coordinate: CLLocationCoordinate2D {
+            CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+        }
+
+        init(id: UUID, name: String, latitude: Double, longitude: Double, footprintRadius: Double, createdAt: Date) {
+            self.id = id
+            self.name = name
+            self.latitude = latitude
+            self.longitude = longitude
+            self.footprintRadius = footprintRadius
+            self.createdAt = createdAt
+        }
+
+        init(_ place: KnownPlace) {
+            self.init(
+                id: place.id,
+                name: place.name,
+                latitude: place.centerLatitude,
+                longitude: place.centerLongitude,
+                footprintRadius: place.footprintRadius,
+                createdAt: place.createdAt
+            )
+        }
+    }
+
+    /// Places that are certainly one place: the same name once folded, with centres
+    /// inside the larger footprint. Each maps to the earliest-created twin, so every
+    /// device picks the same survivor. Anything less certain is left for the person.
+    static func duplicateMerges(_ places: [DuplicateCandidate]) -> [(source: UUID, destination: UUID)] {
+        let ordered = places.sorted { lhs, rhs in
+            if lhs.createdAt != rhs.createdAt { return lhs.createdAt < rhs.createdAt }
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+        var keepers: [DuplicateCandidate] = []
+        var merges: [(source: UUID, destination: UUID)] = []
+        for place in ordered {
+            let key = PlaceDisplayNamer.labelComparisonKey(place.name)
+            let keeper = keepers.first { keeper in
+                !key.isEmpty
+                    && PlaceDisplayNamer.labelComparisonKey(keeper.name) == key
+                    && distance(from: keeper.coordinate, to: place.coordinate)
+                        <= max(keeper.footprintRadius, place.footprintRadius)
+            }
+            if let keeper {
+                merges.append((place.id, keeper.id))
+            } else {
+                keepers.append(place)
+            }
+        }
+        return merges
     }
 }

@@ -8,7 +8,8 @@ import SwiftData
 /// launch: a UserDefaults version key skips work that already completed, and
 /// the individual steps are idempotent if the key is missing.
 enum TimelineSchemaUpgrader {
-    static let currentVersion = 4
+    /// Step 4 settles Review questions; steps 5–7 are the place-identity repairs.
+    static let currentVersion = 7
     static let userDefaultsKey = "moves.timelineSchemaVersion"
 
     @MainActor private static var running: Task<Void, Never>?
@@ -34,7 +35,10 @@ enum TimelineSchemaUpgrader {
         defaults: UserDefaults = .standard
     ) {
         let storedVersion = defaults.integer(forKey: userDefaultsKey)
-        guard storedVersion < currentVersion else { return }
+        guard storedVersion < currentVersion else {
+            mergeDuplicatePlacesIfAny(container: container)
+            return
+        }
 
         running = Task.detached(priority: .userInitiated) {
             let context = ModelContext(container)
@@ -67,6 +71,16 @@ enum TimelineSchemaUpgrader {
         if storedVersion < 4 {
             try tagImportedHistory(in: context)
             try settleReviewQuestions(in: context)
+        }
+        if storedVersion < 5 {
+            _ = try clearCellCopiedAddresses(in: context)
+            _ = try clearCountryNamedCities(in: context)
+        }
+        if storedVersion < 6 {
+            _ = try mergeDuplicateKnownPlaces(in: context)
+        }
+        if storedVersion < 7 {
+            _ = try unifyAutomaticLabels(in: context)
         }
         if context.hasChanges {
             try context.save()
@@ -157,6 +171,173 @@ enum TimelineSchemaUpgrader {
         }
     }
 
+    // MARK: - Place identity repairs (steps 5–7)
+
+    /// Twins of a confirmed place can arrive from iCloud after launch, when another device
+    /// or an earlier install made them. This check is a fetch of a handful of rows; the
+    /// merge runs behind the upgrade screen only when there is something to merge.
+    @MainActor
+    private static func mergeDuplicatePlacesIfAny(container: ModelContainer) {
+        let probe = ModelContext(container)
+        guard let places = try? probe.fetch(FetchDescriptor<KnownPlace>()),
+              !PlaceLearningEngine.duplicateMerges(places.map(PlaceLearningEngine.DuplicateCandidate.init)).isEmpty
+        else { return }
+        running = Task.detached(priority: .userInitiated) {
+            let context = ModelContext(container)
+            context.autosaveEnabled = false
+            do {
+                _ = try mergeDuplicateKnownPlaces(in: context)
+            } catch {
+                print("Duplicate place merge failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Step 5. Street and address fields an older backfill copied from one geocode onto
+    /// every stay in a kilometre-wide cell. The tell is one address on stays more than
+    /// 100 m apart. Those fields are cleared so the ~100 m name backfill fills them again,
+    /// one cell per second. Returns how many fields were cleared.
+    @discardableResult
+    static func clearCellCopiedAddresses(in context: ModelContext) throws -> Int {
+        let visits = try context.fetch(FetchDescriptor<VisitPlace>())
+        var groups: [String: [VisitPlace]] = [:]
+        for visit in visits {
+            guard let address = PlaceDisplayNamer.meaningful(visit.formattedAddress) else { continue }
+            groups[address, default: []].append(visit)
+        }
+        var copied = Set<String>()
+        for (address, members) in groups where members.count > 1 {
+            if spansMoreThan(cellCopyDistance, members.map(\.coordinate)) {
+                copied.insert(address)
+            }
+        }
+        guard !copied.isEmpty else { return 0 }
+
+        var cleared = 0
+        for visit in visits {
+            guard let address = PlaceDisplayNamer.meaningful(visit.formattedAddress), copied.contains(address) else {
+                continue
+            }
+            visit.formattedAddress = nil
+            cleared += 1
+            if visit.thoroughfare != nil {
+                visit.thoroughfare = nil
+                cleared += 1
+            }
+        }
+        for place in try context.fetch(FetchDescriptor<KnownPlace>()) {
+            guard let address = PlaceDisplayNamer.meaningful(place.formattedAddress), copied.contains(address) else {
+                continue
+            }
+            place.formattedAddress = nil
+            cleared += 1
+            if place.thoroughfare != nil {
+                place.thoroughfare = nil
+                cleared += 1
+            }
+        }
+        try context.save()
+        return cleared
+    }
+
+    /// Step 5, with the address repair. A city written as the country's own name
+    /// ("Türkiye") is cleared; the backfill then leaves it empty or finds the real city,
+    /// and the Places list falls back to the area. Returns how many cities were cleared.
+    @discardableResult
+    static func clearCountryNamedCities(in context: ModelContext) throws -> Int {
+        var cleared = 0
+        for visit in try context.fetch(FetchDescriptor<VisitPlace>())
+        where PlaceGeocodeRegion.isCountryName(visit.locality, countryCode: visit.countryCode) {
+            visit.locality = nil
+            cleared += 1
+        }
+        for place in try context.fetch(FetchDescriptor<KnownPlace>())
+        where PlaceGeocodeRegion.isCountryName(place.locality, countryCode: place.countryCode) {
+            place.locality = nil
+            cleared += 1
+        }
+        if cleared > 0 {
+            try context.save()
+        }
+        return cleared
+    }
+
+    /// Farther apart than one ~100 m name cell can explain.
+    static let cellCopyDistance: CLLocationDistance = 100
+
+    private static func spansMoreThan(_ limit: CLLocationDistance, _ coordinates: [CLLocationCoordinate2D]) -> Bool {
+        for (index, lhs) in coordinates.enumerated() {
+            for rhs in coordinates[(index + 1)...] where distance(from: lhs, to: rhs) > limit {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Step 6, and again at any launch that finds twins. Confirmed places with the same
+    /// name, folded, whose centres sit inside the larger footprint become one, kept as the
+    /// earliest created. Corrections that named the removed twin now name the survivor.
+    /// Returns how many places were merged away.
+    @discardableResult
+    static func mergeDuplicateKnownPlaces(in context: ModelContext) throws -> Int {
+        let places = try context.fetch(FetchDescriptor<KnownPlace>())
+        let merges = PlaceLearningEngine.duplicateMerges(places.map(PlaceLearningEngine.DuplicateCandidate.init))
+        guard !merges.isEmpty else { return 0 }
+        let byID = Dictionary(places.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let events = try context.fetch(FetchDescriptor<PlaceCorrectionEvent>())
+        var merged = 0
+        for merge in merges {
+            guard let source = byID[merge.source], let destination = byID[merge.destination] else { continue }
+            PlaceLearningEngine.merge(source, into: destination)
+            for event in events {
+                if event.fromKnownPlaceID == source.id { event.fromKnownPlaceID = destination.id }
+                if event.toKnownPlaceID == source.id { event.toKnownPlaceID = destination.id }
+            }
+            context.delete(source)
+            merged += 1
+        }
+        try context.save()
+        return merged
+    }
+
+    /// Step 7. One automatic label per real place across history: unassigned stays the
+    /// person never named are clustered with the same-spot rule, and each cluster takes the
+    /// label most time was spent under. Labels only; no rows are added or removed. Running
+    /// it again changes nothing, so an interrupted pass simply runs again next launch.
+    /// Returns how many labels changed.
+    @discardableResult
+    static func unifyAutomaticLabels(in context: ModelContext) throws -> Int {
+        let visits = try context.fetch(FetchDescriptor<VisitPlace>()).filter { visit in
+            visit.knownPlace == nil
+                && visit.assignmentSource == .none
+                && PlaceDisplayNamer.meaningful(visit.userLabel) == nil
+                && PlaceDisplayNamer.meaningful(visit.autoLabel) != nil
+        }
+        guard !visits.isEmpty else { return 0 }
+        let places = try context.fetch(FetchDescriptor<KnownPlace>())
+        let changes = PlaceLearningEngine.unifiedLabels(
+            for: visits.map { PlaceLearningEngine.StaySnapshot($0, label: $0.autoLabel) },
+            isSuppressed: { label, coordinate in
+                let nearby = places.filter {
+                    distance(from: $0.coordinate, to: coordinate) <= PlaceLearningEngine.rejectedLabelSearchRadius
+                }
+                return PlaceLearningEngine.shouldSuppress(label, nearbyPlaces: nearby)
+            }
+        )
+        guard !changes.isEmpty else { return 0 }
+        var written = 0
+        for visit in visits {
+            guard let label = changes[visit.id] else { continue }
+            visit.autoLabel = label
+            written += 1
+            if written.isMultiple(of: 200) {
+                try context.save()
+            }
+        }
+        try context.save()
+        return written
+    }
+
     /// Older trips that swallowed a stop, rebuilt from stored fixes. Names for any stops
     /// this finds come from the geocode backfill, so the upgrade never waits on the network.
     @MainActor
@@ -176,10 +357,15 @@ enum TimelineSchemaUpgrader {
     }
 
     /// Same name within 120 m becomes one `KnownPlace`; assigned visits use `.user`.
+    ///
+    /// Only for history from before learned places existed. A visit that already carries an
+    /// assignment had a place on the device that wrote it; on a fresh install its place is
+    /// still on the way from iCloud, and making one here is how twin places were born.
     private static func clusterUserLabeledPlaces(in context: ModelContext) throws {
         let visits = try context.fetch(FetchDescriptor<VisitPlace>())
         let unlabeled = visits.filter { visit in
             visit.knownPlace == nil
+                && visit.assignmentSource == .none
                 && !(visit.userLabel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         }
 

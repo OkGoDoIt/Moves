@@ -457,6 +457,7 @@ actor CLGeocoderPlaceNameResolver: PlaceNameResolver {
         return candidates
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .first(where: { !$0.isEmpty })
+            .map(PlaceDisplayNamer.normalizedAutomaticLabel)
     }
 }
 
@@ -717,6 +718,19 @@ final class DefaultTimelineAssembler: TimelineAssembler {
         guard place.assignmentSource == .none, place.knownPlace == nil else { return }
         guard !hasUserLabel, !hasAutoLabel else { return }
         guard place.horizontalAccuracy <= 180 else { return }
+
+        // Earlier stays at this spot already have a name; a fresh geocode would only
+        // add another house number for the same building.
+        let placeID = place.id
+        do {
+            if let reused = try repository.reusableAutomaticLabel(for: placeID) {
+                try repository.setAutomaticLabel(reused, for: placeID)
+                try repository.saveIfNeeded()
+                return
+            }
+        } catch {
+            print("Failed to reuse a nearby place label: \(error.localizedDescription)")
+        }
 
         if let resolvedName = await placeNameResolver.resolveName(for: place.coordinate) {
             do {

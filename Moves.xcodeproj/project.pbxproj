@@ -177,6 +177,7 @@
 		F40000013050000100000003 /* RouteMatchPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F40000013050000100000002 /* RouteMatchPolicyTests.swift */; };
 		F50000013060000100000001 /* PlaceLearningEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = F50000013060000100000000 /* PlaceLearningEngine.swift */; };
 		F50000013060000100000003 /* PlaceLearningEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F50000013060000100000002 /* PlaceLearningEngineTests.swift */; };
+		F50000013060000100000106 /* PlaceIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F50000013060000100000105 /* PlaceIdentityTests.swift */; };
 		F510919F1BDA03EE24E59E20 /* ExplorationCountryBoundaries.json in Resources */ = {isa = PBXBuildFile; fileRef = BF6F883FC45C5976E18013B3 /* ExplorationCountryBoundaries.json */; };
 		F61000013060000100000001 /* MapTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F61000013060000100000000 /* MapTabView.swift */; };
 		A7C3E1000000000000000A02 /* MapActivityIndex.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7C3E1000000000000000A01 /* MapActivityIndex.swift */; };
@@ -491,6 +492,7 @@
 		F40000013050000100000002 /* RouteMatchPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteMatchPolicyTests.swift; sourceTree = "<group>"; };
 		F50000013060000100000000 /* PlaceLearningEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaceLearningEngine.swift; sourceTree = "<group>"; };
 		F50000013060000100000002 /* PlaceLearningEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaceLearningEngineTests.swift; sourceTree = "<group>"; };
+		F50000013060000100000105 /* PlaceIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaceIdentityTests.swift; sourceTree = "<group>"; };
 		F61000013060000100000000 /* MapTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapTabView.swift; sourceTree = "<group>"; };
 		A7C3E1000000000000000A01 /* MapActivityIndex.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapActivityIndex.swift; sourceTree = "<group>"; };
 		A7C3E1000000000000000A03 /* MapCoverageRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapCoverageRenderer.swift; sourceTree = "<group>"; };
@@ -830,6 +832,7 @@
 				F21000013050000100000010 /* NearbyPlaceSuggesterTests.swift */,
 				F40000013050000100000002 /* RouteMatchPolicyTests.swift */,
 				F50000013060000100000002 /* PlaceLearningEngineTests.swift */,
+				F50000013060000100000105 /* PlaceIdentityTests.swift */,
 				F61000013060000100000010 /* MapRangeSelectionTests.swift */,
 				F61000013060000100000012 /* VisitedCellStoreTests.swift */,
 				A7C3E1000000000000000A05 /* MapCoverageRendererTests.swift */,
@@ -1449,6 +1452,7 @@
 				F21000013050000100000011 /* NearbyPlaceSuggesterTests.swift in Sources */,
 				F40000013050000100000003 /* RouteMatchPolicyTests.swift in Sources */,
 				F50000013060000100000003 /* PlaceLearningEngineTests.swift in Sources */,
+				F50000013060000100000106 /* PlaceIdentityTests.swift in Sources */,
 				F61000013060000100000011 /* MapRangeSelectionTests.swift in Sources */,
 				F61000013060000100000013 /* VisitedCellStoreTests.swift in Sources */,
 				A7C3E1000000000000000A06 /* MapCoverageRendererTests.swift in Sources */,

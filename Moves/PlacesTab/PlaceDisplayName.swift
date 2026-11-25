@@ -139,6 +139,46 @@ enum PlaceDisplayNamer {
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
     }
 
+    /// A leading run of house numbers joined by dashes, commas, or "&", then the street.
+    /// Slashes are left alone: "114/134" is an alley address, not a list.
+    private static let houseNumberRunPattern = try? NSRegularExpression(
+        pattern: #"^(\d+[A-Za-z]?)((?:\s*[-–—,&]\s*\d+[A-Za-z]?)+)(\s+\S.*)$"#
+    )
+    private static let houseNumberPattern = try? NSRegularExpression(pattern: #"\d+[A-Za-z]?"#)
+
+    /// Readable form of an automatic label. A geocoder's house-number range or list keeps
+    /// its first and last number: "135-137-139-141-143-145 Phan Dinh Phung" becomes
+    /// "135–145 Phan Dinh Phung". Every other label is only trimmed.
+    static func normalizedAutomaticLabel(_ label: String) -> String {
+        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        let whole = NSRange(trimmed.startIndex..., in: trimmed)
+        guard let regex = houseNumberRunPattern,
+              let match = regex.firstMatch(in: trimmed, range: whole),
+              let firstRange = Range(match.range(at: 1), in: trimmed),
+              let runRange = Range(match.range(at: 2), in: trimmed),
+              let restRange = Range(match.range(at: 3), in: trimmed)
+        else {
+            return trimmed
+        }
+        let first = String(trimmed[firstRange])
+        let run = String(trimmed[runRange])
+        let numbers = houseNumberPattern?
+            .matches(in: run, range: NSRange(run.startIndex..., in: run))
+            .compactMap { Range($0.range, in: run).map { String(run[$0]) } } ?? []
+        let last = numbers.last ?? first
+        let street = trimmed[restRange].trimmingCharacters(in: .whitespaces)
+        if last == first {
+            return "\(first) \(street)"
+        }
+        return "\(first)–\(last) \(street)"
+    }
+
+    /// The form every label comparison uses: normalized house numbers, then folded case
+    /// and accents. Two labels name the same thing when their keys are equal.
+    static func labelComparisonKey(_ label: String) -> String {
+        folded(normalizedAutomaticLabel(label))
+    }
+
     private static func firstDistinct(from values: [String?], notEqualTo primary: String) -> String? {
         values.compactMap { value in
             guard let value else { return nil }
