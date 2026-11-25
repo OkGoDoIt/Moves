@@ -328,6 +328,8 @@ final class PhotoLibraryController: ObservableObject {
     @Published private(set) var historyTimeRemaining: TimeInterval?
     /// True while the import is working out which photos the owner's phone took.
     @Published private(set) var isReadingLibrary = false
+    /// How much of the library that has been read for, from 0 to 1.
+    @Published private(set) var libraryReadShare = 0.0
     /// The owner's phones over the years, as far as the photos on this device show.
     @Published private(set) var ownCameraPeriods: [OwnCameraRoster.Period] = []
     @Published private(set) var isCheckingRecentPhotos = false
@@ -480,6 +482,7 @@ final class PhotoLibraryController: ObservableObject {
         guard !isImporting else { return }
         ledgerCache.clear()
         ledger = nil
+        libraryReadShare = 0
         setHistoryJob(.wholeLibrary())
         requestContinuing()
         continueHistoryImport()
@@ -627,7 +630,7 @@ final class PhotoLibraryController: ObservableObject {
                     continue
                 }
                 if self.ledger?.job != job.id {
-                    guard await self.prepareLedger(for: job, runner: runner) else { break }
+                    await self.prepareLedger(for: job, runner: runner)
                     continue
                 }
                 job.unfinishedStepStarts += 1
@@ -695,54 +698,63 @@ final class PhotoLibraryController: ObservableObject {
                 return
             }
             // A grant can arrive between the loop's last check and here.
-            if self.ledger != nil || self.grants != [.brief] {
-                self.continueHistoryImport()
-            }
+            self.continueHistoryImport()
         }
     }
 
-    /// Works out where every photo came from, which reads the whole library once, or takes
-    /// it from the cache. Returns `false` when there is no time for that now.
-    private func prepareLedger(for job: PhotoHistoryJob, runner: PhotoHistoryImportRunner) async -> Bool {
+    /// Works out where every photo came from, or takes it from the cache. The library is
+    /// read in parts that are kept as they are done, so being stopped costs one part.
+    private func prepareLedger(for job: PhotoHistoryJob, runner: PhotoHistoryImportRunner) async {
+        isReadingLibrary = true
+        defer { isReadingLibrary = false }
         let cache = ledgerCache
         if let cached = await Task.detached(priority: .utility, operation: { cache.load(for: job.id) }).value {
             ledger = (job.id, cached)
-            return true
+            return
         }
-        guard grants != [.brief] else { return false }
-
         // If reading it has itself stopped Moves this often, the import goes on with only
         // the photos that were added when they were taken rather than never finishing.
         guard job.ledgerAttempts < 4 else {
             ledger = (job.id, nil)
             Self.log.error("The library could not be read; importing without its history")
-            return true
+            return
         }
-        var attempt = job
-        attempt.ledgerAttempts += 1
-        setHistoryJob(attempt)
-        isReadingLibrary = true
+
+        func isCurrent() -> Bool {
+            mayWork && historyJob?.id == job.id && historyJob?.state == .running
+        }
+        func setAttempts(_ count: Int) {
+            guard var current = historyJob, current.id == job.id else { return }
+            current.ledgerAttempts = count
+            setHistoryJob(current)
+        }
+
         let began = Date.now
-        let built = try? await Task.detached(priority: .utility) {
-            let ledger = try await runner.makeLedger(for: attempt)
-            cache.save(ledger, for: attempt.id)
-            return ledger
-        }.value
-        isReadingLibrary = false
-        guard historyJob?.id == job.id else { return true }
-        if let built {
+        let pieces = runner.libraryPieces(for: job)
+        do {
+            for index in pieces.indices {
+                guard isCurrent() else { return }
+                setAttempts((historyJob?.ledgerAttempts ?? 0) + 1)
+                try await Task.detached(priority: .utility) {
+                    try await runner.readPiece(index, of: pieces, for: job, cache: cache)
+                }.value
+                setAttempts(0)
+                libraryReadShare = Double(index + 1) / Double(pieces.count)
+            }
+            guard isCurrent() else { return }
+            setAttempts((historyJob?.ledgerAttempts ?? 0) + 1)
+            let built = try await Task.detached(priority: .utility) {
+                try await runner.makeLedger(for: job, cache: cache)
+            }.value
+            setAttempts(0)
             ledger = (job.id, built)
             Self.log.notice(
                 "Library read in \(Date.now.timeIntervalSince(began), format: .fixed(precision: 1)) s: \(built.camera.ownItemCount) items from this phone, \(built.camera.otherItemCount) from other phones; with imports \(built.archive.ownItemCount) and \(built.archive.otherItemCount)"
             )
-            if var current = historyJob {
-                current.ledgerAttempts = 0
-                setHistoryJob(current)
-            }
-        } else {
+        } catch {
+            Self.log.error("Reading the library failed: \(error.localizedDescription, privacy: .public)")
             try? await Task.sleep(for: .seconds(5))
         }
-        return true
     }
 
     /// The first step also warms caches, so the estimate starts with the second.

@@ -85,14 +85,11 @@ enum PhotoHistoryBackgroundTask {
         task.progress.totalUnitCount = 1_000
         let reporting = Task { @MainActor in
             // The system ends a task that shows no progress, and reading a large library
-            // takes a while before the first photo is imported.
-            var readingShare: Int64 = 0
+            // comes before the first photo is imported.
             while !Task.isCancelled, let job = controller.historyJob {
-                if job.lastProgressAt == nil || controller.isReadingLibrary {
-                    readingShare = min(readingShare + 1, 50)
-                }
-                let imported = Int64((Double(1_000 - readingShare) * job.fractionComplete).rounded(.down))
-                let completed = min(readingShare + imported, 999)
+                let isImportStarted = job.lastProgressAt != nil
+                let read = 100 * (isImportStarted ? 1 : controller.libraryReadShare)
+                let completed = min(Int64((read + 900 * job.fractionComplete).rounded(.down)), 999)
                 if completed > task.progress.completedUnitCount {
                     task.progress.completedUnitCount = completed
                 }

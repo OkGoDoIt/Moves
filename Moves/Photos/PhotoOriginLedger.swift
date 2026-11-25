@@ -36,7 +36,7 @@ enum PhotoOrigin: String, Codable, Sendable {
 }
 
 /// One library item, with what PhotoKit keeps about it without opening the file.
-struct LibraryRollEntry: Sendable, Equatable {
+struct LibraryRollEntry: Sendable, Equatable, Codable {
     var capturedAt: Date
     var addedAt: Date
     /// The counter in a camera file name, with or without a backup's suffix.
@@ -80,6 +80,27 @@ struct PhotoOriginLedger: Sendable, Codable {
     private let activeDays: Set<Int>
     /// Days on which a backup was added.
     private let backupDays: Set<Int>
+
+    /// A run is recognized by what surrounds it, so some weeks either side are read too.
+    static func span(around interval: DateInterval) -> DateInterval {
+        let margin: TimeInterval = 45 * 24 * 60 * 60
+        return DateInterval(
+            start: interval.start.addingTimeInterval(-margin),
+            end: interval.end.addingTimeInterval(margin)
+        )
+    }
+
+    /// `span` in pieces small enough to read in a few seconds each, newest first.
+    static func pieces(of span: DateInterval) -> [DateInterval] {
+        var pieces: [DateInterval] = []
+        var end = span.end
+        while end > span.start {
+            let start = max(end.addingTimeInterval(-90 * 24 * 60 * 60), span.start)
+            pieces.append(DateInterval(start: start, end: end))
+            end = start
+        }
+        return pieces
+    }
 
     /// File names could be read and the owner's phone was recognized by them.
     var recognizesDevices: Bool { camera.ownItemCount > 0 }
@@ -266,8 +287,9 @@ enum PhotoTrailFilter {
     }
 }
 
-/// Keeps the ledger while an import is under way, so carrying on after Moves was closed
-/// does not read the whole library again. A cache: losing it costs only that reading.
+/// Keeps the ledger while an import is under way, and the pieces of the library it is being
+/// made from, so carrying on after Moves was closed does not read the whole library again.
+/// A cache: losing it costs only that reading.
 struct PhotoOriginLedgerCache: Sendable {
     var directory: URL
 
@@ -277,30 +299,49 @@ struct PhotoOriginLedgerCache: Sendable {
         )
     }
 
-    private struct Contents: Codable {
-        var job: UUID
-        var ledger: PhotoOriginLedger
+    /// The name carries the rules the ledger was made by; a new set of rules starts over.
+    private func folder(for job: UUID) -> URL {
+        directory.appending(path: "origins-1-\(job.uuidString)", directoryHint: .isDirectory)
     }
-
-    /// Names the rules the ledger was made by; a new set of rules starts over.
-    private var file: URL { directory.appending(path: "origins-1.json") }
 
     func load(for job: UUID) -> PhotoOriginLedger? {
-        guard let data = try? Data(contentsOf: file),
-              let contents = try? JSONDecoder().decode(Contents.self, from: data),
-              contents.job == job
-        else { return nil }
-        return contents.ledger
+        read(PhotoOriginLedger.self, from: folder(for: job).appending(path: "ledger.json"))
     }
 
+    /// Also lets go of the pieces, which the ledger replaces.
     func save(_ ledger: PhotoOriginLedger, for job: UUID) {
-        guard let data = try? JSONEncoder().encode(Contents(job: job, ledger: ledger)) else { return }
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        // Readable while the phone is locked, which is when much of an import runs.
-        try? data.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        clear()
+        write(ledger, to: folder(for: job).appending(path: "ledger.json"))
+    }
+
+    func loadPiece(_ index: Int, for job: UUID) -> [LibraryRollEntry]? {
+        read([LibraryRollEntry].self, from: folder(for: job).appending(path: "piece-\(index).json"))
+    }
+
+    func hasPiece(_ index: Int, for job: UUID) -> Bool {
+        FileManager.default.fileExists(atPath: folder(for: job).appending(path: "piece-\(index).json").path)
+    }
+
+    func savePiece(_ entries: [LibraryRollEntry], index: Int, for job: UUID) {
+        write(entries, to: folder(for: job).appending(path: "piece-\(index).json"))
     }
 
     func clear() {
-        try? FileManager.default.removeItem(at: file)
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    private func read<T: Decodable>(_ type: T.Type, from file: URL) -> T? {
+        guard let data = try? Data(contentsOf: file) else { return nil }
+        return try? JSONDecoder().decode(type, from: data)
+    }
+
+    private func write(_ value: some Encodable, to file: URL) {
+        guard let data = try? JSONEncoder().encode(value) else { return }
+        try? FileManager.default.createDirectory(
+            at: file.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        // Readable while the phone is locked, which is when much of an import runs.
+        try? data.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
 }

@@ -2,7 +2,7 @@ import CoreLocation
 import Foundation
 
 /// The location in a photo.
-struct PhotoPlace: Sendable, Hashable {
+struct PhotoPlace: Sendable, Hashable, Codable {
     var latitude: Double
     var longitude: Double
     /// `nil` when the camera did not record one.

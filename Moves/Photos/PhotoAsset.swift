@@ -152,7 +152,8 @@ protocol PhotoAssetProviding: Sendable {
     func photoCount(in interval: DateInterval) async throws -> Int
     /// Capture time of the oldest photo in the library.
     func earliestPhotoDate() async throws -> Date?
-    /// Every photo, video, and screenshot captured inside `interval`, whatever its origin.
+    /// Every photo, video, and screenshot captured inside `interval` (end exclusive),
+    /// whatever its origin.
     func libraryRoll(in interval: DateInterval) async throws -> [LibraryRollEntry]
     /// The camera model written in each photo's file, for the photos whose original is
     /// already on this device. Nothing is downloaded.
@@ -163,12 +164,7 @@ extension PhotoAssetProviding {
     /// The ledger for photos inside `interval`. It reads some weeks either side, because
     /// a run is recognized by what surrounds it.
     func originLedger(around interval: DateInterval) async throws -> PhotoOriginLedger {
-        let margin: TimeInterval = 45 * 24 * 60 * 60
-        let padded = DateInterval(
-            start: interval.start.addingTimeInterval(-margin),
-            end: interval.end.addingTimeInterval(margin)
-        )
-        return PhotoOriginLedger(entries: try await libraryRoll(in: padded))
+        PhotoOriginLedger(entries: try await libraryRoll(in: PhotoOriginLedger.span(around: interval)))
     }
 }
 
@@ -195,7 +191,7 @@ struct FakePhotoAssetProvider: PhotoAssetProviding {
                 place: asset.place
             )
         }
-        return (photos + otherRollEntries).filter { interval.contains($0.capturedAt) }
+        return (photos + otherRollEntries).filter { $0.capturedAt >= interval.start && $0.capturedAt < interval.end }
     }
 
     func cameraModels(for identifiers: [String]) async -> [String: String] {

@@ -675,7 +675,19 @@ final class PhotoHistoryImporterTests: XCTestCase {
             provider: provider, container: container, rosterStore: OwnCameraRosterStore(defaults: defaults)
         )
         var job = job(over: DateInterval(start: epoch.addingTimeInterval(-60), end: epoch.addingTimeInterval(3_600)))
-        let ledger = try await runner.makeLedger(for: job)
+        // The library is read in parts; one that is lost before the end is read again.
+        let cache = PhotoOriginLedgerCache(directory: FileManager.default.temporaryDirectory.appending(path: UUID().uuidString))
+        let pieces = runner.libraryPieces(for: job)
+        XCTAssertEqual(pieces.first?.end, PhotoOriginLedger.span(around: DateInterval(start: job.rangeStart, end: job.rangeEnd)).end)
+        XCTAssertEqual(zip(pieces, pieces.dropFirst()).allSatisfy { $0.start == $1.end }, true)
+        for index in pieces.indices.dropLast() {
+            try await runner.readPiece(index, of: pieces, for: job, cache: cache)
+            XCTAssertTrue(cache.hasPiece(index, for: job.id))
+        }
+        let ledger = try await runner.makeLedger(for: job, cache: cache)
+        XCTAssertFalse(cache.hasPiece(0, for: job.id), "The finished ledger replaces the parts")
+        XCTAssertNotNil(cache.load(for: job.id))
+        cache.clear()
         job = try await runner.runStep(job, ledger: ledger)
 
         let attached = Set(try ModelContext(container).fetch(FetchDescriptor<PhotoAttachment>()).map(\.assetLocalIdentifier))

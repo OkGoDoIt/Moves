@@ -217,9 +217,38 @@ struct PhotoHistoryImportRunner: @unchecked Sendable {
         return next
     }
 
-    /// Where every photo in the job's range came from.
-    func makeLedger(for job: PhotoHistoryJob) async throws -> PhotoOriginLedger {
-        try await provider.originLedger(around: DateInterval(start: job.rangeStart, end: job.rangeEnd))
+    /// The parts the library is read in to work out where its photos came from. The same
+    /// for a job every time, so a part that was read before is not read again.
+    func libraryPieces(for job: PhotoHistoryJob) -> [DateInterval] {
+        PhotoOriginLedger.pieces(
+            of: PhotoOriginLedger.span(around: DateInterval(start: job.rangeStart, end: job.rangeEnd))
+        )
+    }
+
+    /// Reads one part of the library, unless an earlier try already has.
+    func readPiece(_ index: Int, of pieces: [DateInterval], for job: PhotoHistoryJob, cache: PhotoOriginLedgerCache) async throws {
+        guard !cache.hasPiece(index, for: job.id) else { return }
+        // The end is the first moment of the piece before it.
+        let entries = try await provider.libraryRoll(in: pieces[index])
+        cache.savePiece(entries, index: index, for: job.id)
+    }
+
+    /// Where every photo in the job's range came from, once every part has been read.
+    func makeLedger(for job: PhotoHistoryJob, cache: PhotoOriginLedgerCache) async throws -> PhotoOriginLedger {
+        let pieces = libraryPieces(for: job)
+        var entries: [LibraryRollEntry] = []
+        for index in pieces.indices {
+            if let piece = cache.loadPiece(index, for: job.id) {
+                entries += piece
+            } else {
+                // The system may empty the cache at any time.
+                entries += try await provider.libraryRoll(in: pieces[index])
+            }
+            try Task.checkCancellation()
+        }
+        let ledger = PhotoOriginLedger(entries: entries)
+        cache.save(ledger, for: job.id)
+        return ledger
     }
 
     /// Imports the newest photos before the job's cursor and returns the job moved past them.

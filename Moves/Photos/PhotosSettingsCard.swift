@@ -106,6 +106,7 @@ struct PhotoHistorySection: View {
                     isWorking: photoLibrary.isHistoryImportWorking,
                     timeRemaining: photoLibrary.historyTimeRemaining,
                     isReadingLibrary: photoLibrary.isReadingLibrary,
+                    libraryReadShare: photoLibrary.libraryReadShare,
                     hasAccess: photoLibrary.hasReadAccess
                 )
                 switch job.state {
@@ -237,14 +238,13 @@ struct PhotoHistoryProgressSummary: View {
     let timeRemaining: TimeInterval?
     /// The import is still working out which photos the owner's phone took.
     var isReadingLibrary = false
+    var libraryReadShare = 0.0
     var hasAccess = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if job.state == .running, job.cursor >= job.rangeEnd, hasAccess {
-                // Nothing is imported yet, so there is no share of it to show.
-                ProgressView()
-                    .progressViewStyle(.linear)
+            if job.state == .running, job.cursor >= job.rangeEnd {
+                ProgressView(value: min(max(libraryReadShare, 0), 1))
                     .tint(MovesPalette.place)
             } else if job.state != .finished {
                 ProgressView(value: job.fractionComplete)
@@ -337,8 +337,13 @@ struct PhotoHistoryProgressSummary: View {
                 ? String(localized: "No photos with a location were found.")
                 : job.report.summary
         }
-        guard job.isCounted else {
-            return String(localized: "Looking through your library…")
+        if job.cursor >= job.rangeEnd, job.state == .running {
+            guard job.isCounted else {
+                return String(localized: "Looking through your library…")
+            }
+            let total = job.totalPhotoCount.formatted(.number)
+            let share = libraryReadShare.formatted(.percent.precision(.fractionLength(0)))
+            return String(localized: "\(share) of \(total) photos looked at. Importing starts after that.")
         }
         if let message = job.message {
             return message
