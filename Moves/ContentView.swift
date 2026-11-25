@@ -1738,8 +1738,18 @@ private struct RouteTrackingToolbarButton: View {
 
     @State private var isPulsing = false
 
+    /// How often the countdown redraws. Each tick relays out the navigation bar and the
+    /// timeline under it, so it only ticks while route tracking runs, and every second
+    /// only in the last minutes when seconds are shown.
+    private var tickInterval: TimeInterval {
+        guard let endsAt, isAuthorizedForRealTracking else { return 3_600 }
+        let remaining = endsAt.timeIntervalSinceNow
+        if remaining <= 0 { return 3_600 }
+        return remaining > 120 ? 30 : 1
+    }
+
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
+        TimelineView(.periodic(from: .now, by: tickInterval)) { context in
             let remainingSeconds = endsAt.map { $0.timeIntervalSince(context.date) } ?? 0
             let isRunning = remainingSeconds > 0 && isAuthorizedForRealTracking
 
