@@ -270,6 +270,7 @@ struct MovesRootView: View {
         if captureManager.isDemoMode { return false }
         if env["MOVES_START_TAB"] != nil
             || env["MOVES_OPEN_SETTINGS"] == "1"
+            || env["MOVES_SETTINGS_PAGE"] != nil
             || env["MOVES_OPEN_SEARCH"] == "1"
             || env["MOVES_OPEN_TRIPS"] == "1"
             || env["MOVES_OPEN_SAVE_TRIP"] == "1"
@@ -321,10 +322,11 @@ struct MovesRootView: View {
         }
     }
 
-    /// Screenshot-agent launch flags (`MOVES_OPEN_ONBOARDING`, `MOVES_JUMP_DATE`, `MOVES_OPEN_SETTINGS`, `MOVES_OPEN_GOOGLE_IMPORT`, `MOVES_OPEN_WEBHOOK`, `MOVES_OPEN_ICLOUD`, `MOVES_OPEN_PRIVACY`, `MOVES_OPEN_REVIEW`, `MOVES_OPEN_SEARCH`, `MOVES_OPEN_TRIPS`, `MOVES_START_TAB`, `MOVES_OPEN_FIRST_PLACE`).
+    /// Screenshot-agent launch flags (`MOVES_OPEN_ONBOARDING`, `MOVES_JUMP_DATE`, `MOVES_OPEN_SETTINGS`, `MOVES_SETTINGS_PAGE` (a page name from `SettingsPage.launchPath`), `MOVES_OPEN_GOOGLE_IMPORT`, `MOVES_OPEN_WEBHOOK`, `MOVES_OPEN_ICLOUD`, `MOVES_OPEN_PRIVACY`, `MOVES_OPEN_REVIEW`, `MOVES_OPEN_SEARCH`, `MOVES_OPEN_TRIPS`, `MOVES_START_TAB`, `MOVES_OPEN_FIRST_PLACE`).
     private func applyLaunchJumpIfNeeded() {
         let env = ProcessInfo.processInfo.environment
         if env["MOVES_OPEN_SETTINGS"] == "1"
+            || env["MOVES_SETTINGS_PAGE"] != nil
             || env["MOVES_OPEN_GOOGLE_IMPORT"] == "1"
             || env["MOVES_OPEN_WEBHOOK"] == "1"
             || env["MOVES_OPEN_ICLOUD"] == "1"

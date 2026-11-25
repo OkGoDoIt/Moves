@@ -878,7 +878,7 @@ struct TimelineArchiveImportSettingsView: View {
                     .disabled(importer.isImporting || importQueue.isStaging)
 
 
-                    Text("In the other Moves app, export All Days as GPX, GeoJSON, and CSV — or the Everything zip — then select those files here. GeoJSON and CSV restore names, notes, and transport modes. GPX restores the original GPS times and elevation. Nightly iCloud Drive backups of those same formats work too.")
+                    Text("Choose an Everything export from Moves, or GPX, GeoJSON, and CSV files it exported or backed up.")
                         .font(.system(size: 12, weight: .medium, design: .rounded))
                         .foregroundStyle(.secondary)
                 }

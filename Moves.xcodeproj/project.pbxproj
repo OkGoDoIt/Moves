@@ -94,6 +94,9 @@
 		A10000012F00000100000004 /* MovesTimelineViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012F00000100000003 /* MovesTimelineViews.swift */; };
 		A10000012F00000100000006 /* MovesDetailViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012F00000100000005 /* MovesDetailViews.swift */; };
 		A10000012F00000100000008 /* MovesSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012F00000100000007 /* MovesSettingsView.swift */; };
+		5E7700012F00000100000002 /* SettingsTrackingPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E7700012F00000100000001 /* SettingsTrackingPage.swift */; };
+		5E7700012F00000100000004 /* SettingsExportPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E7700012F00000100000003 /* SettingsExportPage.swift */; };
+		5E7700012F00000100000006 /* SettingsPages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E7700012F00000100000005 /* SettingsPages.swift */; };
 		A10000012F00000100000108 /* AppIconPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012F00000100000107 /* AppIconPicker.swift */; };
 		A10000012F00000100000208 /* GeneratedAppIcons.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012F00000100000207 /* GeneratedAppIcons.swift */; };
 		A20000012FA0000100000001 /* HealthWorkoutRouteImporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000012FA0000100000000 /* HealthWorkoutRouteImporter.swift */; };
@@ -402,6 +405,9 @@
 		A10000012F00000100000003 /* MovesTimelineViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesTimelineViews.swift; sourceTree = "<group>"; };
 		A10000012F00000100000005 /* MovesDetailViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesDetailViews.swift; sourceTree = "<group>"; };
 		A10000012F00000100000007 /* MovesSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesSettingsView.swift; sourceTree = "<group>"; };
+		5E7700012F00000100000001 /* SettingsTrackingPage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Settings/SettingsTrackingPage.swift; sourceTree = "<group>"; };
+		5E7700012F00000100000003 /* SettingsExportPage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Settings/SettingsExportPage.swift; sourceTree = "<group>"; };
+		5E7700012F00000100000005 /* SettingsPages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Settings/SettingsPages.swift; sourceTree = "<group>"; };
 		A10000012F00000100000107 /* AppIconPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppIconPicker.swift; sourceTree = "<group>"; };
 		A10000012F00000100000207 /* GeneratedAppIcons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeneratedAppIcons.swift; sourceTree = "<group>"; };
 		A20000012FA0000100000000 /* HealthWorkoutRouteImporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthWorkoutRouteImporter.swift; sourceTree = "<group>"; };
@@ -685,6 +691,9 @@
 				A10000012F00000100000003 /* MovesTimelineViews.swift */,
 				A10000012F00000100000005 /* MovesDetailViews.swift */,
 				A10000012F00000100000007 /* MovesSettingsView.swift */,
+				5E7700012F00000100000001 /* SettingsTrackingPage.swift */,
+				5E7700012F00000100000003 /* SettingsExportPage.swift */,
+				5E7700012F00000100000005 /* SettingsPages.swift */,
 				E10000013020000100000000 /* MovesStatisticsSearchView.swift */,
 				A10000012F00000100000107 /* AppIconPicker.swift */,
 				A10000012F00000100000207 /* GeneratedAppIcons.swift */,
@@ -1390,6 +1399,9 @@
 				A10000012F00000100000004 /* MovesTimelineViews.swift in Sources */,
 				A10000012F00000100000006 /* MovesDetailViews.swift in Sources */,
 				A10000012F00000100000008 /* MovesSettingsView.swift in Sources */,
+				5E7700012F00000100000002 /* SettingsTrackingPage.swift in Sources */,
+				5E7700012F00000100000004 /* SettingsExportPage.swift in Sources */,
+				5E7700012F00000100000006 /* SettingsPages.swift in Sources */,
 				E10000013020000100000001 /* MovesStatisticsSearchView.swift in Sources */,
 				A10000012F00000100000108 /* AppIconPicker.swift in Sources */,
 				A10000012F00000100000208 /* GeneratedAppIcons.swift in Sources */,

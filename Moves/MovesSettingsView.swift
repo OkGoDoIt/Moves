@@ -2,7 +2,8 @@
 //  MovesSettingsView.swift
 //  Raul
 //
-//  Settings screen extracted from ContentView.
+//  Settings root: a short list of destinations, each pushing its own page.
+//  The pages live in `Moves/Settings/`.
 //
 
 import Foundation
@@ -11,8 +12,72 @@ import CoreLocation
 import HealthKit
 import SwiftData
 import SwiftUI
-import UniformTypeIdentifiers
 import UIKit
+
+/// Every page Settings can push. Launch flags and the iCloud page's backup row build a
+/// path from these, so each page is reachable without scrolling a long screen.
+enum SettingsPage: Hashable {
+    case tracking
+    case routeTracking
+    case travelModes
+    case map
+    case health
+    case photos
+    case calendar
+    case connections
+    case service(LocationService)
+    case webhook
+    case importData
+    case googleTimeline
+    case timelineArchive
+    case routeFiles
+    case fogOfWorld
+    case export
+    case iCloud
+    case privacy
+    case appIcon
+    case maintenance
+    case about
+
+    /// Pages that screenshot agents can open directly with `MOVES_SETTINGS_PAGE=<name>`.
+    private static let launchNames: [String: [SettingsPage]] = [
+        "tracking": [.tracking],
+        "routeTracking": [.tracking, .routeTracking],
+        "travelModes": [.travelModes],
+        "map": [.map],
+        "health": [.health],
+        "photos": [.photos],
+        "calendar": [.calendar],
+        "connections": [.connections],
+        "webhook": [.connections, .webhook],
+        "import": [.importData],
+        "googleTimeline": [.importData, .googleTimeline],
+        "export": [.export],
+        "iCloud": [.iCloud],
+        "privacy": [.privacy],
+        "appIcon": [.appIcon],
+        "maintenance": [.maintenance],
+        "about": [.about],
+    ]
+
+    /// The stack Settings opens on for this launch. Empty means the root list.
+    static func launchPath(environment env: [String: String] = ProcessInfo.processInfo.environment) -> [SettingsPage] {
+        if let name = env["MOVES_SETTINGS_PAGE"], let path = launchNames[name] {
+            return path
+        }
+        if env["MOVES_OPEN_GOOGLE_IMPORT"] == "1" { return [.importData, .googleTimeline] }
+        if env["MOVES_OPEN_WEBHOOK"] == "1" { return [.connections, .webhook] }
+        if env["MOVES_OPEN_ICLOUD"] == "1" { return [.iCloud] }
+        if env["MOVES_OPEN_PRIVACY"] == "1" { return [.privacy] }
+        if env["MOVES_OPEN_AUTOMATIC_MODES"] == "1" { return [.travelModes] }
+        return []
+    }
+}
+
+extension EnvironmentValues {
+    /// Closes the whole Settings sheet from any page. `nil` outside Settings.
+    @Entry var closeSettings: DismissAction? = nil
+}
 
 struct MovesSettingsView: View {
     @Environment(\.dismiss) private var dismiss
@@ -20,38 +85,22 @@ struct MovesSettingsView: View {
     @EnvironmentObject private var locationServiceSyncManager: LocationServiceSyncManager
     @EnvironmentObject private var webhookSyncManager: WebhookSyncManager
     @EnvironmentObject private var cloudDataPresencePublisher: MovesCloudDataPresencePublisher
-    @AppStorage(MapMarkerDisplaySettings.showsBigMarkersKey) private var showsBigMarkers = false
-    @AppStorage(RouteSnappingLevel.storageKey) private var snappingLevel = RouteSnappingLevel.normal.rawValue
-    @AppStorage(LandscapeLayoutSettings.controlsOnLeftKey) private var landscapeControlsOnLeft = false
+    @EnvironmentObject private var calendarSync: MovesCalendarSync
+    @EnvironmentObject private var photoLibrary: PhotoLibraryController
+    @EnvironmentObject private var importQueue: DurableImportQueue
     @AppStorage(DailyTimelineBackup.isEnabledKey) private var dailyBackupIsEnabled = false
-    @AppStorage(DailyTimelineBackup.formatKey) private var dailyBackupFormat = DailyTimelineBackupFormat.gpx.rawValue
-    @AppStorage(DailyTimelineBackup.usesMonthlyFoldersKey) private var dailyBackupUsesMonthlyFolders = false
+    @AppStorage(PrivacyZoneSettings.isEnabledKey) private var privacyZonesAreEnabled = false
+    @AppStorage(HealthWorkoutRouteImportSettings.isEnabledKey) private var healthRoutesAreEnabled = false
+    @AppStorage(HealthActivitySettings.isEnabledKey) private var healthActivityIsEnabled = false
+    @AppStorage(PhotoLibrarySettings.showOnVisitsKey) private var showsPhotosOnVisits = true
+    @AppStorage(PhotoLibrarySettings.usesCameraPhotosAsFixesKey) private var usesCameraPhotos = true
 
     let dayTimelines: [DayTimeline]
     let selectedDayKey: String
-    let captureManager: MovesLocationCaptureManager
+    @ObservedObject private var captureManager: MovesLocationCaptureManager
 
-    @State private var isExporting = false
-    @State private var exportDocument: TimelineExportDocument?
-    @State private var exportContentType: UTType = .xml
-    @State private var exportFilename = "moves-export"
-    @State private var exportMessage = ""
-    @State private var isShowingExportMessage = false
-    @State private var hasDedupeUndoSnapshot = false
-    @State private var isConfirmingHistoricalDeduplication = false
-    @State private var isRunningHistoricalDeduplication = false
-    @State private var isUndoingHistoricalDeduplication = false
-    @State private var maintenanceMessage = ""
-    @State private var isShowingMaintenanceMessage = false
-    @State private var dailyBackupMessage = ""
-    @State private var isShowingDailyBackupMessage = false
-    @State private var isRunningDailyBackup = false
-    @State private var dailyBackupDidFail = false
-    /// Screenshot flag `MOVES_OPEN_WEBHOOK=1` pushes the webhook destination.
-    @State private var isShowingWebhookScreenshot =
-        ProcessInfo.processInfo.environment["MOVES_OPEN_WEBHOOK"] == "1"
-    @State private var isShowingAutomaticModesScreenshot =
-        ProcessInfo.processInfo.environment["MOVES_OPEN_AUTOMATIC_MODES"] == "1"
+    @State private var path: [SettingsPage] = SettingsPage.launchPath()
+    @State private var appIconStore = AppIconStore()
 
     init(
         dayTimelines: [DayTimeline],
@@ -63,10 +112,6 @@ struct MovesSettingsView: View {
         self.captureManager = captureManager
     }
 
-    private var selectedDay: DayTimeline? {
-        dayTimelines.first(where: { $0.dayKey == selectedDayKey })
-    }
-
     /// Earliest day that already has GPS, imported, or manual timeline items.
     private var firstProtectedDayStart: Date? {
         dayTimelines
@@ -75,342 +120,37 @@ struct MovesSettingsView: View {
             .min()
     }
 
-    /// `MOVES_OPEN_GOOGLE_IMPORT=1` and `MOVES_OPEN_WEBHOOK=1` scroll Settings to those rows.
-    private func scrollToScreenshotAnchorIfNeeded(_ proxy: ScrollViewProxy) {
-        let env = ProcessInfo.processInfo.environment
-        let anchor: String?
-        if env["MOVES_OPEN_GOOGLE_IMPORT"] == "1" {
-            anchor = SettingsScreenshotAnchor.importCard
-        } else if env["MOVES_OPEN_WEBHOOK"] == "1" {
-            anchor = SettingsScreenshotAnchor.webhookRow
-        } else if env["MOVES_OPEN_ICLOUD"] == "1" {
-            anchor = SettingsScreenshotAnchor.iCloudCard
-        } else if env["MOVES_OPEN_PRIVACY"] == "1" {
-            anchor = SettingsScreenshotAnchor.privacyCard
-        } else {
-            anchor = nil
-        }
-        guard let anchor else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-            withAnimation(.easeInOut(duration: 0.25)) {
-                proxy.scrollTo(anchor, anchor: .top)
-            }
-        }
-    }
-
-    private var dailyICloudBackupSettings: some View {
-        SettingsCard(title: "Daily iCloud Drive Backup") {
-            Toggle("Back up yesterday every night", isOn: $dailyBackupIsEnabled)
-
-            if dailyBackupIsEnabled {
-                Picker("Format", selection: $dailyBackupFormat) {
-                    Text("GPX (.gpx)").tag("gpx")
-                    Text("GeoJSON (.geojson)").tag("geoJSON")
-                    Text("CSV (.csv)").tag("csv")
-                }
-
-                Toggle("Organize in year/month folders", isOn: $dailyBackupUsesMonthlyFolders)
-
-                SettingsActionRow(
-                    title: isRunningDailyBackup ? "Backing up\u{2026}" : "Back up yesterday now",
-                    systemImage: "icloud.and.arrow.up",
-                    isDisabled: isRunningDailyBackup
-                ) {
-                    backUpYesterday()
-                }
-            }
-
-            // Shown inline as well as in the alert, so a result is never lost if
-            // the alert cannot present.
-            if !dailyBackupMessage.isEmpty {
-                Text(dailyBackupMessage)
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .foregroundStyle(dailyBackupDidFail ? Color.red : Color.green)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            Text(dailyBackupDescription)
-                .font(.system(size: 12, weight: .medium, design: .rounded))
-                .foregroundStyle(.secondary)
-        }
-        .id(SettingsScreenshotAnchor.dailyBackupCard)
-    }
-
-    private var dailyBackupDescription: String {
-        let fileExtension = DailyTimelineBackupFormat(rawValue: dailyBackupFormat)?
-            .timelineExportFormat.fileExtension ?? "gpx"
-        if dailyBackupUsesMonthlyFolders {
-            return "Files are saved to iCloud Drive/Moves/YYYY/MM/Moves-YYYY-MM-DD.\(fileExtension)"
-        }
-        return "Files are saved to iCloud Drive/Moves/Moves-YYYY-MM-DD.\(fileExtension). iOS runs the backup after midnight when it can."
-    }
-
     var body: some View {
-        NavigationStack {
-            ScrollViewReader { proxy in
+        NavigationStack(path: $path) {
             ScrollView {
                 LazyVStack(spacing: 14) {
-                    SettingsCard(title: "Map Appearance") {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Toggle("Show big map markers", isOn: $showsBigMarkers)
-
-                            Text("When this is off, maps use small dots so more of the map stays visible.")
-                                .font(.system(size: 12, weight: .medium, design: .rounded))
-                                .foregroundStyle(.secondary)
-
-                            Divider()
-
-                            MapAppearanceSpeedShadeToggle()
-
-                            Divider()
-
-                            Text("Path")
-                                .font(.system(size: 14, weight: .semibold, design: .rounded))
-
-                            Picker("Path", selection: $snappingLevel) {
-                                ForEach(RouteSnappingLevel.allCases) { level in
-                                    Text(level.title).tag(level.rawValue)
-                                }
-                            }
-                            .pickerStyle(.segmented)
-                            .accessibilityLabel("Path matching")
-
-                            Text("Conservative only fits dense recordings onto roads. Off keeps the recorded line.")
-                                .font(.system(size: 12, weight: .medium, design: .rounded))
-                                .foregroundStyle(.secondary)
-
-                            Divider()
-
-                            Toggle("Controls on left in landscape", isOn: $landscapeControlsOnLeft)
-
-                            Text("Places, moves, and edit controls can be swapped to the left for comfortable one-handed use.")
-                                .font(.system(size: 12, weight: .medium, design: .rounded))
-                                .foregroundStyle(.secondary)
-                        }
+                    SettingsCard(title: String(localized: "Recording")) {
+                        row(.tracking, String(localized: "Tracking"), "location.fill", trackingStatus)
+                        row(.travelModes, String(localized: "Travel Modes"), "figure.walk", nil)
+                        row(.map, String(localized: "Map"), "map", nil)
                     }
 
-                    AppIconPickerSection()
-
-                    SettingsCard(title: "Travel modes") {
-                        NavigationLink {
-                            AutomaticModesSettingsView()
-                        } label: {
-                            SettingsNavigationRow(title: "Automatic modes", systemImage: "figure.walk", status: nil)
-                        }
-                        .buttonStyle(.plain)
+                    SettingsCard(title: String(localized: "Apps and Services")) {
+                        row(.health, String(localized: "Apple Health"), "heart.fill", healthStatus)
+                        row(.photos, String(localized: "Photos"), "photo.on.rectangle", photosStatus)
+                        row(.calendar, String(localized: "Calendar"), "calendar", calendarStatus)
+                        row(.connections, String(localized: "Connections"), "server.rack", connectionsStatus)
                     }
 
-                    ICloudSettingsCard(publisher: cloudDataPresencePublisher) {
-                        withAnimation(.easeInOut(duration: 0.25)) {
-                            proxy.scrollTo(SettingsScreenshotAnchor.dailyBackupCard, anchor: .top)
-                        }
-                    }
-                    .id(SettingsScreenshotAnchor.iCloudCard)
-
-                    PrivacyZonesSettingsCard()
-                        .id(SettingsScreenshotAnchor.privacyCard)
-
-                    SettingsCard(title: "Integrations") {
-                        ForEach(LocationService.allCases) { service in
-                            NavigationLink {
-                                LocationServiceSettingsView(service: service)
-                            } label: {
-                                SettingsNavigationRow(
-                                    title: service.title,
-                                    systemImage: service.systemImage,
-                                    status: locationServiceSyncManager.connectionSummary(for: service)
-                                )
-                            }
-                            .buttonStyle(.plain)
-                        }
-
-                        NavigationLink {
-                            WebhookSettingsView()
-                        } label: {
-                            SettingsNavigationRow(
-                                title: "Webhook",
-                                systemImage: "link",
-                                status: webhookSyncManager.connectionSummary
-                            )
-                        }
-                        .buttonStyle(.plain)
-
-                        Text("Optionally upload recorded points to one or more supported cloud or self-hosted location servers, or to any HTTPS webhook.")
-                            .font(.system(size: 12, weight: .medium, design: .rounded))
-                            .foregroundStyle(.secondary)
-                    }
-                    .id(SettingsScreenshotAnchor.webhookRow)
-
-                    SettingsCard(title: "Calendar") {
-                        NavigationLink {
-                            CalendarSyncSettingsView()
-                        } label: {
-                            SettingsNavigationRow(title: "Sync visits to Calendar", systemImage: "calendar", status: nil)
-                        }
-                        .buttonStyle(.plain)
+                    SettingsCard(title: String(localized: "Your Data")) {
+                        row(.importData, String(localized: "Import"), "square.and.arrow.down", importStatus)
+                        row(.export, String(localized: "Export and Backup"), "square.and.arrow.up", exportStatus)
+                        row(.iCloud, String(localized: "iCloud"), "icloud", cloudDataPresencePublisher.status.title)
+                        row(.privacy, String(localized: "Privacy Zones"), "hand.raised.fill", privacyStatus)
                     }
 
-                    SettingsCard(title: "GPX Export") {
-                        SettingsActionRow(
-                            title: "Selected Day (.gpx)",
-                            systemImage: "calendar",
-                            isDisabled: dayTimelines.isEmpty
-                        ) {
-                            export(.gpx, scope: .selectedDay)
+                    SettingsCard(title: String(localized: "App")) {
+                        if appIconStore.isSupported {
+                            row(.appIcon, String(localized: "App Icon"), "app.badge", nil)
                         }
-
-                        SettingsActionRow(
-                            title: "All Days (.gpx)",
-                            systemImage: "calendar.badge.clock",
-                            isDisabled: dayTimelines.isEmpty
-                        ) {
-                            export(.gpx, scope: .allDays)
-                        }
+                        row(.maintenance, String(localized: "Maintenance"), "wrench.and.screwdriver", nil)
+                        row(.about, String(localized: "About"), "info.circle", appVersion)
                     }
-
-                    SettingsCard(title: "Other Export Formats") {
-                        SettingsActionRow(
-                            title: "Selected Day (.geojson)",
-                            systemImage: "map",
-                            isDisabled: dayTimelines.isEmpty
-                        ) {
-                            export(.geoJSON, scope: .selectedDay)
-                        }
-
-                        SettingsActionRow(
-                            title: "All Days (.geojson)",
-                            systemImage: "map.fill",
-                            isDisabled: dayTimelines.isEmpty
-                        ) {
-                            export(.geoJSON, scope: .allDays)
-                        }
-
-                        SettingsActionRow(
-                            title: "All Days Places+Moves (.csv)",
-                            systemImage: "tablecells",
-                            isDisabled: dayTimelines.isEmpty
-                        ) {
-                            export(.csv, scope: .allDays)
-                        }
-
-                        SettingsActionRow(
-                            title: "Selected Day (.kml)",
-                            systemImage: "globe.europe.africa",
-                            isDisabled: dayTimelines.isEmpty
-                        ) {
-                            export(.kml, scope: .selectedDay)
-                        }
-
-                        SettingsActionRow(
-                            title: "All Days (.kml)",
-                            systemImage: "globe",
-                            isDisabled: dayTimelines.isEmpty
-                        ) {
-                            export(.kml, scope: .allDays)
-                        }
-
-                        SettingsActionRow(
-                            title: "Everything (.zip)",
-                            systemImage: "archivebox",
-                            isDisabled: dayTimelines.isEmpty
-                        ) {
-                            exportZip()
-                        }
-                    }
-
-                    dailyICloudBackupSettings
-
-                    ImportQueueCard()
-
-                    SettingsCard(title: "Import") {
-                        NavigationLink {
-                            FogCoverageSettingsView()
-                        } label: {
-                            Label("Fog of World", systemImage: "map")
-                        }
-
-                        NavigationLink {
-                            GoogleTimelineImportSettingsView(modelContext: modelContext)
-                        } label: {
-                            SettingsNavigationRow(
-                                title: "Google Timeline",
-                                systemImage: "globe",
-                                status: nil
-                            )
-                        }
-                        .buttonStyle(.plain)
-
-                        NavigationLink {
-                            TimelineArchiveImportSettingsView(modelContext: modelContext)
-                        } label: {
-                            SettingsNavigationRow(
-                                title: "Moves timeline export",
-                                systemImage: "clock.arrow.circlepath",
-                                status: nil
-                            )
-                        }
-                        .buttonStyle(.plain)
-
-                        NavigationLink {
-                            HealthWorkoutRouteImportSettingsView()
-                        } label: {
-                            SettingsNavigationRow(
-                                title: "Apple Health",
-                                systemImage: "figure.run",
-                                status: HKHealthStore.isHealthDataAvailable() ? nil : "Unavailable"
-                            )
-                        }
-                        .buttonStyle(.plain)
-
-                        NavigationLink {
-                            RouteFileImportSettingsView(modelContext: modelContext)
-                        } label: {
-                            SettingsNavigationRow(
-                                title: "Files (GPX, TCX, KML, GeoJSON)",
-                                systemImage: "square.and.arrow.down",
-                                status: nil
-                            )
-                        }
-                        .buttonStyle(.plain)
-
-                        Text("Google Timeline imports a Takeout Location History folder (semantic months first, then Records.json). Use Moves timeline export to restore another Moves install from GPX, GeoJSON, CSV, or zip. Files import rebuilds places and trips from any timestamped GPS log. Health import adds workout routes.")
-                            .font(.system(size: 12, weight: .medium, design: .rounded))
-                            .foregroundStyle(.secondary)
-                    }
-                    .id(SettingsScreenshotAnchor.importCard)
-
-                    PhotosSettingsCard(firstRecordedDayStart: firstProtectedDayStart)
-
-                    SettingsCard(title: "Data Maintenance") {
-                        SettingsActionRow(
-                            title: isRunningHistoricalDeduplication
-                                ? "Deduplicating existing data..."
-                                : "Deduplicate existing data",
-                            systemImage: "wand.and.stars",
-                            isDisabled: isRunningHistoricalDeduplication || isUndoingHistoricalDeduplication
-                        ) {
-                            isConfirmingHistoricalDeduplication = true
-                        }
-
-                        SettingsActionRow(
-                            title: isUndoingHistoricalDeduplication
-                                ? "Restoring previous data..."
-                                : "Undo last deduplication",
-                            systemImage: "arrow.uturn.backward.circle",
-                            isDisabled: !hasDedupeUndoSnapshot
-                                || isRunningHistoricalDeduplication
-                                || isUndoingHistoricalDeduplication
-                        ) {
-                            undoHistoricalDeduplication()
-                        }
-
-                        Text("Before deduplication, Moves creates a local snapshot so you can restore the previous state with one tap.")
-                            .font(.system(size: 12, weight: .medium, design: .rounded))
-                            .foregroundStyle(.secondary)
-                    }
-
-                    CreatedByView()
-                        .panelSurface()
                 }
                 .padding(.horizontal, 14)
                 .padding(.top, 10)
@@ -426,12 +166,6 @@ struct MovesSettingsView: View {
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
-            .navigationDestination(isPresented: $isShowingWebhookScreenshot) {
-                WebhookSettingsView()
-            }
-            .navigationDestination(isPresented: $isShowingAutomaticModesScreenshot) {
-                AutomaticModesSettingsView()
-            }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") {
@@ -439,230 +173,332 @@ struct MovesSettingsView: View {
                     }
                 }
             }
-            .onAppear {
-                scrollToScreenshotAnchorIfNeeded(proxy)
-            }
+            .navigationDestination(for: SettingsPage.self) { page in
+                destination(for: page)
             }
         }
-
-        .fileExporter(
-            isPresented: $isExporting,
-            document: exportDocument,
-            contentType: exportContentType,
-            defaultFilename: exportFilename
-        ) { result in
-            switch result {
-            case .success(let url):
-                exportMessage = "Exported to \(url.lastPathComponent)"
-            case .failure(let error):
-                exportMessage = "Export failed: \(error.localizedDescription)"
-            }
-            isShowingExportMessage = true
-        }
+        .environment(\.closeSettings, dismiss)
         .onAppear {
-            hasDedupeUndoSnapshot = TimelineDeduplicationSnapshotStore.hasSnapshot
             DailyTimelineBackup.scheduleNextRun()
         }
-        .onChange(of: dailyBackupIsEnabled) { _, _ in
-            if let error = DailyTimelineBackup.scheduleNextRun() {
-                dailyBackupMessage = error.localizedDescription
-                isShowingDailyBackupMessage = true
+    }
+
+    private func row(_ page: SettingsPage, _ title: String, _ systemImage: String, _ status: String?) -> some View {
+        NavigationLink(value: page) {
+            SettingsNavigationRow(title: title, systemImage: systemImage, status: status)
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private func destination(for page: SettingsPage) -> some View {
+        switch page {
+        case .tracking:
+            TrackingSettingsPage(captureManager: captureManager)
+        case .routeTracking:
+            RouteTrackingSettingsPage(captureManager: captureManager)
+        case .travelModes:
+            AutomaticModesSettingsView()
+        case .map:
+            MapSettingsPage()
+        case .health:
+            HealthWorkoutRouteImportSettingsView()
+        case .photos:
+            PhotosSettingsPage(firstRecordedDayStart: firstProtectedDayStart)
+        case .calendar:
+            CalendarSyncSettingsView()
+        case .connections:
+            ConnectionsSettingsPage()
+        case .service(let service):
+            LocationServiceSettingsView(service: service)
+        case .webhook:
+            WebhookSettingsView()
+        case .importData:
+            ImportSettingsPage()
+        case .googleTimeline:
+            GoogleTimelineImportSettingsView(modelContext: modelContext)
+        case .timelineArchive:
+            TimelineArchiveImportSettingsView(modelContext: modelContext)
+        case .routeFiles:
+            RouteFileImportSettingsView(modelContext: modelContext)
+        case .fogOfWorld:
+            FogCoverageSettingsView()
+        case .export:
+            ExportSettingsPage(dayTimelines: dayTimelines, selectedDayKey: selectedDayKey)
+        case .iCloud:
+            ICloudSettingsPage {
+                path.append(.export)
             }
+        case .privacy:
+            PrivacyZonesSettingsPage()
+        case .appIcon:
+            AppIconPickerView(store: appIconStore)
+        case .maintenance:
+            MaintenanceSettingsPage()
+        case .about:
+            AboutSettingsPage()
         }
-        .onChange(of: dailyBackupFormat) { _, _ in
-            DailyTimelineBackup.scheduleNextRun()
+    }
+
+    // MARK: Row states
+
+    private var trackingStatus: String {
+        if captureManager.isDemoMode {
+            return captureManager.captureDetailLevel.title
         }
-        .onChange(of: dailyBackupUsesMonthlyFolders) { _, _ in
-            DailyTimelineBackup.scheduleNextRun()
+        switch captureManager.authorizationStatus {
+        case .notDetermined, .denied, .restricted:
+            return String(localized: "Needs location access")
+        case .authorizedWhenInUse, .authorizedAlways:
+            break
+        @unknown default:
+            break
         }
-        .confirmationDialog(
-            "Deduplicate Existing Data?",
-            isPresented: $isConfirmingHistoricalDeduplication,
-            titleVisibility: .visible
-        ) {
-            Button("Deduplicate", role: .destructive) {
-                runHistoricalDeduplication()
+        if let endsAt = captureManager.temporaryRouteTrackingEndsAt, endsAt > .now {
+            return String(localized: "Route tracking on")
+        }
+        guard captureManager.isBackgroundLocationListeningEnabled else {
+            return String(localized: "Off")
+        }
+        return captureManager.captureDetailLevel.title
+    }
+
+    private var healthStatus: String {
+        guard HKHealthStore.isHealthDataAvailable() else { return String(localized: "Unavailable") }
+        return healthRoutesAreEnabled || healthActivityIsEnabled ? String(localized: "On") : String(localized: "Off")
+    }
+
+    private var photosStatus: String {
+        guard photoLibrary.hasReadAccess, showsPhotosOnVisits || usesCameraPhotos else {
+            return String(localized: "Off")
+        }
+        return photoLibrary.isLimited ? String(localized: "Selected photos") : String(localized: "On")
+    }
+
+    private var calendarStatus: String {
+        calendarSync.isEnabled ? String(localized: "On") : String(localized: "Off")
+    }
+
+    private var connectionsStatus: String {
+        let services = LocationService.allCases.filter { locationServiceSyncManager.state(for: $0).isConfigured }
+        let count = services.count + (webhookSyncManager.state.isConfigured ? 1 : 0)
+        switch count {
+        case 0:
+            return String(localized: "None")
+        case 1:
+            if let service = services.first {
+                return locationServiceSyncManager.connectionSummary(for: service)
             }
-
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Moves will merge old duplicate places and moves. For duplicate stays at the same location/time, it keeps the one that best fits surrounding moves (or the longer stay if there is no move context). A snapshot is saved first so you can undo.")
-        }
-        .alert("Export", isPresented: $isShowingExportMessage) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(exportMessage)
-        }
-        .alert("Data Maintenance", isPresented: $isShowingMaintenanceMessage) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(maintenanceMessage)
-        }
-        .alert("Daily iCloud Backup", isPresented: $isShowingDailyBackupMessage) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(dailyBackupMessage)
+            return webhookSyncManager.connectionSummary
+        default:
+            return String(localized: "\(count) connected")
         }
     }
 
-    private func export(_ format: TimelineExportFormat, scope: TimelineExportScope) {
-        let days: [DayTimeline]
-        let scopeName: String
-
-        switch scope {
-        case .allDays:
-            days = dayTimelines
-            scopeName = "all-days"
-
-        case .selectedDay:
-            guard let selectedDay else {
-                exportMessage = "No day selected for export."
-                isShowingExportMessage = true
-                return
-            }
-            days = [selectedDay]
-            scopeName = selectedDay.dayKey
-        }
-
-        guard !days.isEmpty else {
-            exportMessage = "No timeline data available yet."
-            isShowingExportMessage = true
-            return
-        }
-
-        guard let payload = TimelineExporter.makePayload(
-            days: days,
-            format: format,
-            fileStem: "moves-\(scopeName)",
-            privacyZones: currentExportPrivacyZones()
-        ) else {
-            exportMessage = "Could not build export file."
-            isShowingExportMessage = true
-            return
-        }
-
-        exportDocument = TimelineExportDocument(data: payload.data)
-        exportContentType = payload.contentType
-        exportFilename = payload.filename
-        isExporting = true
+    private var importStatus: String? {
+        importQueue.workingJobID != nil || importQueue.isStaging ? String(localized: "Importing") : nil
     }
 
-    private func currentExportPrivacyZones(places: [KnownPlace]? = nil) -> [PrivacyZone] {
-        PrivacyZoneResolver.exportZones(
-            from: places ?? PrivacyZoneResolver.loadPlaces(from: modelContext)
-        )
+    private var exportStatus: String? {
+        dailyBackupIsEnabled ? String(localized: "Daily backup on") : nil
     }
 
-    /// Writes GPX, GeoJSON, CSV, KML, `places.json`, and `photos.csv` into one zip.
-    private func exportZip() {
-        guard !dayTimelines.isEmpty else {
-            exportMessage = "No timeline data available yet."
-            isShowingExportMessage = true
-            return
-        }
-
-        let knownPlaces = (try? modelContext.fetch(FetchDescriptor<KnownPlace>())) ?? []
-        let photos = (try? modelContext.fetch(FetchDescriptor<PhotoAttachment>())) ?? []
-
-        guard let payload = TimelineExporter.makeZipPayload(
-            days: dayTimelines,
-            knownPlaces: knownPlaces,
-            photos: photos,
-            fileStem: "moves-all-days",
-            privacyZones: currentExportPrivacyZones(places: knownPlaces)
-        ) else {
-            exportMessage = "Could not build export file."
-            isShowingExportMessage = true
-            return
-        }
-
-        exportDocument = TimelineExportDocument(data: payload.data)
-        exportContentType = payload.contentType
-        exportFilename = payload.filename
-        isExporting = true
+    private var privacyStatus: String {
+        privacyZonesAreEnabled ? String(localized: "On") : String(localized: "Off")
     }
 
-    private func backUpYesterday() {
-        guard !isRunningDailyBackup else { return }
-        isRunningDailyBackup = true
-
-        let container = modelContext.container
-        Task { @MainActor in
-            defer { isRunningDailyBackup = false }
-            do {
-                let url = try await DailyTimelineBackup.saveYesterday(in: container)
-                dailyBackupDidFail = false
-                dailyBackupMessage = "Saved \(url.lastPathComponent) to iCloud Drive/Moves. It may take a moment to appear in the Files app."
-            } catch {
-                dailyBackupDidFail = true
-                dailyBackupMessage = "Backup failed: \(error.localizedDescription)"
-                DailyTimelineBackup.log.error("Manual backup failed: \(String(describing: error), privacy: .public)")
-            }
-            isShowingDailyBackupMessage = true
-        }
+    private var appVersion: String? {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
     }
-
-    @MainActor
-    private func runHistoricalDeduplication() {
-        guard !isRunningHistoricalDeduplication, !isUndoingHistoricalDeduplication else { return }
-
-        isRunningHistoricalDeduplication = true
-
-        Task { @MainActor in
-            defer { isRunningHistoricalDeduplication = false }
-
-            do {
-                let repository = SwiftDataTimelineRepository(modelContext: modelContext)
-                let snapshot = try repository.createUndoSnapshot()
-                try TimelineDeduplicationSnapshotStore.save(snapshot)
-
-                let report = try repository.runHistoricalDeduplication()
-                try TimelineDeduplicationSnapshotStore.save(
-                    snapshot.changes(comparedTo: repository.createUndoSnapshot())
-                )
-                hasDedupeUndoSnapshot = TimelineDeduplicationSnapshotStore.hasSnapshot
-
-                if report.totalRemovedCount == 0 {
-                    maintenanceMessage = "No duplicates were found in existing data. A restore snapshot is still available."
-                } else {
-                    maintenanceMessage = "Deduplication removed \(report.removedPlaceCount) place duplicate(s) and \(report.removedMoveCount) move duplicate(s). Duplicate stays now keep the best-fitting entry (or the longer one without move context). You can undo this run from Settings."
-                }
-            } catch {
-                maintenanceMessage = "Deduplication failed: \(error.localizedDescription)"
-            }
-
-            isShowingMaintenanceMessage = true
-        }
-    }
-
-    @MainActor
-    private func undoHistoricalDeduplication() {
-        guard hasDedupeUndoSnapshot, !isUndoingHistoricalDeduplication, !isRunningHistoricalDeduplication else {
-            return
-        }
-
-        isUndoingHistoricalDeduplication = true
-
-        Task { @MainActor in
-            defer { isUndoingHistoricalDeduplication = false }
-
-            do {
-                let snapshot = try TimelineDeduplicationSnapshotStore.load()
-                let repository = SwiftDataTimelineRepository(modelContext: modelContext)
-                try repository.restoreFromUndoSnapshot(snapshot)
-                try TimelineDeduplicationSnapshotStore.clear()
-                hasDedupeUndoSnapshot = TimelineDeduplicationSnapshotStore.hasSnapshot
-                maintenanceMessage = "Put back what the last deduplication merged."
-            } catch {
-                maintenanceMessage = "Could not restore snapshot: \(error.localizedDescription)"
-            }
-
-            isShowingMaintenanceMessage = true
-        }
-    }
-
 }
 
+// MARK: - Shared page pieces
+
+/// Background, inline title, and a Done button that closes Settings, for every page.
+struct SettingsPageChrome: ViewModifier {
+    @Environment(\.closeSettings) private var closeSettings
+    @Environment(\.dismiss) private var dismiss
+    let title: LocalizedStringKey
+
+    func body(content: Content) -> some View {
+        content
+            .background {
+                LinearGradient(
+                    colors: [MovesPalette.backgroundTop, MovesPalette.backgroundBottom],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .ignoresSafeArea()
+            }
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        if let closeSettings {
+                            closeSettings()
+                        } else {
+                            dismiss()
+                        }
+                    }
+                }
+            }
+    }
+}
+
+extension View {
+    func settingsPageChrome(_ title: LocalizedStringKey) -> some View {
+        modifier(SettingsPageChrome(title: title))
+    }
+}
+
+/// A scrolling column of cards with the standard Settings spacing.
+struct SettingsScrollPage<Content: View>: View {
+    let title: LocalizedStringKey
+    @ViewBuilder let content: () -> Content
+
+    init(_ title: LocalizedStringKey, @ViewBuilder content: @escaping () -> Content) {
+        self.title = title
+        self.content = content
+    }
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(spacing: 14) {
+                content()
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 10)
+            .padding(.bottom, 18)
+        }
+        .settingsPageChrome(title)
+    }
+}
+
+/// One line of explanation under a setting.
+struct SettingsFootnote: View {
+    let text: String
+
+    init(_ text: String) {
+        self.text = text
+    }
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 12, weight: .medium, design: .rounded))
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+struct SettingsCard<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .panelSurface()
+    }
+}
+
+struct SettingsActionRow: View {
+    let title: String
+    let systemImage: String
+    var isDisabled: Bool = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Label(title, systemImage: systemImage)
+
+                Spacer(minLength: 8)
+
+                Image(systemName: "chevron.right")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(isDisabled)
+        .padding(.vertical, 5)
+    }
+}
+
+/// A full-width row that pushes a page: icon, title, an optional line under the title,
+/// and the current state at the trailing edge. The state truncates; the title never does.
+/// At accessibility text sizes the state moves under the title.
+struct SettingsNavigationRow: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    /// One width for every icon, so titles line up down the list.
+    @ScaledMetric(relativeTo: .body) private var iconWidth = 28
+
+    let title: String
+    let systemImage: String
+    let status: String?
+    var detail: String? = nil
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Label {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if let detail {
+                        Text(detail)
+                            .font(.system(size: 12, weight: .medium, design: .rounded))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    if dynamicTypeSize.isAccessibilitySize, let status {
+                        statusText(status)
+                    }
+                }
+            } icon: {
+                Image(systemName: systemImage)
+                    .frame(width: iconWidth)
+            }
+            .layoutPriority(1)
+
+            Spacer(minLength: 8)
+
+            if !dynamicTypeSize.isAccessibilitySize, let status {
+                statusText(status)
+            }
+
+            Image(systemName: "chevron.right")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .padding(.vertical, 5)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func statusText(_ status: String) -> some View {
+        Text(status)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .truncationMode(.tail)
+    }
+}
+
+// MARK: - Route tracking
+
+/// The sheet behind the timeline's route-tracking button.
 struct RouteTrackingSettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
 
@@ -671,7 +507,7 @@ struct RouteTrackingSettingsSheet: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                RouteTrackingSettingsSection(captureManager: captureManager)
+                RouteTrackingSettingsSection(captureManager: captureManager, showsEverydayTracking: true)
                     .padding(.horizontal, 14)
                     .padding(.top, 10)
                     .padding(.bottom, 18)
@@ -697,8 +533,26 @@ struct RouteTrackingSettingsSheet: View {
     }
 }
 
+/// Settings → Tracking → Real Route Tracking. Everyday tracking is on the Tracking page itself.
+struct RouteTrackingSettingsPage: View {
+    let captureManager: MovesLocationCaptureManager
+
+    var body: some View {
+        ScrollView {
+            RouteTrackingSettingsSection(captureManager: captureManager, showsEverydayTracking: false)
+                .padding(.horizontal, 14)
+                .padding(.top, 10)
+                .padding(.bottom, 18)
+        }
+        .settingsPageChrome("Real Route Tracking")
+    }
+}
+
+// MARK: - Apple Health
+
 struct HealthWorkoutRouteImportSettingsView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.closeSettings) private var closeSettings
     @EnvironmentObject private var healthRouteImportManager: HealthWorkoutRouteAutoImportManager
     @AppStorage(HealthWorkoutRouteImportSettings.isEnabledKey) private var isEnabled = false
     @AppStorage(HealthActivitySettings.isEnabledKey) private var usesActivity = false
@@ -747,27 +601,27 @@ struct HealthWorkoutRouteImportSettingsView: View {
     var body: some View {
         ScrollView {
             LazyVStack(spacing: 14) {
-                SettingsCard(title: "Steps and Walking Distance") {
+                if !isHealthAvailable {
+                    SettingsCard(title: String(localized: "Apple Health")) {
+                        SettingsFootnote(String(localized: "Apple Health isn’t available on this device."))
+                    }
+                }
+
+                SettingsCard(title: String(localized: "Steps and Walking Distance")) {
                     Toggle("Use steps and walking distance", isOn: usesActivityBinding)
                         .disabled(!isHealthAvailable)
 
-                    Text(isHealthAvailable
-                         ? "Uses your steps to correct walking distances and totals."
-                         : "Health data is not available on this device.")
-                        .font(.system(size: 12, weight: .medium, design: .rounded))
-                        .foregroundStyle(.secondary)
+                    SettingsFootnote(String(localized: "Makes walking distances and totals more accurate."))
                 }
 
-                SettingsCard(title: "Workout Routes") {
-                    Toggle("Use Apple Health workout routes", isOn: isEnabledBinding)
+                SettingsCard(title: String(localized: "Workout Routes")) {
+                    Toggle("Add workout routes", isOn: isEnabledBinding)
                         .disabled(!isHealthAvailable || healthRouteImportManager.isHistoricalImporting)
 
-                    Text(statusText)
-                        .font(.system(size: 12, weight: .medium, design: .rounded))
-                        .foregroundStyle(.secondary)
+                    SettingsFootnote(String(localized: "Adds the routes of new workouts to your timeline."))
                 }
 
-                SettingsCard(title: "Legacy Import") {
+                SettingsCard(title: String(localized: "Past Workouts")) {
                     Button {
                         importAllRoutes()
                     } label: {
@@ -789,15 +643,11 @@ struct HealthWorkoutRouteImportSettingsView: View {
                             .tint(MovesPalette.routeTracking)
 
                         if !healthRouteImportManager.historicalImportProgressText.isEmpty {
-                            Text(healthRouteImportManager.historicalImportProgressText)
-                                .font(.system(size: 12, weight: .medium, design: .rounded))
-                                .foregroundStyle(.secondary)
+                            SettingsFootnote(healthRouteImportManager.historicalImportProgressText)
                         }
                     }
 
-                    Text(importAllHelpText)
-                        .font(.system(size: 12, weight: .medium, design: .rounded))
-                        .foregroundStyle(.secondary)
+                    SettingsFootnote(importAllHelpText)
                 }
             }
             .padding(.horizontal, 14)
@@ -817,7 +667,11 @@ struct HealthWorkoutRouteImportSettingsView: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button("Done") {
-                    dismiss()
+                    if let closeSettings {
+                        closeSettings()
+                    } else {
+                        dismiss()
+                    }
                 }
             }
         }
@@ -832,28 +686,16 @@ struct HealthWorkoutRouteImportSettingsView: View {
         }
     }
 
-    private var statusText: String {
-        guard isHealthAvailable else {
-            return "Health data is not available on this device."
-        }
-
-        if isEnabled {
-            return "Moves can import supported workout GPS routes from Apple Health. Turn this off to stop future Health route imports."
-        }
-
-        return "Turn this on to allow workout route imports. Already imported routes remain in the timeline until you remove or deduplicate timeline data."
-    }
-
     private var importAllButtonTitle: String {
         if isImporting {
-            return "Cancel Import"
+            return String(localized: "Cancel Import")
         }
 
         if HealthWorkoutRouteImporter.hasInterruptedHistoricalImport {
-            return "Resume workout route import"
+            return String(localized: "Resume Workout Import")
         }
 
-        return "Import all workout routes"
+        return String(localized: "Import All Workout Routes")
     }
 
     private var importAllButtonSystemImage: String {
@@ -862,14 +704,14 @@ struct HealthWorkoutRouteImportSettingsView: View {
 
     private var importAllHelpText: String {
         if isImporting {
-            return "The import keeps running if you leave this screen. If iOS pauses the app in the background, progress is saved and you can resume it here."
+            return String(localized: "You can leave this screen. If Moves is closed, you can resume from here.")
         }
 
         if HealthWorkoutRouteImporter.hasInterruptedHistoricalImport {
-            return "A previous historical import was interrupted. Resume continues from the last checked workout instead of starting over."
+            return String(localized: "Resume picks up from the last workout it checked.")
         }
 
-        return "Import all asks Apple Health for every supported workout route it can return. If iOS pauses the app, progress is saved and you can resume from there."
+        return String(localized: "Adds the routes of every past workout in Apple Health.")
     }
 
     private func notifyActivitySettingChanged() {
@@ -899,8 +741,11 @@ struct HealthWorkoutRouteImportSettingsView: View {
 
     private func showHistoricalImportResultIfAvailable() {
         if let report = healthRouteImportManager.lastHistoricalImportReport {
-            let prefix = report.didResumeInterruptedImport ? "Resumed and imported" : "Imported"
-            importMessage = "\(prefix) \(report.routeCount) workout route(s) from \(report.workoutCount) workout(s), covering \(report.sampleCount) GPS point(s). Duplicate phone and watch points were merged automatically."
+            let routes = report.routeCount.formatted(.number)
+            let workouts = report.workoutCount.formatted(.number)
+            importMessage = report.didResumeInterruptedImport
+                ? String(localized: "Finished importing. Added \(routes) routes from \(workouts) workouts.")
+                : String(localized: "Added \(routes) routes from \(workouts) workouts.")
             isShowingImportMessage = true
         } else if let message = healthRouteImportManager.lastHistoricalImportErrorMessage {
             importMessage = message
@@ -909,91 +754,7 @@ struct HealthWorkoutRouteImportSettingsView: View {
     }
 }
 
-// MARK: - MapAppearance+SpeedShade
-
-private struct MapAppearanceSpeedShadeToggle: View {
-    @AppStorage(MapRouteShadingSettings.shadeRoutesBySpeedKey) private var shadeRoutesBySpeed = true
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Toggle("Shade routes by speed", isOn: $shadeRoutesBySpeed)
-
-            Text("Lighter where you were faster. The compact timeline map stays a solid colour.")
-                .font(.system(size: 12, weight: .medium, design: .rounded))
-                .foregroundStyle(.secondary)
-        }
-    }
-}
-
-struct SettingsCard<Content: View>: View {
-    let title: String
-    @ViewBuilder let content: () -> Content
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(title)
-                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .foregroundStyle(.secondary)
-
-            content()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .panelSurface()
-    }
-}
-
-struct SettingsActionRow: View {
-    let title: String
-    let systemImage: String
-    var isDisabled: Bool = false
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 12) {
-                Label(title, systemImage: systemImage)
-
-                Spacer(minLength: 8)
-
-                Image(systemName: "chevron.right")
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(isDisabled)
-        .padding(.vertical, 5)
-    }
-}
-
-private struct SettingsNavigationRow: View {
-    let title: String
-    let systemImage: String
-    let status: String?
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Label(title, systemImage: systemImage)
-
-            Spacer(minLength: 8)
-
-            if let status {
-                Text(status)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-            }
-
-            Image(systemName: "chevron.right")
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle())
-        .padding(.vertical, 5)
-    }
-}
+// MARK: - Route tracking section
 
 @MainActor
 private func routeTrackingBannerData(
@@ -1008,7 +769,7 @@ private func routeTrackingBannerData(
 ) -> TrackingStatusBannerData? {
     if let lastErrorMessage {
         return TrackingStatusBannerData(
-            title: "Location tracking error",
+            title: String(localized: "Location tracking error"),
             message: lastErrorMessage,
             systemImage: "exclamationmark.triangle.fill",
             tint: .red
@@ -1019,17 +780,16 @@ private func routeTrackingBannerData(
         switch authorizationStatus {
         case .authorizedAlways, .authorizedWhenInUse:
             return TrackingStatusBannerData(
-                title: "Real route tracking on",
+                title: String(localized: "Real route tracking on"),
                 message: routeTrackingBannerMessage(
                     duration: duration,
                     stopsAtFiftyPercentBattery: stopsAtFiftyPercentBattery,
                     stopsInLowPowerMode: stopsInLowPowerMode,
-                    context: context,
                     authorizationStatus: authorizationStatus
                 ),
                 systemImage: "location.fill.viewfinder",
                 tint: MovesPalette.routeTracking,
-                buttonTitle: context == .timeline ? "Turn off now" : nil,
+                buttonTitle: context == .timeline ? String(localized: "Turn off now") : nil,
                 buttonRole: context == .timeline ? .destructive : nil
             )
         case .notDetermined, .denied, .restricted:
@@ -1047,54 +807,49 @@ private func routeTrackingBannerData(
     case .authorizedAlways:
         if !isBackgroundLocationListeningEnabled {
             return TrackingStatusBannerData(
-                title: "Background tracking is off",
-                message: "Moves will not listen for visits or significant location changes until you turn it on again or start real route tracking.",
+                title: String(localized: "Background recording is off"),
+                message: String(localized: "Moves isn’t recording until you turn it back on."),
                 systemImage: "location.slash",
                 tint: .secondary
             )
         }
 
         return TrackingStatusBannerData(
-            title: "Background tracking is enabled",
-            message: "Moves can record in the background.",
+            title: String(localized: "Recording in the background"),
+            message: String(localized: "Moves records your places and trips."),
             systemImage: "location.fill",
             tint: MovesPalette.place
         )
     case .authorizedWhenInUse:
         return TrackingStatusBannerData(
-            title: "Location access is enabled",
-            message: "Moves can read location while open. Grant Always to keep recording in the background.",
+            title: String(localized: "Recording while Moves is open"),
+            message: String(localized: "Allow Always location access to record in the background."),
             systemImage: "location.fill",
             tint: MovesPalette.start
         )
     case .notDetermined:
         return TrackingStatusBannerData(
-            title: "Location access needed",
-            message: "Open Moves to allow location access and start recording.",
+            title: String(localized: "Location access needed"),
+            message: String(localized: "Allow location access to start recording."),
             systemImage: "location.slash",
             tint: .secondary
         )
     case .denied:
         return TrackingStatusBannerData(
-            title: "Location access denied",
-            message: "Enable location in Settings if you want Moves to record visits and movement.",
+            title: String(localized: "Location access is off"),
+            message: String(localized: "Turn on location for Moves in Settings to record your days."),
             systemImage: "location.slash",
             tint: .secondary
         )
     case .restricted:
         return TrackingStatusBannerData(
-            title: "Location access restricted",
-            message: "This device does not allow location access for Moves.",
+            title: String(localized: "Location access is blocked"),
+            message: String(localized: "This iPhone doesn’t allow Moves to use location."),
             systemImage: "lock.fill",
             tint: .secondary
         )
     @unknown default:
-        return TrackingStatusBannerData(
-            title: "Unknown location state",
-            message: "Moves could not determine the current location permission state.",
-            systemImage: "questionmark.circle",
-            tint: .secondary
-        )
+        return nil
     }
 }
 
@@ -1102,7 +857,6 @@ private func routeTrackingBannerMessage(
     duration: TemporaryRouteTrackingDuration,
     stopsAtFiftyPercentBattery: Bool,
     stopsInLowPowerMode: Bool,
-    context: TrackingStatusBannerContext,
     authorizationStatus: CLAuthorizationStatus
 ) -> String {
     let durationText = duration.availabilityText
@@ -1112,29 +866,10 @@ private func routeTrackingBannerMessage(
     )
 
     switch authorizationStatus {
-    case .authorizedAlways:
-        switch context {
-        case .timeline:
-            return "Frequent GPS updates are enabled \(durationText). Battery use is higher.\(autoStopText)"
-        case .settings:
-            return "Frequent GPS updates are enabled \(durationText). Battery use is higher and Moves will switch back automatically.\(autoStopText)"
-        }
     case .authorizedWhenInUse:
-        switch context {
-        case .timeline:
-            return "Frequent GPS updates are enabled \(durationText) while Moves is open. Battery use is higher. Always is needed for background tracking.\(autoStopText)"
-        case .settings:
-            return "Frequent GPS updates are enabled \(durationText) while Moves is open. Battery use is higher. Always is needed for background tracking.\(autoStopText)"
-        }
-    case .notDetermined, .denied, .restricted:
-        switch context {
-        case .timeline:
-            return "Frequent GPS updates are ready once location access is allowed."
-        case .settings:
-            return "Frequent GPS updates are ready once location access is allowed."
-        }
-    @unknown default:
-        return "Frequent GPS updates are enabled."
+        return String(localized: "Following every turn \(durationText) while Moves is open.\(autoStopText)")
+    default:
+        return String(localized: "Following every turn \(durationText).\(autoStopText)")
     }
 }
 
@@ -1144,11 +879,11 @@ private func routeTrackingAutoStopText(
 ) -> String {
     switch (stopsAtFiftyPercentBattery, stopsInLowPowerMode) {
     case (true, true):
-        return " It will also stop if battery reaches 50% or Low Power Mode turns on."
+        return String(localized: " Stops at 50% battery or in Low Power Mode.")
     case (true, false):
-        return " It will also stop if battery reaches 50%."
+        return String(localized: " Stops at 50% battery.")
     case (false, true):
-        return " It will also stop if Low Power Mode turns on."
+        return String(localized: " Stops in Low Power Mode.")
     case (false, false):
         return ""
     }
@@ -1157,6 +892,9 @@ private func routeTrackingAutoStopText(
 private struct RouteTrackingSettingsSection: View {
     @Environment(\.openURL) private var openURL
     let captureManager: MovesLocationCaptureManager
+    /// The timeline's sheet also shows background recording and tracking detail. In
+    /// Settings those sit on the Tracking page one level up.
+    let showsEverydayTracking: Bool
 
     @State private var routeTrackingDuration: TemporaryRouteTrackingDuration
     @State private var routeTrackingEndsAt: Date?
@@ -1169,8 +907,9 @@ private struct RouteTrackingSettingsSection: View {
     @State private var captureDetailLevel: CaptureDetailLevel
     @State private var isShowingNotificationPermissionAlert = false
 
-    init(captureManager: MovesLocationCaptureManager) {
+    init(captureManager: MovesLocationCaptureManager, showsEverydayTracking: Bool) {
         self.captureManager = captureManager
+        self.showsEverydayTracking = showsEverydayTracking
         _routeTrackingDuration = State(initialValue: captureManager.temporaryRouteTrackingDuration)
         _routeTrackingEndsAt = State(initialValue: captureManager.temporaryRouteTrackingEndsAt)
         _routeTrackingAuthorizationStatus = State(initialValue: captureManager.authorizationStatus)
@@ -1233,7 +972,12 @@ private struct RouteTrackingSettingsSection: View {
     }
 
     private var bannerData: TrackingStatusBannerData? {
-        routeTrackingBannerData(
+        // The Tracking page already says whether recording works; here only route
+        // tracking itself and errors are worth a banner.
+        if !showsEverydayTracking, !isRouteTrackingActive, routeTrackingLastErrorMessage == nil {
+            return nil
+        }
+        return routeTrackingBannerData(
             authorizationStatus: routeTrackingAuthorizationStatus,
             lastErrorMessage: routeTrackingLastErrorMessage,
             duration: routeTrackingDuration,
@@ -1266,50 +1010,48 @@ private struct RouteTrackingSettingsSection: View {
                 TrackingStatusBanner(data: bannerData)
             }
 
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Tracking Modes")
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.secondary)
+            if showsEverydayTracking {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Everyday Tracking")
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.secondary)
 
-                Toggle(
-                    "Listen for location changes",
-                    isOn: $isBackgroundLocationListeningEnabled
-                )
-                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                    Toggle(
+                        "Record in the background",
+                        isOn: $isBackgroundLocationListeningEnabled
+                    )
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
 
-                Text("Moves records your places and trips in the background. When this is off, Moves stops listening until you turn it on again or start real route tracking.")
-                    .font(.system(size: 13, weight: .medium, design: .rounded))
-                    .foregroundStyle(.secondary)
+                    SettingsFootnote(String(localized: "Records your places and trips while Moves is closed."))
 
-                Divider()
+                    Divider()
 
-                Text("Tracking detail")
-                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    Text("Tracking detail")
+                        .font(.system(size: 14, weight: .semibold, design: .rounded))
 
-                Picker("Tracking detail", selection: $captureDetailLevel) {
-                    ForEach(CaptureDetailLevel.allCases) { level in
-                        Text(level.title).tag(level)
+                    Picker("Tracking detail", selection: $captureDetailLevel) {
+                        ForEach(CaptureDetailLevel.allCases) { level in
+                            Text(level.title).tag(level)
+                        }
                     }
-                }
-                .pickerStyle(.segmented)
-                .accessibilityLabel("Tracking detail")
+                    .pickerStyle(.segmented)
+                    .accessibilityLabel("Tracking detail")
 
-                Text(captureDetailLevel.summary)
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                    SettingsFootnote(captureDetailLevel.summary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .panelSurface()
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .panelSurface()
 
             VStack(alignment: .leading, spacing: 10) {
                 Text("Real Route Tracking")
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
                     .foregroundStyle(.secondary)
 
-                Text("Use frequent GPS updates for the actual route when you need more detail. Battery use increases while this is on.")
+                Text("Follows every turn of a trip for a while. Uses more battery.")
                     .font(.system(size: 13, weight: .medium, design: .rounded))
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 if routeTrackingAuthorizationStatus == .authorizedAlways ||
                     routeTrackingAuthorizationStatus == .authorizedWhenInUse {
@@ -1364,14 +1106,6 @@ private struct RouteTrackingSettingsSection: View {
                     }
                     .font(.system(size: 15, weight: .medium, design: .rounded))
 
-                    Text("These safeguards can end the session early if power gets tight.")
-                        .font(.system(size: 12, weight: .medium, design: .rounded))
-                        .foregroundStyle(.secondary)
-
-                    Text("iOS asks for notification permission the first time. If notifications are blocked, open Settings to allow them.")
-                        .font(.system(size: 12, weight: .medium, design: .rounded))
-                        .foregroundStyle(.secondary)
-
                     Button {
                         if isRouteTrackingActive {
                             captureManager.disableTemporaryRouteTracking()
@@ -1381,8 +1115,8 @@ private struct RouteTrackingSettingsSection: View {
                     } label: {
                         Label(
                             isRouteTrackingActive
-                            ? "Turn off"
-                            : "Enable real route tracking",
+                            ? String(localized: "Turn Off")
+                            : String(localized: "Start Real Route Tracking"),
                             systemImage: isRouteTrackingActive
                             ? "location.slash"
                             : "location.fill.viewfinder"
@@ -1393,21 +1127,15 @@ private struct RouteTrackingSettingsSection: View {
                     .controlSize(.large)
                     .tint(isRouteTrackingActive ? .red : nil)
 
-                    if isRouteTrackingActive {
-                        Text("Auto-off \(routeTrackingDuration.availabilityText).")
-                            .font(.system(size: 12, weight: .medium, design: .rounded))
-                            .foregroundStyle(.secondary)
+                    if isRouteTrackingActive, let routeTrackingEndsAt {
+                        SettingsFootnote(String(localized: "Turns off at \(routeTrackingEndsAt.formatted(date: .omitted, time: .shortened))."))
                     }
 
                     if routeTrackingAuthorizationStatus == .authorizedWhenInUse {
-                        Text("Always location access is needed to keep this running in the background.")
-                            .font(.system(size: 12, weight: .medium, design: .rounded))
-                            .foregroundStyle(.secondary)
+                        SettingsFootnote(String(localized: "Allow Always location access to keep this on while Moves is closed."))
                     }
                 } else {
-                    Text("Grant location access first to use this feature.")
-                        .font(.system(size: 12, weight: .medium, design: .rounded))
-                        .foregroundStyle(.secondary)
+                    SettingsFootnote(String(localized: "Allow location access to use route tracking."))
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1428,22 +1156,13 @@ private struct RouteTrackingSettingsSection: View {
         .onChange(of: captureDetailLevel) { _, level in
             captureManager.setCaptureDetailLevel(level)
         }
-        .alert("Notification Access", isPresented: $isShowingNotificationPermissionAlert) {
+        .alert("Notifications Are Off", isPresented: $isShowingNotificationPermissionAlert) {
             Button("Open Settings") {
                 openURL(URL(string: UIApplication.openSettingsURLString)!)
             }
             Button("Not Now", role: .cancel) {}
         } message: {
-            Text("Moves needs notification permission to send a stop alert. You can allow it in Settings.")
+            Text("Allow notifications for Moves in Settings to hear when route tracking stops.")
         }
     }
-}
-
-/// Screenshot-agent scroll targets in Settings.
-private enum SettingsScreenshotAnchor {
-    static let importCard = "settings.import"
-    static let webhookRow = "settings.webhook"
-    static let iCloudCard = "settings.icloud"
-    static let privacyCard = "settings.privacy"
-    static let dailyBackupCard = "settings.dailyBackup"
 }

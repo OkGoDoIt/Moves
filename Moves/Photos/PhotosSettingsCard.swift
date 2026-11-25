@@ -28,7 +28,7 @@ struct PhotosSettingsCard: View {
                     }
                 }
 
-            Text("A photo you take with this iPhone adds its location to your timeline. Screenshots and saved photos are left out.")
+            Text("Photos you take with this iPhone add their places to your timeline.")
                 .font(.system(size: 12, weight: .medium, design: .rounded))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -81,11 +81,6 @@ struct PhotosSettingsCard: View {
             }
             .buttonStyle(.plain)
             .padding(.vertical, 5)
-
-            Text("Photos stay on this device. Moves never changes your library, and share cards do not include them.")
-                .font(.system(size: 12, weight: .medium, design: .rounded))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
         }
         .sheet(isPresented: $isShowingImporter) {
             PhotoHistoryImportSheet(firstRecordedDayStart: firstRecordedDayStart)
@@ -96,13 +91,13 @@ struct PhotosSettingsCard: View {
     private var accessExplanation: String {
         switch photoLibrary.authorizationStatus {
         case .limited:
-            return "Limited Access is on. Only the photos you pick can appear on visits or rebuild history. iOS has no read-only option; Moves still never adds, edits, or deletes photos."
+            return String(localized: "Moves uses only the photos you choose.")
         case .authorized:
-            return "Moves can read geotagged photos to show them on visits. It never adds, edits, or deletes anything in your library."
+            return String(localized: "Moves can see all your photos.")
         case .denied, .restricted:
-            return "Photos access is off. Enable it in Settings if you want thumbnails on visits or to rebuild earlier days from photo locations."
+            return String(localized: "Photos access is off. Turn it on in Settings to use your photos.")
         default:
-            return "iOS only offers full or limited library access — there is no read-only switch. Moves never modifies photos. If you choose Limited Access, only the photos you pick are used."
+            return String(localized: "Moves asks for access when you turn on an option above.")
         }
     }
 
