@@ -266,7 +266,7 @@ final class WebhookSyncTests: XCTestCase {
             Set(automatic.map(\.source)),
             [
                 .visit, .significantChange, .routeTracking, .watchRouteTracking, .watchSignificantChange,
-                .launchBackfill, .authorizationGrant, .lastMile, .healthWorkoutRoute,
+                .launchBackfill, .authorizationGrant, .lastMile, .healthWorkoutRoute, .continuous,
             ]
         )
         XCTAssertEqual(

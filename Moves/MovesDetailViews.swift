@@ -1182,6 +1182,7 @@ struct RecordedLocationFix: Identifiable, Sendable {
         case .launchBackfill: String(localized: "App launch")
         case .authorizationGrant: String(localized: "Location permission")
         case .lastMile: String(localized: "Arrival or departure")
+        case .continuous: String(localized: "iPhone, automatic")
         case .photoLibrary: String(localized: "Photo")
         case .googleTimelineImport: String(localized: "Google Timeline")
         case .arcImport: String(localized: "Arc import")

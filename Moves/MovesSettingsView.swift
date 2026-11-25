@@ -1126,6 +1126,7 @@ private struct RouteTrackingSettingsSection: View {
     @State private var routeTrackingStopsInLowPowerMode: Bool
     @State private var routeTrackingStopNotificationEnabled: Bool
     @State private var isBackgroundLocationListeningEnabled: Bool
+    @State private var captureDetailLevel: CaptureDetailLevel
     @State private var isShowingNotificationPermissionAlert = false
 
     init(captureManager: MovesLocationCaptureManager) {
@@ -1146,6 +1147,7 @@ private struct RouteTrackingSettingsSection: View {
         _isBackgroundLocationListeningEnabled = State(
             initialValue: captureManager.isBackgroundLocationListeningEnabled
         )
+        _captureDetailLevel = State(initialValue: captureManager.captureDetailLevel)
     }
 
     private var routeTrackingStopsAtBatteryFiftyBinding: Binding<Bool> {
@@ -1235,9 +1237,27 @@ private struct RouteTrackingSettingsSection: View {
                 )
                 .font(.system(size: 15, weight: .semibold, design: .rounded))
 
-                Text("Background tracking uses iOS visit monitoring and significant location changes to record places and movement with low energy use. When this is off, Moves stops background listening until you turn it on again or start temporary route tracking.")
+                Text("Moves records your places and trips in the background. When this is off, Moves stops listening until you turn it on again or start real route tracking.")
                     .font(.system(size: 13, weight: .medium, design: .rounded))
                     .foregroundStyle(.secondary)
+
+                Divider()
+
+                Text("Tracking detail")
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+
+                Picker("Tracking detail", selection: $captureDetailLevel) {
+                    ForEach(CaptureDetailLevel.allCases) { level in
+                        Text(level.title).tag(level)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .accessibilityLabel("Tracking detail")
+
+                Text(captureDetailLevel.summary)
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .panelSurface()
@@ -1363,6 +1383,10 @@ private struct RouteTrackingSettingsSection: View {
         .onReceive(captureManager.$isBackgroundLocationListeningEnabled.removeDuplicates()) { isBackgroundLocationListeningEnabled = $0 }
         .onChange(of: isBackgroundLocationListeningEnabled) { _, isEnabled in
             captureManager.setBackgroundLocationListeningEnabled(isEnabled)
+        }
+        .onReceive(captureManager.$captureDetailLevel.removeDuplicates()) { captureDetailLevel = $0 }
+        .onChange(of: captureDetailLevel) { _, level in
+            captureManager.setCaptureDetailLevel(level)
         }
         .alert("Notification Access", isPresented: $isShowingNotificationPermissionAlert) {
             Button("Open Settings") {

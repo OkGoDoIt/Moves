@@ -82,6 +82,8 @@ enum LocationSampleSource: String, Codable, CaseIterable {
     case googleTimelineImport
     /// Reserved for a future Arc Timeline importer; stored as a string so existing rows stay valid.
     case arcImport
+    /// Fixes recorded automatically while following a trip (Balanced or Detailed capture).
+    case continuous
 }
 
 extension LocationSampleSource {
@@ -92,7 +94,7 @@ extension LocationSampleSource {
         case .fileRouteImport, .googleTimelineImport, .arcImport:
             return true
         case .visit, .significantChange, .routeTracking, .watchRouteTracking, .watchSignificantChange,
-             .healthWorkoutRoute, .launchBackfill, .authorizationGrant, .lastMile, .photoLibrary:
+             .healthWorkoutRoute, .launchBackfill, .authorizationGrant, .lastMile, .photoLibrary, .continuous:
             return false
         }
     }
@@ -109,12 +111,13 @@ extension LocationSampleSource {
         case .authorizationGrant, .photoLibrary: return 1
         case .launchBackfill: return 0
         case .lastMile: return 4
+        case .continuous: return 4
         }
     }
 
     var isRouteTrack: Bool {
         switch self {
-        case .routeTracking, .watchRouteTracking, .healthWorkoutRoute, .fileRouteImport, .lastMile, .googleTimelineImport, .arcImport:
+        case .routeTracking, .watchRouteTracking, .healthWorkoutRoute, .fileRouteImport, .lastMile, .continuous, .googleTimelineImport, .arcImport:
             return true
         case .visit, .significantChange, .watchSignificantChange, .launchBackfill, .authorizationGrant, .photoLibrary:
             return false
@@ -123,7 +126,7 @@ extension LocationSampleSource {
 
     var preservesRouteResolution: Bool {
         switch self {
-        case .healthWorkoutRoute, .watchRouteTracking, .fileRouteImport, .lastMile, .googleTimelineImport, .arcImport:
+        case .healthWorkoutRoute, .watchRouteTracking, .fileRouteImport, .lastMile, .continuous, .googleTimelineImport, .arcImport:
             return true
         case .routeTracking, .visit, .significantChange, .watchSignificantChange, .launchBackfill, .authorizationGrant, .photoLibrary:
             return false
