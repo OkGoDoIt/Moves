@@ -255,8 +255,7 @@ final class StoreResilienceTests: XCTestCase {
             XCTAssertEqual(new.activeDayCount, old.activeDayCount)
             XCTAssertEqual(new.currentStreakDays, old.currentStreakDays)
             XCTAssertEqual(new.longestStreakDays, old.longestStreakDays)
-            XCTAssertEqual(new.countries, old.countries)
-            XCTAssertEqual(new.cities, old.cities)
+            XCTAssertEqual(new.geography, old.geography)
             XCTAssertEqual(new.modes.map(\.modeRaw), old.modes.map(\.modeRaw))
             for (a, b) in zip(new.modes, old.modes) {
                 XCTAssertEqual(a.distanceMeters, b.distanceMeters, accuracy: 0.01)

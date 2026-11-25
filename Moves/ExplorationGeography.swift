@@ -59,6 +59,12 @@ struct ExplorationCountryResolver: Sendable {
             }
     }
 
+    /// Every polygon of every country as `[longitude, latitude]` rings, outer ring first.
+    /// Pieces that share a code (Cyprus, Somalia) are grouped under it.
+    func polygonsByCountry() -> [String: [[[[Double]]]]] {
+        countries.reduce(into: [:]) { $0[$1.id, default: []] += $1.polygons }
+    }
+
     init(data: Data) throws {
         let decoded = try JSONDecoder().decode(BoundaryDataset.self, from: data)
         guard decoded.version == 1, !decoded.countries.isEmpty else { throw ExplorationGeographyError.invalidDataset }
@@ -257,8 +263,14 @@ struct ExplorationCountryResolver: Sendable {
             case "France": return "FR"
             case "Norway": return "NO"
             case "Kosovo": return "XK"
-            case "Northern Cyprus": return "XC"
-            case "Dhekelia Sovereign Base Area", "Akrotiri Sovereign Base Area": return "CY"
+            case "Northern Cyprus", "Cyprus No Mans Area",
+                 "Dhekelia Sovereign Base Area", "Akrotiri Sovereign Base Area": return "CY"
+            // The dataset's `CN-TW` is no ISO code; iOS reads it as "China mainland".
+            case "Taiwan": return "TW"
+            case "Somaliland": return "SO"
+            case "Baykonur Cosmodrome": return "KZ"
+            case "US Naval Base Guantanamo Bay": return "CU"
+            case "Indian Ocean Territories": return "CX"
             default: return fallback
             }
         }

@@ -117,10 +117,10 @@ final class InsightsSnapshotTests: XCTestCase {
             now: date(2026, 9, 20, 12, 0),
             calendar: calendar
         )
-        XCTAssertEqual(snapshot.countries.map(\.countryCode), ["NL", "FR"])
-        XCTAssertEqual(snapshot.countries.first?.visitCount, 2)
-        XCTAssertEqual(snapshot.cities.map(\.name), ["Amsterdam", "Paris"])
-        XCTAssertEqual(snapshot.countries.first?.flagEmoji, "🇳🇱")
+        XCTAssertEqual(snapshot.geography.countries.map(\.code), ["NL", "FR"])
+        XCTAssertEqual(snapshot.geography.countries.first?.visitCount, 2)
+        XCTAssertEqual(snapshot.geography.countries.flatMap(\.cities).map(\.name), ["Amsterdam", "Paris"])
+        XCTAssertEqual(snapshot.geography.countries.first?.flagEmoji, "🇳🇱")
     }
 
     func testHourHistogramSplitsAMoveAcrossHours() {
@@ -495,9 +495,9 @@ final class InsightsSnapshotTests: XCTestCase {
 
     // MARK: - Places, days, and Health keys
 
-    /// Demo history showed 14 countries and 2 cities: countries fall back to the bundled
-    /// boundaries at once, while city names arrive later from geocoding.
-    func testCountryWithoutNamedCitiesIsCountedSeparately() {
+    /// Demo history showed 14 countries and 2 cities while geocoding caught up. Stays
+    /// without names now get both from the bundled borders and cities.
+    func testStaysWithoutNamesGetCountryAndCityOffline() {
         var unnamedParis = InsightsVisitRecord()
         unnamedParis.latitude = 48.8584
         unnamedParis.longitude = 2.2945
@@ -514,10 +514,10 @@ final class InsightsSnapshotTests: XCTestCase {
             )
         ]
         let snapshot = InsightsSnapshotBuilder.build(days: days, period: .year(2026), now: date(2026, 9, 1, 12, 0), calendar: calendar)
-        XCTAssertEqual(snapshot.cities.map(\.name).sorted(), ["Amsterdam", "Utrecht"])
-        XCTAssertEqual(snapshot.cities.first { $0.name == "Amsterdam" }?.visitCount, 2)
-        XCTAssertEqual(snapshot.countries.compactMap(\.countryCode), ["NL", "FR"])
-        XCTAssertEqual(snapshot.countriesWithoutCityNames, 1)
+        let cities = snapshot.geography.countries.flatMap(\.cities)
+        XCTAssertEqual(cities.map(\.name).sorted(), ["Amsterdam", "Paris", "Utrecht"])
+        XCTAssertEqual(cities.first { $0.name == "Amsterdam" }?.visitCount, 2)
+        XCTAssertEqual(snapshot.geography.countries.map(\.code), ["NL", "FR"])
     }
 
     func testPeriodDayKeysRunFromJanuaryFirstThroughToday() {

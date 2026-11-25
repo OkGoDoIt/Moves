@@ -52,15 +52,22 @@ struct InsightsTabView: View {
             .navigationDestination(for: InsightsRoute.self) { route in
                 switch route {
                 case .countries:
-                    InsightsPlaceListView(
-                        title: String(localized: "Countries"),
-                        rows: store.snapshot.countries
-                    )
+                    InsightsWorldView(store: store, mode: .countries)
                 case .cities:
-                    InsightsPlaceListView(
-                        title: String(localized: "Cities"),
-                        rows: store.snapshot.cities
-                    )
+                    InsightsWorldView(store: store, mode: .cities)
+                // A country or city page covers the whole history, whatever year led to it.
+                case .country(let code):
+                    if let country = store.snapshot.allTimeGeography.country(code) {
+                        InsightsCountryView(country: country)
+                    } else {
+                        ContentUnavailableView(String(localized: "Place unavailable"), systemImage: "mappin.slash")
+                    }
+                case .city(let id):
+                    if let city = store.snapshot.allTimeGeography.city(id) {
+                        InsightsCityView(city: city)
+                    } else {
+                        ContentUnavailableView(String(localized: "Place unavailable"), systemImage: "mappin.slash")
+                    }
                 case .connections:
                     if let connectionsSnapshot {
                         InsightsConnectionsView(snapshot: connectionsSnapshot)
@@ -298,30 +305,35 @@ struct InsightsTabView: View {
     }
 
     private var geographyCard: some View {
-        let snapshot = store.snapshot
+        let geography = store.snapshot.geography
         return InsightsCard(title: String(localized: "Places")) {
-            if snapshot.countries.isEmpty && snapshot.cities.isEmpty {
-                Text(String(localized: "Countries and cities appear once places are named."))
+            if geography.countries.isEmpty {
+                Text(String(localized: "Countries and cities appear once you’ve been somewhere."))
                     .font(.system(.footnote, design: .rounded))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
+                Button {
+                    path.append(InsightsRoute.countries)
+                } label: {
+                    InsightsWorldThumbnail(
+                        visited: geography.countryCodes,
+                        everVisited: store.snapshot.allTimeGeography.countryCodes
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(String(localized: "World map"))
                 InsightsMetricRow {
                     placeMetricButton(
                         title: String(localized: "Countries"),
-                        count: snapshot.countries.count,
+                        count: geography.countries.count,
                         route: .countries
                     )
                     placeMetricButton(
                         title: String(localized: "Cities"),
-                        count: snapshot.cities.count,
+                        count: geography.cityCount,
                         route: .cities
                     )
-                }
-                if snapshot.countriesWithoutCityNames > 0 {
-                    Text(String(localized: "Some cities aren’t named yet."))
-                        .font(.system(.caption, design: .rounded, weight: .medium))
-                        .foregroundStyle(.secondary)
                 }
             }
         }
@@ -691,6 +703,8 @@ private struct InsightsYearReviewSheet: View {
 enum InsightsRoute: Hashable {
     case countries
     case cities
+    case country(String)
+    case city(String)
     case connections
     case trips
 }
@@ -876,27 +890,29 @@ private struct InsightsModeRow: View {
     }
 }
 
-private struct InsightsPlaceListView: View {
-    let title: String
-    let rows: [InsightsSnapshot.PlaceCount]
+/// The world at a glance on the Places card.
+private struct InsightsWorldThumbnail: View {
+    let visited: Set<String>
+    let everVisited: Set<String>
+    @State private var geometry: WorldMapGeometry?
 
     var body: some View {
-        List(rows) { row in
-            HStack(spacing: 12) {
-                if !row.flagEmoji.isEmpty {
-                    Text(row.flagEmoji)
-                }
-                Text(row.name)
-                    .font(.system(.callout, design: .rounded, weight: .semibold))
-                Spacer()
-                Text("^[\(row.visitCount) visit](inflect: true)")
-                    .font(.system(.footnote, design: .rounded, weight: .medium))
-                    .foregroundStyle(.secondary)
+        ZStack {
+            Color.clear.aspectRatio(WorldMapGeometry.aspectRatio, contentMode: .fit)
+            if let geometry {
+                WorldMapCanvas(
+                    geometry: geometry,
+                    content: WorldMapContent(visited: visited, visitedBefore: everVisited.subtracting(visited))
+                )
+                .aspectRatio(WorldMapGeometry.aspectRatio, contentMode: .fit)
+                .transition(.opacity)
             }
         }
-        .movesFloatingTabBarClearance()
-        .navigationTitle(title)
-        .navigationBarTitleDisplayMode(.inline)
+        .contentShape(Rectangle())
+        .task {
+            let loaded = await WorldMapGeometry.load()
+            withAnimation(.easeOut(duration: 0.25)) { geometry = loaded }
+        }
     }
 }
 

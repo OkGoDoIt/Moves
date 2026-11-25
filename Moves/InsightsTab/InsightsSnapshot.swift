@@ -167,8 +167,11 @@ struct InsightsMoveRecord: Equatable, Sendable {
 struct InsightsVisitRecord: Equatable, Sendable {
     var countryCode: String?
     var locality: String?
+    var administrativeArea: String? = nil
     var latitude: Double? = nil
     var longitude: Double? = nil
+    var arrivalDate: Date? = nil
+    var departureDate: Date? = nil
 
     init(countryCode: String? = nil, locality: String? = nil) {
         self.countryCode = countryCode
@@ -178,8 +181,11 @@ struct InsightsVisitRecord: Equatable, Sendable {
     init(_ visit: VisitPlace) {
         countryCode = Self.firstNonEmpty(visit.knownPlace?.countryCode, visit.countryCode)
         locality = Self.firstNonEmpty(visit.knownPlace?.locality, visit.locality)
+        administrativeArea = Self.firstNonEmpty(visit.knownPlace?.administrativeArea, visit.administrativeArea)
         latitude = visit.latitude
         longitude = visit.longitude
+        arrivalDate = visit.arrivalDate
+        departureDate = visit.departureDate
     }
 
     private static func firstNonEmpty(_ values: String?...) -> String? {
@@ -199,8 +205,10 @@ struct InsightsSnapshot: Equatable, Sendable {
     let period: InsightsPeriod
     let availableYears: [Int]
     let modes: [ModeStats]
-    let countries: [PlaceCount]
-    let cities: [PlaceCount]
+    /// Where the person was in the period.
+    let geography: InsightsGeography
+    /// Where the person has ever been.
+    let allTimeGeography: InsightsGeography
     let calendarDays: [CalendarDay]
     let currentStreakDays: Int
     let longestStreakDays: Int
@@ -223,8 +231,6 @@ struct InsightsSnapshot: Equatable, Sendable {
     /// The same span a year earlier, when that year has any trips; otherwise nil.
     let comparison: Comparison?
     let activeDayCount: Int
-    /// Countries with visits in the period but no city name on any of them yet.
-    let countriesWithoutCityNames: Int
     /// `DayTimeline.dayKey` for every day of the period up to today, for Health totals.
     let periodDayKeys: [String]
     /// Wall time of this build, used by tests that measure cache vs recompute.
@@ -273,14 +279,6 @@ struct InsightsSnapshot: Equatable, Sendable {
         }
     }
 
-    struct PlaceCount: Identifiable, Equatable, Sendable {
-        let id: String
-        let name: String
-        let flagEmoji: String
-        let visitCount: Int
-        let countryCode: String?
-    }
-
     struct CalendarDay: Identifiable, Equatable, Sendable {
         var id: String { dayKey }
         let date: Date
@@ -301,8 +299,8 @@ struct InsightsSnapshot: Equatable, Sendable {
             period: period,
             availableYears: availableYears,
             modes: [],
-            countries: [],
-            cities: [],
+            geography: .empty,
+            allTimeGeography: .empty,
             calendarDays: [],
             currentStreakDays: 0,
             longestStreakDays: 0,
@@ -318,7 +316,6 @@ struct InsightsSnapshot: Equatable, Sendable {
             airMovingDuration: 0,
             comparison: nil,
             activeDayCount: 0,
-            countriesWithoutCityNames: 0,
             periodDayKeys: [],
             builtAt: builtAt
         )
@@ -326,7 +323,7 @@ struct InsightsSnapshot: Equatable, Sendable {
 
     /// Nothing at all happened in the period: no trips and no named places.
     var isEmptyPeriod: Bool {
-        modes.isEmpty && countries.isEmpty && cities.isEmpty && totalDistanceMeters == 0
+        modes.isEmpty && geography.countries.isEmpty && totalDistanceMeters == 0
     }
 }
 
@@ -376,7 +373,10 @@ enum InsightsSnapshotBuilder {
             return InsightsSnapshot.Comparison(year: span.year, isSameDates: span.isSameDates, groundDistanceMeters: previousGround)
         }
 
-        let geography = geographyCounts(in: currentDays)
+        let allTimeGeography = InsightsGeographyBuilder.build(days: days, calendar: calendar)
+        let geography = period == .all
+            ? allTimeGeography
+            : InsightsGeographyBuilder.build(days: days, period: period, calendar: calendar)
         let groundDays = currentDays.map { day in
             // Visits stay: a trip that left from no stop reads its hour on their clock.
             InsightsDayRecord(dayStart: day.dayStart, moves: day.moves.filter { $0.mode != .plane }, visits: day.visits)
@@ -440,8 +440,8 @@ enum InsightsSnapshotBuilder {
             period: period,
             availableYears: availableYears,
             modes: modes,
-            countries: geography.countries,
-            cities: geography.cities,
+            geography: geography,
+            allTimeGeography: allTimeGeography,
             calendarDays: calendarDays,
             currentStreakDays: current,
             longestStreakDays: max(longest, current),
@@ -457,7 +457,6 @@ enum InsightsSnapshotBuilder {
             airMovingDuration: air.duration,
             comparison: comparison,
             activeDayCount: activeCount,
-            countriesWithoutCityNames: geography.countriesWithoutCityNames,
             periodDayKeys: periodDayKeys(period: period, days: days, now: now, calendar: calendar),
             builtAt: builtAt
         )
@@ -584,70 +583,6 @@ enum InsightsSnapshotBuilder {
             }
         }
         return totals
-    }
-
-    /// Countries come from the stored country, or from the bundled boundaries when a
-    /// visit has none yet; cities come only from stored names, which arrive later. A
-    /// country whose visits carry no city name yet is counted in
-    /// `countriesWithoutCityNames`, so the view can say the city count is still growing.
-    private static func geographyCounts(
-        in days: [InsightsDayRecord]
-    ) -> (countries: [InsightsSnapshot.PlaceCount], cities: [InsightsSnapshot.PlaceCount], countriesWithoutCityNames: Int) {
-        var countryVisits: [String: Int] = [:]
-        var countriesWithCity: Set<String> = []
-        var cityVisits: [String: (name: String, country: String?, count: Int)] = [:]
-
-        for day in days {
-            for visit in day.visits {
-                // Use stored names first. Offline boundary lookup fills only missing country
-                // labels and only from visits, never from a line flown over a country.
-                let resolvedCode = normalized(visit.countryCode)?.uppercased() ?? OfflineVisitGeography.country(latitude: visit.latitude, longitude: visit.longitude)
-                if let country = resolvedCode {
-                    countryVisits[country, default: 0] += 1
-                }
-                if let city = normalized(visit.locality) {
-                    let country = resolvedCode
-                    if let country { countriesWithCity.insert(country) }
-                    let key = "\(country ?? "")|\(city.lowercased())"
-                    var entry = cityVisits[key] ?? (city, country, 0)
-                    entry.count += 1
-                    cityVisits[key] = entry
-                }
-            }
-        }
-
-        let countries = countryVisits
-            .map { code, count in
-                InsightsSnapshot.PlaceCount(
-                    id: code,
-                    name: PlacesGeography.countryName(forCountryCode: code),
-                    flagEmoji: PlacesGeography.flagEmoji(forCountryCode: code),
-                    visitCount: count,
-                    countryCode: code
-                )
-            }
-            .sorted {
-                if $0.visitCount != $1.visitCount { return $0.visitCount > $1.visitCount }
-                return $0.name.localizedStandardCompare($1.name) == .orderedAscending
-            }
-
-        let cities = cityVisits
-            .map { key, value in
-                InsightsSnapshot.PlaceCount(
-                    id: key,
-                    name: value.name,
-                    flagEmoji: PlacesGeography.flagEmoji(forCountryCode: value.country),
-                    visitCount: value.count,
-                    countryCode: value.country
-                )
-            }
-            .sorted {
-                if $0.visitCount != $1.visitCount { return $0.visitCount > $1.visitCount }
-                return $0.name.localizedStandardCompare($1.name) == .orderedAscending
-            }
-
-        let unnamed = Set(countryVisits.keys).subtracting(countriesWithCity).count
-        return (countries, cities, unnamed)
     }
 
     private static func dailyDistance(
@@ -860,12 +795,6 @@ enum InsightsSnapshotBuilder {
         contains(period, dayStart: calendar.startOfDay(for: now), calendar: calendar)
     }
 
-    private static func normalized(_ value: String?) -> String? {
-        guard let value else { return nil }
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-
     /// Same shape as `DayTimeline.makeDayKey`, in the calendar's time zone.
     private static func dayKeyFormatter(for calendar: Calendar) -> DateFormatter {
         let formatter = DateFormatter()
@@ -895,15 +824,5 @@ enum InsightsComputeCache {
         let built = compute()
         storage[key] = built
         return built
-    }
-}
-
-/// Immutable bundled lookup, initialized on the Insights aggregation worker only when needed.
-enum OfflineVisitGeography {
-    private static let resolver = try? ExplorationCountryResolver.bundled()
-    static func country(latitude: Double?, longitude: Double?) -> String? {
-        guard let latitude, let longitude,
-              CLLocationCoordinate2DIsValid(.init(latitude: latitude, longitude: longitude)) else { return nil }
-        return resolver?.country(at: .init(latitude: latitude, longitude: longitude))?.id
     }
 }

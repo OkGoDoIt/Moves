@@ -221,6 +221,13 @@
 		F7000001307000010000000D /* PlaceDisplayName.swift in Sources */ = {isa = PBXBuildFile; fileRef = F7000001307000010000000C /* PlaceDisplayName.swift */; };
 		F7000001307000010000000F /* PlaceConfirmSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = F7000001307000010000000E /* PlaceConfirmSheet.swift */; };
 		F80000013080000100000001 /* InsightsTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F80000013080000100000000 /* InsightsTabView.swift */; };
+		F80000013080000200000001 /* WorldCityIndex.swift in Sources */ = {isa = PBXBuildFile; fileRef = F80000013080000200000000 /* WorldCityIndex.swift */; };
+		F80000013080000200000003 /* InsightsGeography.swift in Sources */ = {isa = PBXBuildFile; fileRef = F80000013080000200000002 /* InsightsGeography.swift */; };
+		F80000013080000200000005 /* WorldMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F80000013080000200000004 /* WorldMapView.swift */; };
+		F80000013080000200000007 /* InsightsWorldView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F80000013080000200000006 /* InsightsWorldView.swift */; };
+		F80000013080000200000009 /* InsightsRegionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F80000013080000200000008 /* InsightsRegionView.swift */; };
+		F8000001308000020000000B /* WorldCities.tsv in Resources */ = {isa = PBXBuildFile; fileRef = F8000001308000020000000A /* WorldCities.tsv */; };
+		F8000001308000020000000D /* InsightsGeographyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8000001308000020000000C /* InsightsGeographyTests.swift */; };
 		F80000013080000100000003 /* InsightsSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = F80000013080000100000002 /* InsightsSnapshot.swift */; };
 		F80000013080000100000005 /* InsightsConnectionsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F80000013080000100000004 /* InsightsConnectionsView.swift */; };
 		F80000013080000100000007 /* MovesSearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F80000013080000100000006 /* MovesSearchView.swift */; };
@@ -557,6 +564,13 @@
 		F7000001307000010000000C /* PlaceDisplayName.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaceDisplayName.swift; sourceTree = "<group>"; };
 		F7000001307000010000000E /* PlaceConfirmSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaceConfirmSheet.swift; sourceTree = "<group>"; };
 		F80000013080000100000000 /* InsightsTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InsightsTabView.swift; sourceTree = "<group>"; };
+		F80000013080000200000000 /* WorldCityIndex.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorldCityIndex.swift; sourceTree = "<group>"; };
+		F80000013080000200000002 /* InsightsGeography.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InsightsGeography.swift; sourceTree = "<group>"; };
+		F80000013080000200000004 /* WorldMapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorldMapView.swift; sourceTree = "<group>"; };
+		F80000013080000200000006 /* InsightsWorldView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InsightsWorldView.swift; sourceTree = "<group>"; };
+		F80000013080000200000008 /* InsightsRegionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InsightsRegionView.swift; sourceTree = "<group>"; };
+		F8000001308000020000000A /* WorldCities.tsv */ = {isa = PBXFileReference; lastKnownFileType = text; path = WorldCities.tsv; sourceTree = "<group>"; };
+		F8000001308000020000000C /* InsightsGeographyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InsightsGeographyTests.swift; sourceTree = "<group>"; };
 		F80000013080000100000002 /* InsightsSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InsightsSnapshot.swift; sourceTree = "<group>"; };
 		F80000013080000100000004 /* InsightsConnectionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InsightsConnectionsView.swift; sourceTree = "<group>"; };
 		F80000013080000100000006 /* MovesSearchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovesSearchView.swift; sourceTree = "<group>"; };
@@ -777,6 +791,7 @@
 				1E52C41FB39FAF34FCCFE196 /* DetailedExploration.swift */,
 				2107D8A52E95D1BF1EFF6AD9 /* ExplorationGeography.swift */,
 				BF6F883FC45C5976E18013B3 /* ExplorationCountryBoundaries.json */,
+				F8000001308000020000000A /* WorldCities.tsv */,
 				2315871CE5DE54E235C2D2D2 /* AutomaticTransportModes.swift */,
 				17EFD7BE82598A100F005B0B /* AutomaticModesSettingsView.swift */,
 				B705C61753E943B506F55BE9 /* TransportSpeedEvidence.swift */,
@@ -897,6 +912,7 @@
 				A7C3E1000000000000000B09 /* MapTileTests.swift */,
 				F7000001307000010000000A /* PlacesIndexTests.swift */,
 				F8000001308000010000000A /* InsightsSnapshotTests.swift */,
+				F8000001308000020000000C /* InsightsGeographyTests.swift */,
 				F8000001308000010000000C /* SearchQueryParserTests.swift */,
 				F90000013090000100000008 /* NamedTripTests.swift */,
 				FA00000130A000010000000A /* PhotoHistoryImporterTests.swift */,
@@ -1002,6 +1018,11 @@
 			isa = PBXGroup;
 			children = (
 				F80000013080000100000000 /* InsightsTabView.swift */,
+				F80000013080000200000002 /* InsightsGeography.swift */,
+				F80000013080000200000008 /* InsightsRegionView.swift */,
+				F80000013080000200000006 /* InsightsWorldView.swift */,
+				F80000013080000200000000 /* WorldCityIndex.swift */,
+				F80000013080000200000004 /* WorldMapView.swift */,
 				F80000013080000100000002 /* InsightsSnapshot.swift */,
 				F80000013080000100000004 /* InsightsConnectionsView.swift */,
 			);
@@ -1315,6 +1336,7 @@
 				48F925E9305ACE510011EEA3 /* ironMaiden.icon in Resources */,
 				48F925EA305ACE510011EEA3 /* ironMaiden2.icon in Resources */,
 				F510919F1BDA03EE24E59E20 /* ExplorationCountryBoundaries.json in Resources */,
+				F8000001308000020000000B /* WorldCities.tsv in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1439,6 +1461,11 @@
 				F7000001307000010000000F /* PlaceConfirmSheet.swift in Sources */,
 				F70000013070000100000009 /* PlaceGeocodeBackfill.swift in Sources */,
 				F80000013080000100000001 /* InsightsTabView.swift in Sources */,
+				F80000013080000200000001 /* WorldCityIndex.swift in Sources */,
+				F80000013080000200000003 /* InsightsGeography.swift in Sources */,
+				F80000013080000200000005 /* WorldMapView.swift in Sources */,
+				F80000013080000200000007 /* InsightsWorldView.swift in Sources */,
+				F80000013080000200000009 /* InsightsRegionView.swift in Sources */,
 				F80000013080000100000003 /* InsightsSnapshot.swift in Sources */,
 				F80000013080000100000005 /* InsightsConnectionsView.swift in Sources */,
 				F80000013080000100000007 /* MovesSearchView.swift in Sources */,
@@ -1546,6 +1573,7 @@
 				A7C3E1000000000000000B0A /* MapTileTests.swift in Sources */,
 				F7000001307000010000000B /* PlacesIndexTests.swift in Sources */,
 				F8000001308000010000000B /* InsightsSnapshotTests.swift in Sources */,
+				F8000001308000020000000D /* InsightsGeographyTests.swift in Sources */,
 				F8000001308000010000000D /* SearchQueryParserTests.swift in Sources */,
 				F90000013090000100000009 /* NamedTripTests.swift in Sources */,
 				FA00000130A000010000000B /* PhotoHistoryImporterTests.swift in Sources */,
@@ -1654,7 +1682,7 @@
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_ENTITLEMENTS = QuickLookThumbnails/QuickLookThumbnails.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 67;
+				CURRENT_PROJECT_VERSION = 68;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = QuickLookThumbnails/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
@@ -1677,7 +1705,7 @@
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_ENTITLEMENTS = QuickLookThumbnails/QuickLookThumbnails.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 67;
+				CURRENT_PROJECT_VERSION = 68;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = QuickLookThumbnails/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
@@ -1753,6 +1781,7 @@
 				SDKROOT = iphoneos;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 			};
@@ -1825,7 +1854,7 @@
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_ENTITLEMENTS = Moves/Moves.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 67;
+				CURRENT_PROJECT_VERSION = 68;
 				DEVELOPMENT_ASSET_PATHS = "\"Moves/Preview Content\"";
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
@@ -1874,7 +1903,7 @@
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_ENTITLEMENTS = Moves/Moves.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 67;
+				CURRENT_PROJECT_VERSION = 68;
 				DEVELOPMENT_ASSET_PATHS = "\"Moves/Preview Content\"";
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
@@ -1922,7 +1951,7 @@
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_ENTITLEMENTS = QuickLookPreview/QuickLookPreview.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 67;
+				CURRENT_PROJECT_VERSION = 68;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = QuickLookPreview/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
@@ -1994,7 +2023,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = "Moves Watch App/MovesWatch.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 67;
+				CURRENT_PROJECT_VERSION = 68;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Moves Watch App/Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -2020,7 +2049,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = "Moves Watch App/MovesWatch.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 67;
+				CURRENT_PROJECT_VERSION = 68;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Moves Watch App/Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -2046,7 +2075,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = "Moves Widgets/MovesWidgets.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 67;
+				CURRENT_PROJECT_VERSION = 68;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Moves Widgets/MovesWidgets-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -2072,7 +2101,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = "Moves Widgets/MovesWidgets.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 67;
+				CURRENT_PROJECT_VERSION = 68;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Moves Widgets/MovesWidgets-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -2098,7 +2127,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = "Moves Widgets/MovesWidgets.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 67;
+				CURRENT_PROJECT_VERSION = 68;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Moves Widgets/MovesWidgets-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -2125,7 +2154,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = "Moves Widgets/MovesWidgets.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 67;
+				CURRENT_PROJECT_VERSION = 68;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Moves Widgets/MovesWidgets-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -2153,7 +2182,7 @@
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_ENTITLEMENTS = QuickLookPreview/QuickLookPreview.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 67;
+				CURRENT_PROJECT_VERSION = 68;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = QuickLookPreview/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;

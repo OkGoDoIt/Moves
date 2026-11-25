@@ -11,6 +11,7 @@ struct CreatedByView: View {
     private let websiteURL = URL(string: "https://rogerpincombe.com")!
     private let sourceCodeURL = URL(string: "https://github.com/OkGoDoIt/Moves")!
     private let originalAppURL = URL(string: "https://extremelysuccessfulapps.com/moves/")!
+    private let cityDataURL = URL(string: "https://www.geonames.org")!
 
     var body: some View {
         VStack(spacing: 0) {
@@ -46,6 +47,15 @@ struct CreatedByView: View {
                     Image("extremelysuccessfullogo")
                 }
                 .creditLink()
+            }
+
+            Divider()
+                .padding(.vertical, 14)
+
+            Link(destination: cityDataURL) {
+                Text("City names from GeoNames, CC BY 4.0")
+                    .font(.caption)
+                    .creditLink()
             }
         }
         .multilineTextAlignment(.center)
