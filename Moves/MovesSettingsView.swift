@@ -355,7 +355,7 @@ struct MovesSettingsView: View {
                             HealthWorkoutRouteImportSettingsView()
                         } label: {
                             SettingsNavigationRow(
-                                title: "Apple Health workout routes",
+                                title: "Apple Health",
                                 systemImage: "figure.run",
                                 status: HKHealthStore.isHealthDataAvailable() ? nil : "Unavailable"
                             )
@@ -701,6 +701,7 @@ struct HealthWorkoutRouteImportSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var healthRouteImportManager: HealthWorkoutRouteAutoImportManager
     @AppStorage(HealthWorkoutRouteImportSettings.isEnabledKey) private var isEnabled = false
+    @AppStorage(HealthActivitySettings.isEnabledKey) private var usesActivity = false
 
     @State private var importMessage = ""
     @State private var isShowingImportMessage = false
@@ -719,10 +720,45 @@ struct HealthWorkoutRouteImportSettingsView: View {
         HKHealthStore.isHealthDataAvailable()
     }
 
+    /// Turning it on shows the Health permission sheet (in one request with routes).
+    private var usesActivityBinding: Binding<Bool> {
+        Binding(
+            get: { usesActivity },
+            set: { newValue in
+                guard newValue, !HealthActivitySettings.usesDemoData else {
+                    usesActivity = newValue
+                    notifyActivitySettingChanged()
+                    return
+                }
+                Task { @MainActor in
+                    do {
+                        try await HealthKitActivityReader().requestAuthorization()
+                        usesActivity = true
+                        notifyActivitySettingChanged()
+                    } catch {
+                        importMessage = error.localizedDescription
+                        isShowingImportMessage = true
+                    }
+                }
+            }
+        )
+    }
+
     var body: some View {
         ScrollView {
             LazyVStack(spacing: 14) {
-                SettingsCard(title: "Apple Health Routes") {
+                SettingsCard(title: "Steps and Walking Distance") {
+                    Toggle("Use steps and walking distance", isOn: usesActivityBinding)
+                        .disabled(!isHealthAvailable)
+
+                    Text(isHealthAvailable
+                         ? "Uses your steps to correct walking distances and totals."
+                         : "Health data is not available on this device.")
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                }
+
+                SettingsCard(title: "Workout Routes") {
                     Toggle("Use Apple Health workout routes", isOn: isEnabledBinding)
                         .disabled(!isHealthAvailable || healthRouteImportManager.isHistoricalImporting)
 
@@ -776,7 +812,7 @@ struct HealthWorkoutRouteImportSettingsView: View {
             )
             .ignoresSafeArea()
         }
-        .navigationTitle("Apple Health Routes")
+        .navigationTitle("Apple Health")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -785,7 +821,7 @@ struct HealthWorkoutRouteImportSettingsView: View {
                 }
             }
         }
-        .alert("Apple Health Routes", isPresented: $isShowingImportMessage) {
+        .alert("Apple Health", isPresented: $isShowingImportMessage) {
             Button("OK", role: .cancel) {}
         } message: {
             Text(importMessage)
@@ -834,6 +870,10 @@ struct HealthWorkoutRouteImportSettingsView: View {
         }
 
         return "Import all asks Apple Health for every supported workout route it can return. If iOS pauses the app, progress is saved and you can resume from there."
+    }
+
+    private func notifyActivitySettingChanged() {
+        NotificationCenter.default.post(name: HealthActivitySettings.didChangeNotification, object: nil)
     }
 
     private func notifySettingsChanged() {

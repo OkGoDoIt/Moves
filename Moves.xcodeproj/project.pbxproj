@@ -78,6 +78,8 @@
 		496C0EBDA03E81042902B6C7 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CABA752229247BA257ACCA66 /* Foundation.framework */; };
 		502B68DF30970F2E0928A9AC /* AutomaticModesSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17EFD7BE82598A100F005B0B /* AutomaticModesSettingsView.swift */; };
 		5944F68CDE472AFF7A3CB1AF /* AutomaticTransportModesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7552D35E858DD858CD8B76DE /* AutomaticTransportModesTests.swift */; };
+		B7E1A1000000000000000021 /* HealthTimelineFusionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7E1A1000000000000000020 /* HealthTimelineFusionTests.swift */; };
+		B7E1A1000000000000000023 /* HealthTimelineSyncTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7E1A1000000000000000022 /* HealthTimelineSyncTests.swift */; };
 		6312F0F3328B87FC004FC42E /* RouteFileKit in Frameworks */ = {isa = PBXBuildFile; productRef = 7A4E7D37958F185367E88D96 /* RouteFileKit */; };
 		6F0A035F0D8719A09B490E3A /* QuickLookThumbnails.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = B87FDBFBB039B94FBB82C247 /* QuickLookThumbnails.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		8066495019FF77B0EBEA3BB8 /* RoutePreviewKit in Frameworks */ = {isa = PBXBuildFile; productRef = C3B193FD766DAA87C9683AE3 /* RoutePreviewKit */; };
@@ -95,6 +97,10 @@
 		A10000012F00000100000108 /* AppIconPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012F00000100000107 /* AppIconPicker.swift */; };
 		A10000012F00000100000208 /* GeneratedAppIcons.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012F00000100000207 /* GeneratedAppIcons.swift */; };
 		A20000012FA0000100000001 /* HealthWorkoutRouteImporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000012FA0000100000000 /* HealthWorkoutRouteImporter.swift */; };
+		B7E1A1000000000000000001 /* HealthActivityReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7E1A1000000000000000000 /* HealthActivityReader.swift */; };
+		B7E1A1000000000000000003 /* HealthTimelineFusion.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7E1A1000000000000000002 /* HealthTimelineFusion.swift */; };
+		B7E1A1000000000000000005 /* HealthTimelineSync.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7E1A1000000000000000004 /* HealthTimelineSync.swift */; };
+		B7E1A1000000000000000007 /* HealthSummaryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7E1A1000000000000000006 /* HealthSummaryStore.swift */; };
 		A20000012FA0000100000003 /* WatchRouteInbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000012FA0000100000002 /* WatchRouteInbox.swift */; };
 		A20000012FA0000100000011 /* WatchMovesApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000012FA0000100000010 /* WatchMovesApp.swift */; };
 		A20000012FA0000100000013 /* WatchMovesContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000012FA0000100000012 /* WatchMovesContentView.swift */; };
@@ -384,6 +390,8 @@
 		48F925F5305B073A0011EEA3 /* M-stadt.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = "M-stadt.icon"; sourceTree = "<group>"; };
 		62E45A0423E906C4DE17343C /* QuickLookThumbnails.entitlements */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.entitlements; path = QuickLookThumbnails.entitlements; sourceTree = "<group>"; };
 		7552D35E858DD858CD8B76DE /* AutomaticTransportModesTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AutomaticTransportModesTests.swift; sourceTree = "<group>"; };
+		B7E1A1000000000000000020 /* HealthTimelineFusionTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HealthTimelineFusionTests.swift; sourceTree = "<group>"; };
+		B7E1A1000000000000000022 /* HealthTimelineSyncTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HealthTimelineSyncTests.swift; sourceTree = "<group>"; };
 		9A1B00012F00000100000001 /* MovesTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MovesTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		9A1B00012F00000100000002 /* TimelineAssemblerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineAssemblerTests.swift; sourceTree = "<group>"; };
 		C4A7E0012F00000100000004 /* CapturePolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapturePolicyTests.swift; sourceTree = "<group>"; };
@@ -394,6 +402,10 @@
 		A10000012F00000100000107 /* AppIconPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppIconPicker.swift; sourceTree = "<group>"; };
 		A10000012F00000100000207 /* GeneratedAppIcons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeneratedAppIcons.swift; sourceTree = "<group>"; };
 		A20000012FA0000100000000 /* HealthWorkoutRouteImporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthWorkoutRouteImporter.swift; sourceTree = "<group>"; };
+		B7E1A1000000000000000000 /* HealthActivityReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Health/HealthActivityReader.swift; sourceTree = "<group>"; };
+		B7E1A1000000000000000002 /* HealthTimelineFusion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Health/HealthTimelineFusion.swift; sourceTree = "<group>"; };
+		B7E1A1000000000000000004 /* HealthTimelineSync.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Health/HealthTimelineSync.swift; sourceTree = "<group>"; };
+		B7E1A1000000000000000006 /* HealthSummaryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Health/HealthSummaryStore.swift; sourceTree = "<group>"; };
 		A20000012FA0000100000002 /* WatchRouteInbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchRouteInbox.swift; sourceTree = "<group>"; };
 		A20000012FA0000100000010 /* WatchMovesApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchMovesApp.swift; sourceTree = "<group>"; };
 		A20000012FA0000100000012 /* WatchMovesContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchMovesContentView.swift; sourceTree = "<group>"; };
@@ -671,6 +683,10 @@
 				A10000012F00000100000107 /* AppIconPicker.swift */,
 				A10000012F00000100000207 /* GeneratedAppIcons.swift */,
 				A20000012FA0000100000000 /* HealthWorkoutRouteImporter.swift */,
+				B7E1A1000000000000000000 /* HealthActivityReader.swift */,
+				B7E1A1000000000000000002 /* HealthTimelineFusion.swift */,
+				B7E1A1000000000000000004 /* HealthTimelineSync.swift */,
+				B7E1A1000000000000000006 /* HealthSummaryStore.swift */,
 				A40000012FC0000100000000 /* RouteFileImport.swift */,
 				F10000013030000100000000 /* TimelineArchiveImport.swift */,
 				F10000013030000100000004 /* LocationLogImport.swift */,
@@ -807,6 +823,8 @@
 				FB00000130B000010000000A /* GoogleTimelineImporterTests.swift */,
 				C120000130C0000100000002 /* PrivacyZoneTests.swift */,
 				7552D35E858DD858CD8B76DE /* AutomaticTransportModesTests.swift */,
+				B7E1A1000000000000000020 /* HealthTimelineFusionTests.swift */,
+				B7E1A1000000000000000022 /* HealthTimelineSyncTests.swift */,
 			);
 			path = MovesTests;
 			sourceTree = "<group>";
@@ -1286,6 +1304,10 @@
 				W110000130B0000100000003 /* MovesZipArchive.swift in Sources */,
 				489A76492C4FDE1E00F43B69 /* VisitedLocation.swift in Sources */,
 				A20000012FA0000100000001 /* HealthWorkoutRouteImporter.swift in Sources */,
+				B7E1A1000000000000000001 /* HealthActivityReader.swift in Sources */,
+				B7E1A1000000000000000003 /* HealthTimelineFusion.swift in Sources */,
+				B7E1A1000000000000000005 /* HealthTimelineSync.swift in Sources */,
+				B7E1A1000000000000000007 /* HealthSummaryStore.swift in Sources */,
 				A40000012FC0000100000001 /* RouteFileImport.swift in Sources */,
 				F10000013030000100000001 /* TimelineArchiveImport.swift in Sources */,
 				F10000013030000100000005 /* LocationLogImport.swift in Sources */,
@@ -1410,6 +1432,8 @@
 				FB00000130B000010000000B /* GoogleTimelineImporterTests.swift in Sources */,
 				C120000130C0000100000003 /* PrivacyZoneTests.swift in Sources */,
 				5944F68CDE472AFF7A3CB1AF /* AutomaticTransportModesTests.swift in Sources */,
+				B7E1A1000000000000000021 /* HealthTimelineFusionTests.swift in Sources */,
+				B7E1A1000000000000000023 /* HealthTimelineSyncTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

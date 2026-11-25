@@ -308,21 +308,9 @@ private actor HealthWorkoutRouteImportWorker {
         workout.startDate.addingTimeInterval(-0.001)
     }
 
+    /// One request for everything Moves reads, so the Health sheet appears once.
     private func requestAuthorizationIfNeeded() async throws {
-        let readTypes: Set<HKObjectType> = [
-            HKObjectType.workoutType(),
-            HKSeriesType.workoutRoute()
-        ]
-
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            healthStore.requestAuthorization(toShare: [], read: readTypes) { _, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume()
-                }
-            }
-        }
+        try await MovesHealthAuthorization.request(on: healthStore)
     }
 
     private func workoutSamples(

@@ -182,9 +182,12 @@ struct AutomaticModeHistory {
         let proposed = TransportSpeedEvidence(locations: locations).inferredMode
         let direct = first.distance(from: last)
         let duration = move.endDate.timeIntervalSince(move.startDate)
+        // Health's merged steps when known: the stored count is 0 for "no data" too.
+        let stepCount = HealthStepEvidenceLookup.evidence(for: move.id)?.classifierStepCount(stored: move.stepCount)
+            ?? move.stepCount
         let corrected = ImplausibleWalk.refinedMode(
-            proposed: LastBlockWalk.mode(proposed: proposed, distance: direct, duration: duration, stepCount: move.stepCount),
-            straightLine: direct, duration: duration, stepCount: move.stepCount, locations: locations
+            proposed: LastBlockWalk.mode(proposed: proposed, distance: direct, duration: duration, stepCount: stepCount),
+            straightLine: direct, duration: duration, stepCount: stepCount, locations: locations
         )
         let plausible = CoreMotionTransportClassifier.rejectingImplausibleContinuousTrip(
             corrected, duration: duration, straightLineDistance: direct
