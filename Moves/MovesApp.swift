@@ -232,6 +232,7 @@ private final class MovesRuntime: ObservableObject {
         MovesIntentRuntime.shared.configure(modelContainer: container, captureManager: captureManager)
         MovesAppShortcuts.updateAppShortcutParameters()
         if !ProcessInfo.processInfo.isRunningUnitTests {
+            Task(priority: .utility) { await DiagnosticsLog.shared.start() }
             TimelineSchemaUpgrader.runIfNeeded(container: container)
             TimelineSchemaUpgrader.removeRejectedPhotoStaysIfAny(container: container)
         }
@@ -301,6 +302,8 @@ private struct MovesRunningContent: View {
         .onChange(of: scenePhase) { _, newPhase in
             importQueue.sceneChanged(newPhase)
             photoLibraryController.sceneChanged(isActive: newPhase == .active)
+            // Leaving and returning are when the log is most worth having on disk.
+            Task(priority: .utility) { await DiagnosticsLog.shared.export() }
             if newPhase == .active {
                 DailyTimelineBackup.scheduleNextRun()
                 ShareMapAggregateBackgroundTask.scheduleNextRun()
