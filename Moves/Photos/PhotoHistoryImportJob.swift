@@ -29,11 +29,15 @@ struct PhotoHistoryJob: Codable, Equatable, Sendable {
     var report = PhotoHistoryImportReport()
     var message: String?
     var finishedAt: Date?
+    /// Photos passed over because another device took them.
+    var otherDevicePhotoCount = 0
     /// Capture time of the oldest photo imported so far.
     var earliestPhotoAt: Date?
     /// Times the step at `cursor` began without finishing. Two means it is the step
     /// itself that stops Moves, so the import waits to be resumed by hand.
     var unfinishedStepStarts = 0
+    /// Times reading the camera roll began without finishing.
+    var ledgerAttempts = 0
 
     var fractionComplete: Double {
         guard state != .finished else { return 1 }
@@ -124,9 +128,11 @@ enum PhotoHistoryPaging {
 }
 
 /// Runs a photo-history job one step at a time.
-struct PhotoHistoryImportRunner: Sendable {
+struct PhotoHistoryImportRunner: @unchecked Sendable {
     let provider: any PhotoAssetProviding
     let container: ModelContainer
+    /// Where the owner's camera models are kept. Without one, models are not read.
+    var rosterStore: OwnCameraRosterStore?
     /// Photos looked at per step. A step saves once and takes a second or two.
     var pageSize = 1_500
     /// A step grows until it ends between outings, but not past this many photos.
@@ -145,19 +151,34 @@ struct PhotoHistoryImportRunner: Sendable {
         )
     }
 
+    /// Which camera-roll items are the owner's phone, for the whole of the job's range.
+    ///
+    /// Nothing about it is saved: it is rebuilt from the library whenever the import
+    /// starts or resumes, so an interruption while it is being worked out costs nothing.
+    func makeLedger(for job: PhotoHistoryJob) async throws -> OwnDeviceLedger {
+        try await provider.ownDeviceLedger(around: DateInterval(start: job.rangeStart, end: job.rangeEnd))
+    }
+
     /// Imports the newest photos before the job's cursor and returns the job moved past them.
-    func runStep(_ job: PhotoHistoryJob) async throws -> PhotoHistoryJob {
+    func runStep(_ job: PhotoHistoryJob, ledger: OwnDeviceLedger? = nil) async throws -> PhotoHistoryJob {
         var limit = pageSize
         var found: PhotoHistoryPaging.Batch?
+        var otherDeviceCount = 0
         while found == nil {
             let page = try await provider.newestAssets(
                 in: DateInterval(start: job.rangeStart, end: max(job.cursor, job.rangeStart)),
                 limit: limit
             )
             try Task.checkCancellation()
+            let photos = page.assets.map { $0.resolved(with: ledger) }
+            // Another device's photo is someone else's whereabouts however it is asked for.
+            let usable = job.includesSavedPhotos
+                ? photos.filter { !$0.isFromAnotherDevice }
+                : photos.filter(\.isCameraCapture)
+            otherDeviceCount = photos.count(where: \.isFromAnotherDevice)
             found = PhotoHistoryPaging.batch(
                 from: page,
-                usable: job.includesSavedPhotos ? page.assets : page.assets.filter(\.isCameraCapture),
+                usable: usable,
                 cursor: job.cursor,
                 start: job.rangeStart,
                 limit: limit,
@@ -166,7 +187,8 @@ struct PhotoHistoryImportRunner: Sendable {
             )
             limit *= 2
         }
-        guard let batch = found else { return job }
+        guard var batch = found else { return job }
+        batch.assets = await withoutStrayCameras(batch.assets)
 
         let context = ModelContext(container)
         context.autosaveEnabled = false
@@ -175,6 +197,7 @@ struct PhotoHistoryImportRunner: Sendable {
 
         var next = job
         next.report = job.report + stepReport
+        next.otherDevicePhotoCount += otherDeviceCount
         next.unfinishedStepStarts = 0
         next.cursor = batch.nextCursor
         if let oldest = batch.assets.first?.capturedAt {
@@ -190,5 +213,27 @@ struct PhotoHistoryImportRunner: Sendable {
             )
         }
         return next
+    }
+
+    /// Reads the camera model from the photos whose original is on the phone, adds them to
+    /// the roster of the owner's phones, and drops the few whose model is a stranger to
+    /// the month they were taken in.
+    private func withoutStrayCameras(_ assets: [PhotoAssetDescriptor]) async -> [PhotoAssetDescriptor] {
+        guard let rosterStore else { return assets }
+        let own = assets.filter(\.isCameraCapture)
+        let models = await provider.cameraModels(for: own.map(\.localIdentifier))
+        guard !models.isEmpty else { return assets }
+
+        var roster = rosterStore.load()
+        for photo in own {
+            if let model = models[photo.localIdentifier] {
+                roster.record(model: model, capturedAt: photo.capturedAt)
+            }
+        }
+        rosterStore.save(roster)
+        return assets.filter { photo in
+            guard photo.isCameraCapture, let model = models[photo.localIdentifier] else { return true }
+            return !roster.isStray(model: model, capturedAt: photo.capturedAt)
+        }
     }
 }

@@ -8,6 +8,8 @@ struct PhotoHistoryPreview: Sendable, Equatable {
     var geotaggedPhotoCount = 0
     /// Saved, received, or imported photos the import leaves out.
     var skippedPhotoCount = 0
+    /// Photos another device took, which are never read.
+    var otherDevicePhotoCount = 0
     var estimatedVisitCount = 0
     var dayCount = 0
 
@@ -162,12 +164,16 @@ struct PhotoHistoryImporter {
         configuration: Configuration = Configuration()
     ) -> PhotoHistoryPreview {
         let geotagged = Self.geotagged(assets, in: interval)
-        let filtered = includesSavedPhotos ? geotagged : geotagged.filter(\.isCameraCapture)
+        let otherDevices = geotagged.count(where: \.isFromAnotherDevice)
+        let filtered = includesSavedPhotos
+            ? geotagged.filter { !$0.isFromAnotherDevice }
+            : geotagged.filter(\.isCameraCapture)
         let stays = clusterStays(filtered, configuration: configuration)
         let days = Set(stays.map { DayTimeline.makeDayKey(for: $0.arrivalDate) })
         return PhotoHistoryPreview(
             geotaggedPhotoCount: filtered.count,
-            skippedPhotoCount: geotagged.count - filtered.count,
+            skippedPhotoCount: geotagged.count - filtered.count - otherDevices,
+            otherDevicePhotoCount: otherDevices,
             estimatedVisitCount: stays.count,
             dayCount: days.count
         )

@@ -153,6 +153,20 @@ was saved, received, or imported: a camera photo's `addedDate` matches its captu
 PhotoKit has no "taken on this device" flag, and screenshots and shared albums are dropped
 at the fetch.
 
+That rule alone cannot tell the owner's phone from a partner's in an iCloud Shared Library
+(public PhotoKit exposes neither the library scope nor the camera model). `OwnDeviceLedger`
+does it from the camera's file counter (`IMG_4317`): each device counts upward on its own,
+screenshots share the counter and mark the owner's run, and a run alongside the owner's is
+another device. It is rebuilt from the library on every import start, resume, and new-photo
+check and is never stored. Measured on a 381,000-item library with Shared Library ground
+truth (2023 on): 1.4% of the other phone's photos kept, 0.8% of the owner's dropped. When
+it cannot tell (no file names, or no screenshots) `PhotoAssetDescriptor.resolved(with:)`
+falls back to the added-when-taken rule. `OwnCameraRoster` reads the camera model from
+originals already on the phone (first kilobytes only, never from iCloud), labels the
+owner's phones over the years, drops a model that is a stranger to its month, and makes a
+new model wait for three photos in a row before its fixes are used. Do not replace this
+with private PhotoKit property sets without asking Roger: he chose public API only.
+
 - **History.** `PhotoHistoryJob` (UserDefaults, never the timeline store) records the range
   and how far back the import has got. `PhotoHistoryImportRunner` runs it newest photo
   first, about 1,500 photos per step, one save per step; a step grows until it ends between

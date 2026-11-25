@@ -558,6 +558,131 @@ final class PhotoHistoryImporterTests: XCTestCase {
         XCTAssertEqual(Set(selection.handled.keys), ["seen", "vague", "abroad", "mine"])
     }
 
+    // MARK: - Whose phone took it
+
+    func testLedgerSeparatesTwoPhonesByTheirFileCounters() {
+        var entries: [CameraRollEntry] = []
+        var mine: [CameraRollEntry] = []
+        var theirs: [CameraRollEntry] = []
+        // Two phones of any model share a library for three weeks. Mine also takes screenshots;
+        // theirs starts a few numbers ahead of mine, the hardest place for it to be.
+        for step in 0..<600 {
+            let time = epoch.addingTimeInterval(Double(step) * 3_000)
+            let own = CameraRollEntry(addedAt: time, number: (9_700 + step) % 10_000, isScreenshot: step % 25 == 0)
+            entries.append(own)
+            if !own.isScreenshot { mine.append(own) }
+            if step % 3 == 0 {
+                let other = CameraRollEntry(
+                    addedAt: time.addingTimeInterval(700),
+                    number: (9_712 + step / 3) % 10_000,
+                    isScreenshot: false
+                )
+                entries.append(other)
+                theirs.append(other)
+            }
+        }
+        // My phone again after a pause and a burst I deleted, with no screenshot yet.
+        let later = (0..<40).map {
+            CameraRollEntry(addedAt: epoch.addingTimeInterval(2_400_000 + Double($0) * 60), number: 700 + $0, isScreenshot: false)
+        }
+        entries += later
+
+        let ledger = OwnDeviceLedger(entries: entries.shuffled())
+
+        let keptMine = mine.count { ledger.contains(addedAt: $0.addedAt, number: $0.number) }
+        let keptTheirs = theirs.count { ledger.contains(addedAt: $0.addedAt, number: $0.number) }
+        XCTAssertGreaterThan(Double(keptMine), 0.97 * Double(mine.count))
+        XCTAssertLessThan(Double(keptTheirs), 0.05 * Double(theirs.count), "The other phone's photos are not mine")
+        XCTAssertTrue(later.allSatisfy { ledger.contains(addedAt: $0.addedAt, number: $0.number) }, "A run that continues my counter is mine")
+    }
+
+    func testPhotoOriginFallsBackWhenTheLedgerCannotTell() {
+        let added = epoch.addingTimeInterval(3)
+        let photo = PhotoAssetDescriptor(
+            localIdentifier: "p", capturedAt: epoch, latitude: home.latitude, longitude: home.longitude,
+            addedAt: added, rollNumber: 4_317
+        )
+        // No file names at all, or a library without one screenshot: the older rule stands.
+        XCTAssertTrue(photo.resolved(with: nil).isCameraCapture)
+        XCTAssertTrue(photo.resolved(with: OwnDeviceLedger(entries: [])).isCameraCapture)
+        let noScreenshots = OwnDeviceLedger(entries: (0..<50).map {
+            CameraRollEntry(addedAt: added.addingTimeInterval(Double($0)), number: 4_317 + $0, isScreenshot: false)
+        })
+        XCTAssertTrue(photo.resolved(with: noScreenshots).isCameraCapture)
+
+        // With screenshots on another counter, this photo is someone else's.
+        let elsewhere = OwnDeviceLedger(entries: (0..<50).map {
+            CameraRollEntry(addedAt: added.addingTimeInterval(Double($0)), number: 100 + $0, isScreenshot: $0 % 5 == 0)
+        } + [CameraRollEntry(addedAt: added, number: 4_317, isScreenshot: false)])
+        let resolved = photo.resolved(with: elsewhere)
+        XCTAssertFalse(resolved.isCameraCapture)
+        XCTAssertTrue(resolved.isFromAnotherDevice)
+        XCTAssertEqual(CameraRollEntry.number(inFileName: "IMG_4317.HEIC"), 4_317)
+        XCTAssertNil(CameraRollEntry.number(inFileName: "FullSizeRender.jpg"))
+        XCTAssertNil(CameraRollEntry.number(inFileName: "IMG_E4317.JPG"))
+    }
+
+    func testAnotherPhonesPhotosAreNeverImported() async throws {
+        let (_, container) = try makeContext()
+        func shot(_ id: String, minute: Double, number: Int, at place: CLLocationCoordinate2D) -> PhotoAssetDescriptor {
+            let time = epoch.addingTimeInterval(minute * 60)
+            return PhotoAssetDescriptor(
+                localIdentifier: id, capturedAt: time, latitude: place.latitude, longitude: place.longitude,
+                addedAt: time.addingTimeInterval(1), rollNumber: number
+            )
+        }
+        let mine = (0..<6).map { shot("mine-\($0)", minute: Double($0) * 3, number: 2_000 + $0 * 2, at: home) }
+        let theirs = (0..<6).map { shot("theirs-\($0)", minute: Double($0) * 3 + 1, number: 6_500 + $0, at: saigon) }
+        let screenshots = (0..<6).map {
+            CameraRollEntry(addedAt: epoch.addingTimeInterval(Double($0) * 180 + 30), number: 2_001 + $0 * 2, isScreenshot: true)
+        }
+        let defaults = UserDefaults(suiteName: "photo-roster-\(UUID().uuidString)")!
+        let provider = FakePhotoAssetProvider(
+            assets: mine + theirs,
+            otherRollEntries: screenshots,
+            models: Dictionary(uniqueKeysWithValues: mine.map { ($0.localIdentifier, "iPhone 17") })
+        )
+        let runner = PhotoHistoryImportRunner(
+            provider: provider, container: container, rosterStore: OwnCameraRosterStore(defaults: defaults)
+        )
+        // Even when saved photos are asked for.
+        var job = try await runner.makeJob(
+            in: DateInterval(start: epoch.addingTimeInterval(-60), end: epoch.addingTimeInterval(3_600)),
+            includesSavedPhotos: true
+        )
+        let ledger = try await runner.makeLedger(for: job)
+        job = try await runner.runStep(job, ledger: ledger)
+
+        let attached = Set(try ModelContext(container).fetch(FetchDescriptor<PhotoAttachment>()).map(\.assetLocalIdentifier))
+        XCTAssertEqual(attached, Set(mine.map(\.localIdentifier)))
+        XCTAssertEqual(job.otherDevicePhotoCount, 6)
+        XCTAssertEqual(OwnCameraRosterStore(defaults: defaults).load().periods(calendar: gmt).map(\.model), ["iPhone 17"])
+    }
+
+    func testRosterFollowsAReplacementPhoneAndDoubtsAStray() {
+        var roster = OwnCameraRoster()
+        func photos(_ model: String, _ ids: Range<Int>, day: Double) -> [(id: String, model: String?, capturedAt: Date)] {
+            ids.map { ("\(model)-\($0)", model, epoch.addingTimeInterval(day * 86_400 + Double($0) * 60)) }
+        }
+        XCTAssertEqual(roster.acceptNew(photos("iPhone 16 Pro", 0..<8, day: 0)).count, 8)
+
+        // One photo from another model among mine waits; mine carry on.
+        let mixed = photos("iPhone 16 Pro", 8..<10, day: 1) + photos("iPhone 12", 0..<1, day: 1) + photos("iPhone 16 Pro", 10..<12, day: 1)
+        XCTAssertEqual(roster.acceptNew(mixed).sorted(), ["iPhone 16 Pro-10", "iPhone 16 Pro-11", "iPhone 16 Pro-8", "iPhone 16 Pro-9"])
+
+        // A new phone: its first photos are taken in a row and nothing follows from the old one.
+        XCTAssertEqual(roster.acceptNew(photos("iPhone 17", 0..<2, day: 40)).count, 0, "Two photos are not yet a new phone")
+        XCTAssertEqual(roster.acceptNew(photos("iPhone 17", 0..<4, day: 40)).count, 4, "The same photos count once a third joins them")
+        XCTAssertEqual(roster.periods(calendar: gmt).map(\.model), ["iPhone 16 Pro", "iPhone 17"])
+
+        // In history, a model that is rare in its month is a stray; a file that cannot be read is not judged.
+        for _ in 0..<30 { roster.record(model: "iPhone 16 Pro", capturedAt: epoch.addingTimeInterval(-100 * 86_400)) }
+        roster.record(model: "iPhone 12", capturedAt: epoch.addingTimeInterval(-100 * 86_400))
+        XCTAssertTrue(roster.isStray(model: "iPhone 12", capturedAt: epoch.addingTimeInterval(-100 * 86_400)))
+        XCTAssertFalse(roster.isStray(model: "iPhone 16 Pro", capturedAt: epoch.addingTimeInterval(-100 * 86_400)))
+        XCTAssertFalse(roster.isStray(model: "iPhone 12", capturedAt: epoch.addingTimeInterval(-400 * 86_400)))
+    }
+
     // MARK: - Helpers
 
     /// Three weeks of outings a few stops long, with saved photos and photos without a

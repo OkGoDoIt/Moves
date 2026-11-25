@@ -51,11 +51,139 @@ actor PhotoLibraryService: PhotoAssetProviding {
         return Self.fetch(in: interval).count
     }
 
-    /// Still images in the person's own library: all of `interval` oldest first, or only
-    /// its newest few. Shared albums and photos synced from a computer belong to other
+    func cameraRoll(in interval: DateInterval) async throws -> [CameraRollEntry] {
+        guard hasReadAccess else { return [] }
+        var entries: [CameraRollEntry] = []
+        Self.fetch(in: interval, stillsOnly: false).enumerateObjects { asset, _, stop in
+            if Task.isCancelled {
+                stop.pointee = true
+                return
+            }
+            // PhotoKit objects pile up across a library of hundreds of thousands otherwise.
+            autoreleasepool {
+                guard let capturedAt = asset.creationDate,
+                      let addedAt = asset.addedDate,
+                      PhotoCaptureClassifier.isCameraCapture(capturedAt: capturedAt, addedAt: addedAt),
+                      let number = CameraRollEntry.number(inFileName: Self.originalFileName(of: asset))
+                else { return }
+                entries.append(
+                    CameraRollEntry(
+                        addedAt: addedAt,
+                        number: number,
+                        isScreenshot: asset.mediaSubtypes.contains(.photoScreenshot)
+                    )
+                )
+            }
+        }
+        try Task.checkCancellation()
+        return entries
+    }
+
+    func cameraModels(for identifiers: [String]) async -> [String: String] {
+        guard hasReadAccess, !identifiers.isEmpty else { return [:] }
+        var resources: [(String, PHAssetResource)] = []
+        PHAsset.fetchAssets(withLocalIdentifiers: identifiers, options: nil).enumerateObjects { asset, _, _ in
+            let all = PHAssetResource.assetResources(for: asset)
+            if let resource = all.first(where: { $0.type == .photo }) ?? all.first {
+                resources.append((asset.localIdentifier, resource))
+            }
+        }
+
+        var models: [String: String] = [:]
+        // A few at a time: each read is a short burst of disk, not CPU.
+        for batch in stride(from: 0, to: resources.count, by: 6).map({ resources[$0..<min($0 + 6, resources.count)] }) {
+            await withTaskGroup(of: (String, String?).self) { group in
+                for (identifier, resource) in batch {
+                    group.addTask { (identifier, await Self.cameraModel(in: resource)) }
+                }
+                for await (identifier, model) in group {
+                    models[identifier] = model
+                }
+            }
+            if Task.isCancelled { break }
+        }
+        return models
+    }
+
+    /// Reads the start of a photo's original file, where the camera wrote its make and
+    /// model, and stops. Fails at once when the original is only in iCloud.
+    private static func cameraModel(in resource: PHAssetResource) async -> String? {
+        let options = PHAssetResourceRequestOptions()
+        options.isNetworkAccessAllowed = false
+
+        final class Reading: @unchecked Sendable {
+            var data = Data()
+            var model: String?
+            var request: PHAssetResourceDataRequestID?
+            var isDone = false
+        }
+        let reading = Reading()
+        let lock = NSLock()
+
+        return await withCheckedContinuation { continuation in
+            let request = PHAssetResourceManager.default().requestData(for: resource, options: options) { chunk in
+                lock.lock()
+                defer { lock.unlock() }
+                guard !reading.isDone else { return }
+                reading.data.append(chunk)
+                // The header is in the first few kilobytes of a JPEG and a little further
+                // into a HEIC. Past half a megabyte it is not coming.
+                guard reading.data.count >= 32 * 1024 else { return }
+                reading.model = Self.cameraModel(inFilePrefix: reading.data)
+                if reading.model != nil || reading.data.count >= 512 * 1024 {
+                    reading.isDone = true
+                    if let request = reading.request {
+                        PHAssetResourceManager.default().cancelDataRequest(request)
+                    }
+                }
+            } completionHandler: { _ in
+                lock.lock()
+                let model = reading.model ?? (reading.data.isEmpty ? nil : Self.cameraModel(inFilePrefix: reading.data))
+                reading.isDone = true
+                lock.unlock()
+                continuation.resume(returning: model)
+            }
+            lock.lock()
+            reading.request = request
+            let finishedEarly = reading.isDone
+            lock.unlock()
+            if finishedEarly {
+                PHAssetResourceManager.default().cancelDataRequest(request)
+            }
+        }
+    }
+
+    static func cameraModel(inFilePrefix data: Data) -> String? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let tiff = properties[kCGImagePropertyTIFFDictionary] as? [CFString: Any],
+              let model = (tiff[kCGImagePropertyTIFFModel] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !model.isEmpty
+        else { return nil }
+        return model
+    }
+
+    /// The name the camera gave the file. iOS 27 keeps it with the asset; before that it
+    /// is on the asset's resources, which costs a lookup per photo.
+    private static func originalFileName(of asset: PHAsset) -> String? {
+        if #available(iOS 27, *) {
+            return asset.extendedMetadata.originalFilename
+        }
+        return PHAssetResource.assetResources(for: asset).first?.originalFilename
+    }
+
+    /// Items in the person's own library: all of `interval` oldest first, or only its
+    /// newest few. Shared albums and photos synced from a computer belong to other
     /// libraries and are left out.
-    private static func fetch(in interval: DateInterval, newest limit: Int? = nil) -> PHFetchResult<PHAsset> {
+    private static func fetch(
+        in interval: DateInterval,
+        newest limit: Int? = nil,
+        stillsOnly: Bool = true
+    ) -> PHFetchResult<PHAsset> {
         let options = PHFetchOptions()
+        if #available(iOS 27, *) {
+            options.prefetchAssetExtendedMetadata = true
+        }
         options.predicate = NSPredicate(
             format: "creationDate >= %@ AND creationDate < %@",
             interval.start as NSDate,
@@ -66,7 +194,7 @@ actor PhotoLibraryService: PhotoAssetProviding {
         options.includeAssetSourceTypes = [.typeUserLibrary]
         options.wantsIncrementalChangeDetails = false
         options.fetchLimit = limit ?? 0
-        return PHAsset.fetchAssets(with: .image, options: options)
+        return stillsOnly ? PHAsset.fetchAssets(with: .image, options: options) : PHAsset.fetchAssets(with: options)
     }
 
     /// Reads only what PhotoKit keeps in its database, so nothing is downloaded from iCloud.
@@ -82,6 +210,10 @@ actor PhotoLibraryService: PhotoAssetProviding {
             page.earliestScannedAt = min(page.earliestScannedAt ?? capturedAt, capturedAt)
             // A screenshot shows a place; it wasn't taken there.
             guard !asset.mediaSubtypes.contains(.photoScreenshot), let location = asset.location else { return }
+            let addedWhenTaken = PhotoCaptureClassifier.isCameraCapture(
+                capturedAt: capturedAt,
+                addedAt: asset.addedDate
+            )
             page.assets.append(
                 PhotoAssetDescriptor(
                     localIdentifier: asset.localIdentifier,
@@ -89,10 +221,11 @@ actor PhotoLibraryService: PhotoAssetProviding {
                     latitude: location.coordinate.latitude,
                     longitude: location.coordinate.longitude,
                     horizontalAccuracy: location.horizontalAccuracy > 0 ? location.horizontalAccuracy : nil,
-                    isCameraCapture: PhotoCaptureClassifier.isCameraCapture(
-                        capturedAt: capturedAt,
-                        addedAt: asset.addedDate
-                    )
+                    isCameraCapture: addedWhenTaken,
+                    addedAt: asset.addedDate,
+                    rollNumber: addedWhenTaken
+                        ? CameraRollEntry.number(inFileName: Self.originalFileName(of: asset))
+                        : nil
                 )
             )
         }
@@ -165,6 +298,10 @@ final class PhotoLibraryController: ObservableObject {
     @Published private(set) var isHistoryImportWorking = false
     /// How long the rest of the history import should take at the pace so far.
     @Published private(set) var historyTimeRemaining: TimeInterval?
+    /// True while the import is working out which photos the owner's phone took.
+    @Published private(set) var isReadingLibrary = false
+    /// The owner's phones over the years, as far as the photos on this device show.
+    @Published private(set) var ownCameraPeriods: [OwnCameraRoster.Period] = []
     @Published private(set) var isCheckingRecentPhotos = false
     @Published private(set) var fixStatus = PhotoFixStatus()
     @Published private(set) var lastErrorMessage: String?
@@ -201,6 +338,7 @@ final class PhotoLibraryController: ObservableObject {
         self.defaults = defaults
         self.jobStore = PhotoHistoryJobStore(defaults: defaults)
         self.authorizationStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        ownCameraPeriods = OwnCameraRosterStore(defaults: defaults).load().periods()
         refreshFixStatus()
 
         var job = jobStore.load()
@@ -297,7 +435,8 @@ final class PhotoLibraryController: ObservableObject {
     func previewHistory(in interval: DateInterval, includesSavedPhotos: Bool) async throws -> PhotoHistoryPreview {
         let service = service
         return try await importWorkerValue(Task.detached(priority: .userInitiated) {
-            let assets = try await service.geotaggedAssets(in: interval)
+            let ledger = try await service.ownDeviceLedger(around: interval)
+            let assets = try await service.geotaggedAssets(in: interval).map { $0.resolved(with: ledger) }
             try Task.checkCancellation()
             return PhotoHistoryImporter.preview(
                 assets: assets,
@@ -347,7 +486,11 @@ final class PhotoLibraryController: ObservableObject {
     }
 
     private var historyRunner: PhotoHistoryImportRunner {
-        PhotoHistoryImportRunner(provider: service, container: modelContainer)
+        PhotoHistoryImportRunner(
+            provider: service,
+            container: modelContainer,
+            rosterStore: OwnCameraRosterStore(defaults: defaults)
+        )
     }
 
     private func setHistoryJob(_ job: PhotoHistoryJob?) {
@@ -364,19 +507,46 @@ final class PhotoLibraryController: ObservableObject {
             await TimelineSchemaUpgrader.waitUntilFinished()
             var wroteAnything = false
             var pace: (since: Date, remaining: Int, steps: Int)?
+            var ledger: (job: UUID, value: OwnDeviceLedger?)?
             while let self, !Task.isCancelled, self.isSceneActive,
                   var job = self.historyJob, job.state == .running {
+                if ledger?.job != job.id {
+                    // Working out which photos the owner's phone took reads the whole
+                    // range once. If that itself has stopped Moves twice, the import goes
+                    // on without it rather than never finishing.
+                    if job.ledgerAttempts < 2 {
+                        job.ledgerAttempts += 1
+                        self.setHistoryJob(job)
+                        self.isReadingLibrary = true
+                        let reading = job
+                        let built = try? await Task.detached(priority: .utility) {
+                            try await runner.makeLedger(for: reading)
+                        }.value
+                        self.isReadingLibrary = false
+                        ledger = (job.id, built)
+                        Self.log.info(
+                            "Camera roll read: \(built?.ownItemCount ?? 0) items from this phone, \(built?.otherItemCount ?? 0) from other devices"
+                        )
+                        guard var current = self.historyJob, current.id == job.id else { continue }
+                        current.ledgerAttempts = 0
+                        self.setHistoryJob(current)
+                        continue
+                    }
+                    ledger = (job.id, nil)
+                    Self.log.error("Camera roll could not be read twice; importing without it")
+                }
                 job.unfinishedStepStarts += 1
                 self.setHistoryJob(job)
                 self.isHistoryImportWorking = true
                 let started = job
+                let ownDevices = ledger?.value
                 if pace == nil {
                     pace = (.now, started.remainingPhotoCount, 0)
                 }
                 do {
                     let advanced = try await Self.withStoreWriteTime(named: "Photo history") {
                         try await Task.detached(priority: .utility) {
-                            try await runner.runStep(started)
+                            try await runner.runStep(started, ledger: ownDevices)
                         }.value
                     }
                     wroteAnything = true
@@ -411,7 +581,9 @@ final class PhotoLibraryController: ObservableObject {
             guard let self else { return }
             self.historyTask = nil
             self.isHistoryImportWorking = false
+            self.isReadingLibrary = false
             self.historyTimeRemaining = nil
+            self.ownCameraPeriods = OwnCameraRosterStore(defaults: self.defaults).load().periods()
             if wroteAnything {
                 PhotoHistoryImporter.announceChanges()
                 if self.historyJob?.state == .finished {
@@ -481,11 +653,18 @@ final class PhotoLibraryController: ObservableObject {
         let container = modelContainer
 
         do {
-            let assets = try await service.geotaggedAssets(in: interval)
-            guard !assets.isEmpty else {
+            let found = try await service.geotaggedAssets(in: interval)
+            guard !found.isEmpty else {
                 defaults.set(now, forKey: PhotoLibrarySettings.lastAttachPassAtKey)
                 return
             }
+            // Which of them this phone took. Without file names the ledger is empty and a
+            // photo added when it was taken still counts.
+            let service = service
+            let ledger = try? await Task.detached(priority: .utility) {
+                try await service.ownDeviceLedger(around: interval)
+            }.value
+            let assets = found.map { $0.resolved(with: ledger) }
 
             if usesFixes, let ingestFixes {
                 let handled = loadFixTimes(PhotoLibrarySettings.handledFixesKey)
@@ -497,20 +676,42 @@ final class PhotoLibraryController: ObservableObject {
                         now: now
                     )
                 }.value
-                if !selection.accepted.isEmpty {
-                    await ingestFixes(selection.accepted.compactMap(\.fixLocation))
+
+                // Last check: the camera model in the file. A new model waits until it has
+                // taken a few photos in a row, so a replacement phone is picked up and a
+                // stray photo from someone else's is not.
+                var accepted = selection.accepted
+                var nowHandled = selection.handled
+                if !accepted.isEmpty {
+                    let models = await service.cameraModels(for: accepted.map(\.localIdentifier))
+                    let rosterStore = OwnCameraRosterStore(defaults: defaults)
+                    var roster = rosterStore.load()
+                    let confirmed = roster.acceptNew(
+                        accepted.map { ($0.localIdentifier, models[$0.localIdentifier], $0.capturedAt) }
+                    )
+                    rosterStore.save(roster)
+                    ownCameraPeriods = roster.periods()
+                    for photo in accepted where !confirmed.contains(photo.localIdentifier) {
+                        nowHandled[photo.localIdentifier] = nil
+                    }
+                    accepted = accepted.filter { confirmed.contains($0.localIdentifier) }
+                }
+
+                if !accepted.isEmpty {
+                    await ingestFixes(accepted.compactMap(\.fixLocation))
                     var used = loadFixTimes(PhotoLibrarySettings.usedFixesKey)
-                    for photo in selection.accepted {
+                    for photo in accepted {
                         used[photo.localIdentifier] = photo.capturedAt
                     }
                     saveFixTimes(used, key: PhotoLibrarySettings.usedFixesKey)
                 }
-                let cameraCount = assets.count(where: \.isCameraCapture)
+                let ownCount = assets.count(where: \.isCameraCapture)
+                let otherCount = assets.count(where: \.isFromAnotherDevice)
                 Self.log.info(
-                    "New photo check: \(assets.count) with a location, \(cameraCount) from the camera, \(selection.accepted.count) added as fixes"
+                    "New photo check: \(assets.count) with a location, \(ownCount) from this phone, \(otherCount) from other devices, \(accepted.count) added as fixes"
                 )
-                if selection.handled != handled {
-                    saveFixTimes(selection.handled, key: PhotoLibrarySettings.handledFixesKey)
+                if nowHandled != handled {
+                    saveFixTimes(nowHandled, key: PhotoLibrarySettings.handledFixesKey)
                 }
             }
 
