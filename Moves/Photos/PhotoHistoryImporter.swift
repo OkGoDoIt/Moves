@@ -55,6 +55,12 @@ struct PhotoHistoryStay: Sendable {
         CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
     }
 
+    /// At most `count` of the photos, evenly spread, the first and last among them.
+    func spread(_ count: Int) -> [PhotoAssetDescriptor] {
+        guard assets.count > count, count > 1 else { return assets }
+        return (0..<count).map { assets[$0 * (assets.count - 1) / (count - 1)] }
+    }
+
     var locationLogStay: LocationLogStay {
         LocationLogStay(
             arrivalDate: arrivalDate,
@@ -106,6 +112,11 @@ struct PhotoHistoryImporter {
         var minimumFlightDistance: CLLocationDistance = 150_000
         /// Faster than any airliner door to door: one of the two photos is wrong.
         var maximumFlightKilometersPerHour: Double = 1_000
+        /// Every row costs about 3.5 KB of iCloud bookkeeping on the phone, so a burst of two
+        /// hundred photos at one stop is kept as a few spread across it, always with the
+        /// first and the last.
+        var maximumPhotosPerStay = 8
+        var maximumFixesPerStay = 4
         /// A stop the person removed is not rebuilt from photos taken this close to it.
         var removedStopMatchDistance: CLLocationDistance = 200
 
@@ -263,14 +274,14 @@ struct PhotoHistoryImporter {
                 } else if visit != nil {
                     report.reusedVisitCount += 1
                 }
-                for asset in stay.assets {
+                usedAssetIDs.formUnion(stay.assets.map(\.localIdentifier))
+                for asset in stay.spread(configuration.maximumPhotosPerStay) {
                     if try attach(asset, to: visit, step: &step) {
                         report.attachedPhotoCount += 1
                         if visit == nil {
                             report.dayOnlyAttachmentCount += 1
                         }
                     }
-                    usedAssetIDs.insert(asset.localIdentifier)
                 }
                 if let visit {
                     if let previous, try insertMoveIfNeeded(from: previous, to: visit, step: &step) {
@@ -674,7 +685,7 @@ struct PhotoHistoryImporter {
                 }
                 // Photos the visit did not have before bring their fixes with them.
                 _ = try repository.appendSamples(
-                    from: stay.assets.compactMap(\.locationLogPoint).map(\.location),
+                    from: stay.spread(configuration.maximumFixesPerStay).compactMap(\.locationLogPoint).map(\.location),
                     source: .photoLibrary
                 )
             }
@@ -698,7 +709,7 @@ struct PhotoHistoryImporter {
         modelContext.insert(visit)
         step.insert(visit)
 
-        let locations = stay.assets.compactMap(\.locationLogPoint).map(\.location)
+        let locations = stay.spread(configuration.maximumFixesPerStay).compactMap(\.locationLogPoint).map(\.location)
         let samples = try repository.appendSamples(from: locations, source: .photoLibrary)
         if let first = samples.first, let last = samples.last {
             step.endpointSamples[visit.id] = (first, last)
