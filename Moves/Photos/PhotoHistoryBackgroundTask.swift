@@ -1,7 +1,8 @@
 import BackgroundTasks
 import Foundation
 
-/// Keeps the photo-history import going when Moves is not on screen.
+/// Keeps the photo-history import going when Moves is not on screen, while the phone is
+/// charging.
 ///
 /// Three kinds of time carry it. Started or resumed while Moves is open, a continued task
 /// goes on after the person leaves, with its progress shown by the system. After Moves was
@@ -25,15 +26,19 @@ enum PhotoHistoryBackgroundTask {
         }
     }
 
-    /// Asks for time while the phone is idle. A request that is already waiting is left
-    /// alone: replacing it would send it to the back of the line.
+    /// Asks for time while the phone is idle and charging. A request that is already waiting
+    /// is left alone: replacing it would send it to the back of the line.
     static func scheduleResume() {
         guard !ProcessInfo.processInfo.isRunningUnitTests else { return }
         BGTaskScheduler.shared.getPendingTaskRequests { pending in
-            guard !pending.contains(where: { $0.identifier == resumeIdentifier }) else { return }
+            let isWaiting = pending.contains { request in
+                request.identifier == resumeIdentifier
+                    && (request as? BGProcessingTaskRequest)?.requiresExternalPower == true
+            }
+            guard !isWaiting else { return }
             let request = BGProcessingTaskRequest(identifier: resumeIdentifier)
             request.requiresNetworkConnectivity = false
-            request.requiresExternalPower = false
+            request.requiresExternalPower = true
             try? BGTaskScheduler.shared.submit(request)
         }
     }

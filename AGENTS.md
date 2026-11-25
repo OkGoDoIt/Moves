@@ -183,7 +183,8 @@ with private PhotoKit property sets without asking Roger: he chose public API on
   outings so no stay is cut in two. Starting takes one tap and covers the whole library;
   from then on only the person's own Pause stops it. `PhotoLibraryController` runs steps
   while it holds a `WorkGrant` (on screen, a continued-processing task, an idle processing
-  task, or the seconds after leaving or a location wake; see `PhotoHistoryBackgroundTask`),
+  task, or the seconds after leaving or a location wake; see `PhotoHistoryBackgroundTask`)
+  and the phone is charging (Roger's rule: the import is hard on the battery),
   each under a background-task assertion (a suspended write in the App Group container is a
   `0xdead10cc` kill). Photos that keep stopping a step are taken in smaller steps and after
   six tries passed over. New `PhotoHistoryJob` fields must decode with a default, or an

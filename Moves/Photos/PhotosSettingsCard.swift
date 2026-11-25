@@ -107,11 +107,16 @@ struct PhotoHistorySection: View {
                     timeRemaining: photoLibrary.historyTimeRemaining,
                     isReadingLibrary: photoLibrary.isReadingLibrary,
                     libraryReadShare: photoLibrary.libraryReadShare,
-                    hasAccess: photoLibrary.hasReadAccess
+                    hasAccess: photoLibrary.hasReadAccess,
+                    isCharging: photoLibrary.isCharging
                 )
                 switch job.state {
                 case .running:
-                    Text("Keeps going on its own when you leave Moves.")
+                    Text(
+                        photoLibrary.isCharging
+                            ? "Keeps going on its own while your iPhone is charging."
+                            : "Continues on its own when your iPhone is charging."
+                    )
                         .font(.system(size: 12, weight: .medium, design: .rounded))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -240,6 +245,7 @@ struct PhotoHistoryProgressSummary: View {
     var isReadingLibrary = false
     var libraryReadShare = 0.0
     var hasAccess = true
+    var isCharging = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -284,7 +290,7 @@ struct PhotoHistoryProgressSummary: View {
 
     private var statusSymbol: String {
         switch job.state {
-        case .running: hasAccess ? "clock" : "exclamationmark.triangle.fill"
+        case .running: !hasAccess ? "exclamationmark.triangle.fill" : isCharging ? "clock" : "powerplug.fill"
         case .paused: "pause.circle.fill"
         case .finished: "checkmark.circle.fill"
         }
@@ -303,6 +309,8 @@ struct PhotoHistoryProgressSummary: View {
         case .running:
             if !hasAccess {
                 String(localized: "Waiting for Photos access")
+            } else if !isCharging {
+                String(localized: "Waiting for the charger")
             } else if isReadingLibrary {
                 String(localized: "Finding the photos your phone took…")
             } else if isWorking {

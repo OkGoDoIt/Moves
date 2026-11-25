@@ -353,6 +353,9 @@ final class PhotoLibraryController: ObservableObject {
     private var ledger: (job: UUID, value: PhotoOriginLedger?)?
     private let ledgerCache = PhotoOriginLedgerCache.standard
     private var sampleObserver: NSObjectProtocol?
+    private var powerObserver: NSObjectProtocol?
+    /// The import works only while this is true.
+    @Published private(set) var isCharging = true
 
     /// The process's one controller, for background tasks, which start without a view.
     private(set) static weak var current: PhotoLibraryController?
@@ -380,6 +383,15 @@ final class PhotoLibraryController: ObservableObject {
 
         guard !ProcessInfo.processInfo.isRunningUnitTests else { return }
         Self.current = self
+        UIDevice.current.isBatteryMonitoringEnabled = true
+        isCharging = Self.deviceIsCharging
+        powerObserver = NotificationCenter.default.addObserver(
+            forName: UIDevice.batteryStateDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.powerChanged() }
+        }
         // The phone is woken for new fixes while Moves is closed. That is the moment to
         // look for photos taken since the last look.
         sampleObserver = NotificationCenter.default.addObserver(
@@ -413,8 +425,29 @@ final class PhotoLibraryController: ObservableObject {
         historyJob?.state == .running
     }
 
+    /// Reading a whole library is hard on the battery, so it waits for the charger.
     private var mayWork: Bool {
-        hasReadAccess && !grants.isEmpty
+        hasReadAccess && isCharging && !grants.isEmpty
+    }
+
+    /// A simulator has no battery and counts as plugged in.
+    private static var deviceIsCharging: Bool {
+        UIDevice.current.batteryState != .unplugged
+    }
+
+    private func powerChanged() {
+        let charging = Self.deviceIsCharging
+        guard charging != isCharging else { return }
+        isCharging = charging
+        guard isImporting else { return }
+        Self.log.notice("Photo history \(charging ? "continues: charging" : "waits: unplugged", privacy: .public)")
+        guard charging else { return }
+        if grants.contains(.scene) {
+            requestContinuing()
+        } else {
+            workBriefly()
+        }
+        continueHistoryImport()
     }
 
     /// Starts the PhotoKit change observer. Safe to call more than once.
@@ -530,7 +563,7 @@ final class PhotoLibraryController: ObservableObject {
     func workUntilDone(with grant: WorkGrant) async {
         grants.insert(grant)
         continueHistoryImport()
-        while isImporting, grants.contains(grant) {
+        while isImporting, isCharging, grants.contains(grant) {
             try? await Task.sleep(for: .milliseconds(250))
         }
         grants.remove(grant)
@@ -554,7 +587,7 @@ final class PhotoLibraryController: ObservableObject {
 
     /// Uses the seconds the system gives an app that just left the screen or was woken.
     private func workBriefly() {
-        guard isImporting, !grants.contains(.brief) else { return }
+        guard isImporting, isCharging, !grants.contains(.brief) else { return }
         var identifier = UIBackgroundTaskIdentifier.invalid
         identifier = UIApplication.shared.beginBackgroundTask(withName: "Photo history import") { [weak self] in
             self?.endWork(with: .brief)
@@ -567,7 +600,7 @@ final class PhotoLibraryController: ObservableObject {
             continueHistoryImport()
             // A step takes a second or two and is protected by a request of its own, so
             // stopping with time to spare means none is cut off.
-            while isImporting, grants.contains(.brief), UIApplication.shared.backgroundTimeRemaining > 12 {
+            while isImporting, isCharging, grants.contains(.brief), UIApplication.shared.backgroundTimeRemaining > 12 {
                 try? await Task.sleep(for: .milliseconds(250))
             }
             grants.remove(.brief)
@@ -579,7 +612,7 @@ final class PhotoLibraryController: ObservableObject {
     }
 
     private func requestContinuing() {
-        guard !grants.contains(.continuedTask), UIApplication.shared.applicationState != .background else { return }
+        guard isCharging, !grants.contains(.continuedTask), UIApplication.shared.applicationState != .background else { return }
         do {
             try PhotoHistoryBackgroundTask.requestContinuing(title: continuingTitle, subtitle: continuingSubtitle)
         } catch {
