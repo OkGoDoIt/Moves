@@ -298,9 +298,13 @@ enum PlaceGeocodeBackfill {
                     region = resolved
                 }
 
-                let applied = try applyName(region, cellKey: next.cellKey, in: context)
+                // A context of its own per cell: rows read before the geocoder's wait could be
+                // gone by now, and one that outlived the wait would still hold them.
+                let cellContext = ModelContext(container)
+                cellContext.autosaveEnabled = false
+                let applied = try applyName(region, cellKey: next.cellKey, in: cellContext)
                 if applied > 0 {
-                    try context.save()
+                    try cellContext.save()
                 }
                 completed += 1
             }
@@ -349,9 +353,12 @@ enum PlaceGeocodeBackfill {
                     region = resolved
                 }
 
-                let applied = try apply(region, cellKey: next.cellKey, in: context)
+                // A context of its own per cell, as in `fillMissingNames`.
+                let cellContext = ModelContext(container)
+                cellContext.autosaveEnabled = false
+                let applied = try apply(region, cellKey: next.cellKey, in: cellContext)
                 if applied > 0 {
-                    try context.save()
+                    try cellContext.save()
                 }
                 completed += 1
             }
@@ -366,7 +373,7 @@ enum PlaceGeocodeBackfill {
 
     /// Visits and learned places still missing country or city, grouped by cache cell.
     static func pendingWork(in context: ModelContext) throws -> [PlaceGeocodeWorkItem] {
-        let visits = try context.fetch(FetchDescriptor<VisitPlace>())
+        let visits = try context.fetch(FetchDescriptor<VisitPlace>.live())
         let places = try context.fetch(FetchDescriptor<KnownPlace>())
         var items: [String: PlaceGeocodeWorkItem] = [:]
 
@@ -397,7 +404,7 @@ enum PlaceGeocodeBackfill {
     /// Unassigned visits still missing a POI or street name, and any visit or learned place
     /// still missing its street address, grouped by ~100 m cells.
     static func pendingNameWork(in context: ModelContext) throws -> [PlaceGeocodeWorkItem] {
-        let visits = try context.fetch(FetchDescriptor<VisitPlace>())
+        let visits = try context.fetch(FetchDescriptor<VisitPlace>.live())
         let places = try context.fetch(FetchDescriptor<KnownPlace>())
         var items: [String: PlaceGeocodeWorkItem] = [:]
         func enqueue(_ coordinate: CLLocationCoordinate2D) {
@@ -429,7 +436,7 @@ enum PlaceGeocodeBackfill {
     ) throws -> Int {
         guard region.hasAnyValue else { return 0 }
         var changed = 0
-        let visits = try context.fetch(FetchDescriptor<VisitPlace>())
+        let visits = try context.fetch(FetchDescriptor<VisitPlace>.live())
         for visit in visits {
             let key = PlaceGeocodeCellCache.nameCellKey(for: visit.coordinate)
             guard key == cellKey else { continue }
@@ -446,7 +453,7 @@ enum PlaceGeocodeBackfill {
     /// so they need no geocode of their own.
     @discardableResult
     static func reuseNearbyLabels(in context: ModelContext) throws -> Int {
-        let unassigned = try context.fetch(FetchDescriptor<VisitPlace>()).filter { visit in
+        let unassigned = try context.fetch(FetchDescriptor<VisitPlace>.live()).filter { visit in
             visit.knownPlace == nil && visit.assignmentSource == .none
         }
         let needing = unassigned.filter(\.needsPlaceNameGeocode)
@@ -489,7 +496,7 @@ enum PlaceGeocodeBackfill {
         guard region.hasAnyValue else { return 0 }
         var changed = 0
 
-        let visits = try context.fetch(FetchDescriptor<VisitPlace>())
+        let visits = try context.fetch(FetchDescriptor<VisitPlace>.live())
         for visit in visits {
             let key = PlaceGeocodeCellCache.cellKey(for: visit.coordinate)
             guard key == cellKey else { continue }

@@ -363,6 +363,7 @@ final class WebhookSyncTests: XCTestCase {
                 horizontalAccuracy: 20
             )
             context.insert(visit)
+            visit.dayTimeline = day(containing: start, in: context)
             try context.save()
             return context
         }
@@ -385,14 +386,14 @@ final class WebhookSyncTests: XCTestCase {
                 formats: [.geoJSON]
             )
         )
-        XCTAssertEqual(try archiveContext.fetch(FetchDescriptor<VisitPlace>()).map(\.origin), [.sensor])
+        XCTAssertEqual(try archiveContext.fetch(FetchDescriptor<VisitPlace>.live()).map(\.origin), [.sensor])
 
         let logContainer = try makeInMemoryContainer()
         let logContext = try recordedVisit(in: logContainer)
         let timeline = LocationLogSegmenter().segment(SyntheticLog.stay(at: coordinate, from: start, minutes: 120))
         _ = try SwiftDataTimelineRepository(modelContainer: logContainer)
             .importLocationLog(timeline, source: .fileRouteImport)
-        XCTAssertEqual(try logContext.fetch(FetchDescriptor<VisitPlace>()).map(\.origin), [.sensor])
+        XCTAssertEqual(try logContext.fetch(FetchDescriptor<VisitPlace>.live()).map(\.origin), [.sensor])
     }
 
     private func assertAllImportedAndNotUploaded(
@@ -438,6 +439,7 @@ final class WebhookSyncTests: XCTestCase {
         let restoredVisit = makeVisit(name: "Restored", arrival: longAgo)
         for visit in [live, googleVisit, photoVisit, restoredVisit] {
             context.insert(visit)
+            visit.dayTimeline = day(containing: visit.arrivalDate, in: context)
         }
 
         let liveMove = makeMove(key: "live", end: now)
@@ -446,6 +448,7 @@ final class WebhookSyncTests: XCTestCase {
         let restoredMove = makeMove(key: "restored", end: longAgo)
         for move in [liveMove, googleMove, restoredMove] {
             context.insert(move)
+            move.dayTimeline = day(containing: move.startDate, in: context)
         }
         try context.save()
         let cursor = now.addingTimeInterval(-60)
@@ -609,7 +612,9 @@ final class WebhookSyncTests: XCTestCase {
 
         let context = ModelContext(container)
         // Departed two hours ago, well before the leave cursor, but only created just now.
-        context.insert(makeVisit(name: "Reconciled", arrival: now.addingTimeInterval(-3 * 3_600)))
+        let reconciled = makeVisit(name: "Reconciled", arrival: now.addingTimeInterval(-3 * 3_600))
+        context.insert(reconciled)
+        reconciled.dayTimeline = day(containing: reconciled.arrivalDate, in: context)
         try context.save()
 
         await manager.syncNewItemsNow()
@@ -751,6 +756,17 @@ final class WebhookSyncTests: XCTestCase {
             source: source,
             dedupeKey: "\(source.rawValue)-\(latitude)-\(timestamp.timeIntervalSince1970)"
         )
+    }
+
+    /// A live stay or trip is always on a day; reuse the one already inserted for this date.
+    private func day(containing date: Date, in context: ModelContext) -> DayTimeline {
+        let key = DayTimeline.makeDayKey(for: date)
+        if let existing = try? context.fetch(FetchDescriptor<DayTimeline>(predicate: #Predicate { $0.dayKey == key })).first {
+            return existing
+        }
+        let day = DayTimeline(dayStart: date)
+        context.insert(day)
+        return day
     }
 
     private func makeMove(key: String, end: Date) -> MoveSegment {

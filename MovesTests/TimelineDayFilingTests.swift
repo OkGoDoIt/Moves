@@ -471,6 +471,7 @@ final class TimelineDayFilingTests: XCTestCase {
             userLabel: label
         )
         context.insert(visit)
+        visit.dayTimeline = oldDay(for: visit.arrivalDate)
         return visit
     }
 

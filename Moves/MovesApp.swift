@@ -241,6 +241,9 @@ private final class MovesRuntime: ObservableObject {
             Task(priority: .utility) { await DiagnosticsLog.shared.start() }
             TimelineSchemaUpgrader.runIfNeeded(container: container)
             TimelineSchemaUpgrader.removeRejectedPhotoStaysIfAny(container: container)
+            // Takes what was retired before this launch; rows this launch retires wait
+            // for the next one.
+            TimelineSchemaUpgrader.purgeRetiredRowsIfAny(container: container)
             // iOS relaunches the app in the background for a location event, with no scene
             // ever becoming active. Recording must start here too, or a relaunch after the
             // app was ended only handles that one event and then goes quiet.
@@ -356,8 +359,20 @@ private struct MovesRunningContent: View {
 /// Shown only while a one-time upgrade deletes or rewrites history the timeline would read.
 private struct TimelineUpgradeView: View {
     @ObservedObject private var progress = TimelineUpgradeProgress.shared
+    /// Most launches only clear a few rows the rebuild set aside, which takes a few
+    /// hundredths of a second. The screen stays blank for that long instead of flashing.
+    @State private var isShown = false
 
     var body: some View {
+        content
+            .opacity(isShown ? 1 : 0)
+            .task {
+                try? await Task.sleep(for: .milliseconds(400))
+                withAnimation(.easeIn(duration: 0.15)) { isShown = true }
+            }
+    }
+
+    private var content: some View {
         VStack(spacing: 12) {
             Text("Updating your timeline")
                 .font(.headline)

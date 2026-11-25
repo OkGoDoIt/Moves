@@ -40,8 +40,8 @@ enum TimelineDayRepair {
     ) throws -> Report {
         var report = Report()
         let total = try context.fetchCount(FetchDescriptor<LocationSample>())
-            + context.fetchCount(FetchDescriptor<VisitPlace>())
-            + context.fetchCount(FetchDescriptor<MoveSegment>())
+            + context.fetchCount(FetchDescriptor<VisitPlace>.live())
+            + context.fetchCount(FetchDescriptor<MoveSegment>.live())
             + context.fetchCount(FetchDescriptor<PhotoAttachment>())
         var done = 0
         progress?(0, total)
@@ -88,7 +88,7 @@ enum TimelineDayRepair {
                 ?? fallbackTimeZone
         }
 
-        var visitDescriptor = FetchDescriptor<VisitPlace>(sortBy: [SortDescriptor(\.arrivalDate)])
+        var visitDescriptor = FetchDescriptor<VisitPlace>.live(sortBy: [SortDescriptor(\.arrivalDate)])
         visitDescriptor.relationshipKeyPathsForPrefetching = [\.dayTimeline]
         let visits = try context.fetch(visitDescriptor)
         for visit in visits {
@@ -104,7 +104,7 @@ enum TimelineDayRepair {
         done += visits.count
         progress?(done, total)
 
-        var moveDescriptor = FetchDescriptor<MoveSegment>(sortBy: [SortDescriptor(\.startDate)])
+        var moveDescriptor = FetchDescriptor<MoveSegment>.live(sortBy: [SortDescriptor(\.startDate)])
         moveDescriptor.relationshipKeyPathsForPrefetching = [\.dayTimeline, \.startPlace]
         let moves = try context.fetch(moveDescriptor)
         for move in moves {

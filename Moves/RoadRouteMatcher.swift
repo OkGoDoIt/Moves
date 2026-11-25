@@ -212,13 +212,20 @@ enum RoadRouteMatcher {
     }
 
     static func matchedCoordinates(for move: MoveSegment) async -> [CLLocationCoordinate2D] {
-        guard !move.hasLeftStore else { return [] }
+        guard !move.hasLeftStore, !TimelineRetirement.isRetired(move), let context = move.modelContext else { return [] }
+        return await matchedCoordinates(moveID: move.id, in: context)
+    }
+
+    /// The path to show for a trip. The row is looked up by id again after every await,
+    /// never held across one: matching can take seconds, and in that time the person can
+    /// delete the trip or the rebuild retire it. Either way this returns quietly.
+    static func matchedCoordinates(moveID: UUID, in context: ModelContext) async -> [CLLocationCoordinate2D] {
+        guard let move = fetchMove(id: moveID, in: context) else { return [] }
         let signature = matchCacheSignature(for: move, fallback: MoveRouteGeometry.rawCoordinates(for: move))
-        let coordinates = await resolveDisplayedCoordinates(for: move)
-        // Matching can take seconds, and the person may have deleted the trip meanwhile.
-        guard !move.hasLeftStore else { return coordinates }
+        let coordinates = await resolveDisplayedCoordinates(moveID: moveID, in: context)
+        guard let move = fetchMove(id: moveID, in: context) else { return coordinates }
         guard matchesCurrentInput(move, signature: signature) else {
-            return await matchedCoordinates(for: move)
+            return await matchedCoordinates(moveID: moveID, in: context)
         }
         // The stored distance is what was measured or imported, and totals read it, so
         // showing a path leaves it alone. Only a path the person drew, or a move with no
@@ -246,7 +253,8 @@ enum RoadRouteMatcher {
         }
     }
 
-    private static func resolveDisplayedCoordinates(for move: MoveSegment) async -> [CLLocationCoordinate2D] {
+    private static func resolveDisplayedCoordinates(moveID: UUID, in context: ModelContext) async -> [CLLocationCoordinate2D] {
+        guard let move = fetchMove(id: moveID, in: context) else { return [] }
         if let manualCoordinates = move.manualRouteCoordinates {
             apply(resolution: .manual(manualCoordinates), to: move)
             return manualCoordinates
@@ -272,9 +280,9 @@ enum RoadRouteMatcher {
                 confidence: .recorded,
                 summary: RouteMatchSummaries.recorded(usesRouteTracking: move.usesHighAccuracyRouteTracking)
             )
-            await memo.storePersistent(coordinates, for: cacheKey)
             storeCache(coordinates, signature: cacheSignature, on: move)
             apply(resolution: resolution, to: move)
+            await memo.storePersistent(coordinates, for: cacheKey)
             return coordinates
         }
 
@@ -283,22 +291,29 @@ enum RoadRouteMatcher {
             return cached
         }
 
+        // From here on every await is followed by a fresh lookup of the row.
         if let cached = await memo.cached(for: cacheKey) {
             switch cached {
             case .persistent(let coordinates):
-                storeCache(coordinates, signature: cacheSignature, on: move)
+                if let move = fetchMove(id: moveID, in: context) {
+                    storeCache(coordinates, signature: cacheSignature, on: move)
+                }
                 return coordinates
             case .transient(let coordinates):
                 return coordinates
             case .rejected(let resolution):
-                apply(resolution: resolution, to: move)
+                if let move = fetchMove(id: moveID, in: context) {
+                    apply(resolution: resolution, to: move)
+                }
                 return resolution.coordinates
             }
         }
 
         if let task = await memo.inFlightTask(for: cacheKey) {
             let result = await task.value
-            await persist(result, on: move, cacheKey: cacheKey, cacheSignature: cacheSignature)
+            if let move = fetchMove(id: moveID, in: context) {
+                await persist(result, on: move, cacheKey: cacheKey, cacheSignature: cacheSignature)
+            }
             return result.coordinates
         }
 
@@ -310,7 +325,9 @@ enum RoadRouteMatcher {
 
         let result = await task.value
         await memo.setInFlightTask(nil, for: cacheKey)
-        await persist(result, on: move, cacheKey: cacheKey, cacheSignature: cacheSignature)
+        if let move = fetchMove(id: moveID, in: context) {
+            await persist(result, on: move, cacheKey: cacheKey, cacheSignature: cacheSignature)
+        }
         return result.coordinates
     }
 
@@ -355,10 +372,14 @@ enum RoadRouteMatcher {
         return .finished
     }
 
+    /// The live trip with this id; nil once it is deleted or retired.
     private static func fetchMove(id: UUID, in context: ModelContext) -> MoveSegment? {
-        var descriptor = FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.id == id })
+        var descriptor = FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.id == id && $0.dayTimeline != nil })
         descriptor.fetchLimit = 1
-        return try? context.fetch(descriptor).first
+        guard let move = try? context.fetch(descriptor).first, !move.isDeleted, !TimelineRetirement.isRetired(move) else {
+            return nil
+        }
+        return move
     }
 
     static func matchedManualCoordinates(
@@ -410,9 +431,10 @@ enum RoadRouteMatcher {
             await memo.storeRejected(result, for: cacheKey, ttl: rejectedMemoTTL)
             return
         }
+        // The row is written before the memo await, never after it.
         if result.cacheable {
-            await memo.storePersistent(result.coordinates, for: cacheKey)
             storeCache(result.coordinates, signature: cacheSignature, on: move)
+            await memo.storePersistent(result.coordinates, for: cacheKey)
         } else {
             await memo.storeTransient(
                 result.coordinates,
@@ -1807,6 +1829,7 @@ enum RouteMatchBackgroundTask {
             predicate: #Predicate { move in
                 move.routeMatchPolicyRaw == "auto"
                     && move.routeCacheCoordinatesData == nil
+                    && move.dayTimeline != nil
                     && (move.startDate < cursor || (move.startDate == cursor && !cursorIDs.contains(move.id)))
             },
             sortBy: [SortDescriptor(\.startDate, order: .reverse)]

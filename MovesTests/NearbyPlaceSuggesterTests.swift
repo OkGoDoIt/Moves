@@ -491,7 +491,21 @@ private func insertPlace(
         horizontalAccuracy: 12
     )
     context.insert(place)
+    place.dayTimeline = fixtureDay(containing: arrival, in: context)
     return place
+}
+
+/// A live stay or trip is always on a day; reuse the one already inserted for this date.
+@MainActor
+private func fixtureDay(containing date: Date, in context: ModelContext) -> DayTimeline {
+    let zone = TimeZone(secondsFromGMT: 0)!
+    let key = DayTimeline.makeDayKey(for: date, in: zone)
+    if let existing = try? context.fetch(FetchDescriptor<DayTimeline>(predicate: #Predicate { $0.dayKey == key })).first {
+        return existing
+    }
+    let day = DayTimeline(containing: date, in: zone)
+    context.insert(day)
+    return day
 }
 
 @MainActor
@@ -513,6 +527,7 @@ private func insertMove(
     move.startPlace = startPlace
     move.endPlace = endPlace
     context.insert(move)
+    move.dayTimeline = fixtureDay(containing: start, in: context)
     return move
 }
 

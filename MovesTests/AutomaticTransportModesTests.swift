@@ -251,11 +251,23 @@ final class AutomaticTransportModesTests: XCTestCase {
         let move = MoveSegment(dedupeKey: UUID().uuidString, startDate: start, endDate: start.addingTimeInterval(120),
                                transportMode: .cycling, distanceMeters: (speed ?? 6) * 120, stepCount: nil)
         context.insert(move)
+        move.dayTimeline = day(containing: start, in: context)
         for point in points {
             let sample = LocationSample(location: point, source: .routeTracking, dedupeKey: UUID().uuidString)
             context.insert(sample)
             sample.moveSegment = move
         }
         return move
+    }
+
+    /// A live trip is always on a day; reuse the one already inserted for this date.
+    private func day(containing date: Date, in context: ModelContext) -> DayTimeline {
+        let key = DayTimeline.makeDayKey(for: date)
+        if let existing = try? context.fetch(FetchDescriptor<DayTimeline>(predicate: #Predicate { $0.dayKey == key })).first {
+            return existing
+        }
+        let day = DayTimeline(dayStart: date)
+        context.insert(day)
+        return day
     }
 }

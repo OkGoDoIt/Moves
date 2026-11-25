@@ -139,7 +139,7 @@ final class StoreResilienceTests: XCTestCase {
         }
         XCTAssertTrue(Set(flightsAfter.keys).isSubset(of: flightsBefore.keys), "A flight was made up")
         print("Flights: \(flightsBefore.count) before, \(flightsBefore.count - flightsAfter.count) impossible ones removed")
-        let repaired = try ModelContext(container).fetch(FetchDescriptor<MoveSegment>())
+        let repaired = try ModelContext(container).liveMoves()
         XCTAssertEqual(
             repaired.filter { $0.transportMode != .plane && $0.endDate.timeIntervalSince($0.startDate) > 6 * 60 * 60 }.count,
             0,
@@ -275,8 +275,6 @@ final class StoreResilienceTests: XCTestCase {
         guard let path = environment["MOVES_REBUILD_STORE"], FileManager.default.fileExists(atPath: path) else {
             throw XCTSkip("Set MOVES_REBUILD_STORE to a copy of default.store")
         }
-        TimelineRetirement.isDeferred = environment["MOVES_RETIREMENT_DEFERRED"] == "1"
-        defer { TimelineRetirement.isDeferred = false }
         let directory = try makeTemporaryDirectory()
         let storeURL = directory.appendingPathComponent("default.store")
         for suffix in ["", "-wal", "-shm"] {
@@ -287,6 +285,12 @@ final class StoreResilienceTests: XCTestCase {
             try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: target.path)
         }
         let container = try makeContainer(storeURL: storeURL)
+        // The launch purge first, as the app runs it before any view exists.
+        let launchPurgeStarted = ContinuousClock.now
+        let waitingAtLaunch = try SwiftDataTimelineRepository.retiredRowCount(in: ModelContext(container))
+        let probed = ContinuousClock.now - launchPurgeStarted
+        let purgedAtLaunch = waitingAtLaunch > 0 ? try SwiftDataTimelineRepository.purgeRetiredRows(in: ModelContext(container)) : 0
+        print("REBUILD launch purge: \(waitingAtLaunch) retired rows waiting, probe \(probed), \(purgedAtLaunch) removed in \(ContinuousClock.now - launchPurgeStarted)")
         let probe = ModelContext(container)
         var newest = FetchDescriptor<LocationSample>(sortBy: [SortDescriptor(\.timestamp, order: .reverse)])
         newest.fetchLimit = 1
@@ -448,6 +452,38 @@ final class StoreResilienceTests: XCTestCase {
                 }
             }
         }
+
+        // The next launch's purge: exactly the retired rows go, and every live row stays.
+        let rowCounts = { (context: ModelContext) throws -> (visits: Int, moves: Int, all: Int) in
+            (try context.fetchCount(FetchDescriptor<VisitPlace>.live()), try context.fetchCount(FetchDescriptor<MoveSegment>.live()),
+             try context.fetchCount(FetchDescriptor<VisitPlace>()) + context.fetchCount(FetchDescriptor<MoveSegment>()))
+        }
+        let beforePurge = try rowCounts(ModelContext(container))
+        let retired = try SwiftDataTimelineRepository.retiredRowCount(in: ModelContext(container))
+        let purgeStarted = ContinuousClock.now
+        let purged = try SwiftDataTimelineRepository.purgeRetiredRows(in: ModelContext(container))
+        let purgeTime = ContinuousClock.now - purgeStarted
+        let afterPurge = try rowCounts(ModelContext(container))
+        print("REBUILD live after passes: \(beforePurge.visits) stops, \(beforePurge.moves) trips; \(retired) retired")
+        print("REBUILD purge at next launch: \(purged) removed in \(purgeTime); \(afterPurge.visits) stops, \(afterPurge.moves) trips left")
+        XCTAssertEqual(purged, retired)
+        XCTAssertEqual(beforePurge.all - afterPurge.all, retired)
+        XCTAssertEqual(afterPurge.visits, beforePurge.visits)
+        XCTAssertEqual(afterPurge.moves, beforePurge.moves)
+        XCTAssertEqual(afterPurge.all, afterPurge.visits + afterPurge.moves, "No row without a day is left")
+
+        // The purge's cost with a few hundred retired rows: the oldest 300 trips of this copy.
+        let bulkContext = ModelContext(container)
+        var oldest = FetchDescriptor<MoveSegment>.live(sortBy: [SortDescriptor(\.startDate)])
+        oldest.fetchLimit = 300
+        let bulkRepository = SwiftDataTimelineRepository(modelContext: bulkContext)
+        for move in try bulkContext.fetch(oldest) { bulkRepository.retire(move) }
+        try bulkContext.save()
+        let bulkWaiting = try SwiftDataTimelineRepository.retiredRowCount(in: ModelContext(container))
+        let bulkStarted = ContinuousClock.now
+        let bulkPurged = try SwiftDataTimelineRepository.purgeRetiredRows(in: ModelContext(container))
+        print("REBUILD purge of \(bulkWaiting) retired trips: \(bulkPurged) removed in \(ContinuousClock.now - bulkStarted)")
+        XCTAssertEqual(bulkPurged, bulkWaiting)
     }
 
     struct RebuildMetrics {
@@ -695,7 +731,7 @@ final class StoreResilienceTests: XCTestCase {
     }
 
     private static func flights(in context: ModelContext) throws -> [UUID: Flight] {
-        let moves = try context.fetch(FetchDescriptor<MoveSegment>()).filter { $0.transportMode == .plane }
+        let moves = try context.liveMoves().filter { $0.transportMode == .plane }
         return Dictionary(
             moves.map { move in
                 let distance: Double
@@ -729,8 +765,8 @@ final class StoreResilienceTests: XCTestCase {
     }
 
     private static func quality(of context: ModelContext) throws -> Quality {
-        let visits = try context.fetch(FetchDescriptor<VisitPlace>(sortBy: [SortDescriptor(\.arrivalDate)]))
-        let moves = try context.fetch(FetchDescriptor<MoveSegment>())
+        let visits = try context.liveVisits()
+        let moves = try context.liveMoves()
         var result = Quality(visits: visits.count, moves: moves.count)
         result.open = visits.filter { $0.departureDate == nil }.count
         result.selfLoops = moves.filter { $0.startPlace?.id != nil && $0.startPlace?.id == $0.endPlace?.id }.count
@@ -818,5 +854,162 @@ private struct ReplayMotionClassifier: MotionClassifier {
 private struct NoNamePlaceResolver: PlaceNameResolver {
     func resolveName(for coordinate: CLLocationCoordinate2D) async -> String? {
         nil
+    }
+}
+
+/// The rebuild retires stops and trips instead of deleting them while views may hold
+/// them. Until the next launch purges them they are still rows in the store, and no
+/// surface may show, count, upload, or attach to one.
+@MainActor
+final class RetiredRowVisibilityTests: XCTestCase {
+    private func makeContainer() throws -> ModelContainer {
+        let schema = Schema(MovesTimelineSchema.models)
+        return try ModelContainer(for: schema, configurations: [
+            ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)
+        ])
+    }
+
+    private func visit(_ coordinate: CLLocationCoordinate2D, from arrival: Date, hours: Double) -> MockVisit {
+        MockVisit(coordinate: coordinate, horizontalAccuracy: 20, arrivalDate: arrival, departureDate: arrival.addingTimeInterval(hours * 3_600))
+    }
+
+    func testARetiredStopAndTripAreInvisibleToEverySurface() async throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let repository = SwiftDataTimelineRepository(modelContext: context)
+        let base = Calendar.current.startOfDay(for: Date().addingTimeInterval(-86_400)).addingTimeInterval(8 * 3_600)
+        let home = CLLocationCoordinate2D(latitude: 10.76, longitude: 106.70)
+        let ghostSpot = CLLocationCoordinate2D(latitude: 10.78, longitude: 106.70)
+        let workSpot = CLLocationCoordinate2D(latitude: 10.80, longitude: 106.70)
+        // Home 08–10, a drive to work 10–12, work 12–15; then a walk 15–16 to a stop 16–17
+        // that the rebuild retires with its trip.
+        let homeStop = try repository.addOrUpdateVisit(from: visit(home, from: base, hours: 2))
+        let work = try repository.addOrUpdateVisit(from: visit(workSpot, from: base.addingTimeInterval(4 * 3_600), hours: 3))
+        let ghost = try repository.addOrUpdateVisit(from: visit(ghostSpot, from: base.addingTimeInterval(8 * 3_600), hours: 1))
+        let trip = try repository.upsertMove(startPlace: homeStop, endPlace: work, startDate: base.addingTimeInterval(2 * 3_600),
+                                             endDate: base.addingTimeInterval(4 * 3_600), transportMode: .automotive,
+                                             distanceMeters: 4_500, stepCount: 0, samples: [])
+        let ghostTrip = try repository.upsertMove(startPlace: work, endPlace: ghost, startDate: base.addingTimeInterval(7 * 3_600),
+                                                  endDate: base.addingTimeInterval(8 * 3_600), transportMode: .walking,
+                                                  distanceMeters: 2_200, stepCount: 3_000, samples: [])
+        let place = KnownPlace(name: "Desk", latitude: ghostSpot.latitude, longitude: ghostSpot.longitude, footprintRadius: 60)
+        context.insert(place)
+        try context.save()
+        repository.retire(ghostTrip)
+        repository.retire(ghost)
+        // An edit on a stale view after the rebuild retired the stop.
+        ghost.knownPlace = place
+        try context.save()
+        let ghostIDs: Set<UUID> = [ghost.id, ghostTrip.id]
+        let liveVisitIDs: Set<UUID> = [homeStop.id, work.id]
+
+        // Timeline: the day's own rows.
+        let reader = ModelContext(container)
+        let day = try XCTUnwrap(try reader.fetch(FetchDescriptor<DayTimeline>()).first { !$0.places.isEmpty })
+        XCTAssertEqual(Set(day.places.map(\.id)), liveVisitIDs)
+        XCTAssertEqual(day.moves.map(\.id), [trip.id])
+        XCTAssertEqual(Set(homeStop.outgoingMoves.map(\.id)), [trip.id])
+
+        // Map, named trips, and the "where was I" lookup.
+        let range = DateInterval(start: base.addingTimeInterval(-3_600), end: base.addingTimeInterval(10 * 3_600))
+        let readerRepository = SwiftDataTimelineRepository(modelContext: reader)
+        XCTAssertEqual(Set(try readerRepository.visits(in: range).map(\.id)), liveVisitIDs)
+        XCTAssertEqual(try readerRepository.moves(in: range, modes: nil).map(\.id), [trip.id])
+        for hour in [7.5, 8.5] {
+            switch try readerRepository.timelineItem(at: base.addingTimeInterval(hour * 3_600)) {
+            case .visit(let found): XCTAssertFalse(ghostIDs.contains(found.id))
+            case .move(let found, _, _): XCTAssertFalse(ghostIDs.contains(found.id))
+            case .gap: break
+            }
+        }
+        let missingCoverage = FileManager.default.temporaryDirectory.appendingPathComponent("no-coverage-\(UUID().uuidString).json")
+        let index = try MapActivityIndexBuilder.build(container: container, undatedCoverageURL: missingCoverage)
+        XCTAssertEqual(index.stays.count, 2)
+        XCTAssertFalse(index.tracks.contains { ghostIDs.contains($0.id) })
+
+        // Places: a place's stays.
+        XCTAssertEqual(place.visits.map(\.id), [])
+
+        // Insights and search read their own contexts.
+        let insights = try InsightsSourceLoader.load(from: container)
+        XCTAssertEqual(insights.days.flatMap(\.visits).count, 2)
+        XCTAssertEqual(insights.days.flatMap(\.moves).count, 1)
+        let corpus = try await MovesSearchCorpus.load(from: container)
+        XCTAssertEqual(Set(corpus.days.flatMap(\.visits).map(\.id)), liveVisitIDs)
+        XCTAssertEqual(corpus.days.flatMap(\.moves).map(\.id), [trip.id])
+
+        // Uploads, Spotlight, and the widget.
+        let uploadVisits = try reader.fetch(FetchDescriptor(predicate: LocationUploadFilter.visits(after: .distantPast, includingHistory: true)))
+        let uploadMoves = try reader.fetch(FetchDescriptor(predicate: LocationUploadFilter.moves(after: .distantPast, includingHistory: true)))
+        XCTAssertEqual(Set(uploadVisits.map(\.id)), liveVisitIDs)
+        XCTAssertEqual(uploadMoves.map(\.id), [trip.id])
+        XCTAssertEqual(try reader.fetchCount(FetchDescriptor<VisitPlace>.live()), 2)
+        let widget = try XCTUnwrap(TimelineWidgetSnapshotPublisher.snapshot(forDayKey: day.dayKey, in: ModelContext(container)))
+        XCTAssertEqual(widget.moveCount, 1)
+        XCTAssertEqual(widget.totalDistanceMeters, 4_500, accuracy: 1)
+
+        // The rows themselves are still there for whoever held them, until the purge.
+        XCTAssertEqual(try reader.fetchCount(FetchDescriptor<VisitPlace>()), 3)
+        XCTAssertEqual(try SwiftDataTimelineRepository.retiredRowCount(in: reader), 2)
+    }
+
+    /// The launch purge deletes exactly the rows the rebuild retired. A row iCloud is still
+    /// bringing in can have no day for a while; it carries no retirement mark and stays.
+    func testThePurgeRemovesExactlyTheRetiredRows() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let repository = SwiftDataTimelineRepository(modelContext: context)
+        let base = Date().addingTimeInterval(-2 * 86_400)
+        let a = CLLocationCoordinate2D(latitude: 10.76, longitude: 106.70)
+        let b = CLLocationCoordinate2D(latitude: 10.80, longitude: 106.70)
+        let first = try repository.addOrUpdateVisit(from: visit(a, from: base, hours: 1))
+        let second = try repository.addOrUpdateVisit(from: visit(b, from: base.addingTimeInterval(2 * 3_600), hours: 1))
+        let kept = try repository.upsertMove(startPlace: first, endPlace: second, startDate: base.addingTimeInterval(3_600),
+                                             endDate: base.addingTimeInterval(2 * 3_600), transportMode: .automotive,
+                                             distanceMeters: 4_500, stepCount: 0, samples: [])
+        let doomed = try repository.addOrUpdateVisit(from: visit(b, from: base.addingTimeInterval(5 * 3_600), hours: 1))
+        let doomedTrip = try repository.upsertMove(startPlace: second, endPlace: doomed, startDate: base.addingTimeInterval(3 * 3_600),
+                                                   endDate: base.addingTimeInterval(5 * 3_600), transportMode: .walking,
+                                                   distanceMeters: 100, stepCount: 200, samples: [])
+        // Arrived from iCloud before its day did: no day, but never retired.
+        let arriving = VisitPlace(arrivalDate: base.addingTimeInterval(9 * 3_600), departureDate: nil,
+                                  latitude: a.latitude, longitude: a.longitude, horizontalAccuracy: 20)
+        context.insert(arriving)
+        try context.save()
+        repository.retire(doomedTrip)
+        repository.retire(doomed)
+        try context.save()
+
+        XCTAssertEqual(try SwiftDataTimelineRepository.retiredRowCount(in: ModelContext(container)), 2)
+        XCTAssertEqual(try SwiftDataTimelineRepository.purgeRetiredRows(in: ModelContext(container), batchSize: 1), 2)
+
+        let after = ModelContext(container)
+        XCTAssertEqual(Set(try after.fetch(FetchDescriptor<VisitPlace>()).map(\.id)), [first.id, second.id, arriving.id])
+        XCTAssertEqual(try after.fetch(FetchDescriptor<MoveSegment>()).map(\.id), [kept.id])
+        XCTAssertEqual(try after.fetch(FetchDescriptor<MoveSegment>()).first?.endPlace?.id, second.id)
+        XCTAssertEqual(try SwiftDataTimelineRepository.retiredRowCount(in: after), 0)
+        XCTAssertEqual(try SwiftDataTimelineRepository.purgeRetiredRows(in: after), 0, "Nothing left to do")
+    }
+
+    /// A purge stopped part way (its background time ran out) leaves only retired rows,
+    /// and the next launch finishes the job.
+    func testAPurgeStoppedPartWayFinishesNextTime() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let repository = SwiftDataTimelineRepository(modelContext: context)
+        let base = Date().addingTimeInterval(-3 * 86_400)
+        var retired: [VisitPlace] = []
+        for index in 0..<6 {
+            let coordinate = CLLocationCoordinate2D(latitude: 10.70 + Double(index) * 0.02, longitude: 106.70)
+            retired.append(try repository.addOrUpdateVisit(from: visit(coordinate, from: base.addingTimeInterval(Double(index) * 3 * 3_600), hours: 1)))
+        }
+        try context.save()
+        retired.forEach(repository.retire)
+        try context.save()
+
+        XCTAssertEqual(try SwiftDataTimelineRepository.purgeRetiredRows(in: ModelContext(container), batchSize: 2, shouldStop: { true }), 2)
+        XCTAssertEqual(try SwiftDataTimelineRepository.retiredRowCount(in: ModelContext(container)), 4)
+        XCTAssertEqual(try SwiftDataTimelineRepository.purgeRetiredRows(in: ModelContext(container)), 4)
+        XCTAssertEqual(try ModelContext(container).fetchCount(FetchDescriptor<VisitPlace>()), 0)
     }
 }

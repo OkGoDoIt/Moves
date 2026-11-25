@@ -65,22 +65,27 @@ final class TimelineEditController: TimelineItemActions {
     }
 
     func markNotAStop(_ visit: VisitPlace) {
+        guard isLive(visit) else { return }
         dissolve(visit, named: String(localized: "Not a stop"))
     }
 
     func mergeWithPreviousPlace(_ visit: VisitPlace) {
+        guard isLive(visit) else { return }
         guard let previous = TimelineNeighbors.previousVisit(for: visit) else {
             presentError(TimelineEditingError.missingNeighbors)
             return
         }
+        guard isLive(previous) else { return }
         mergeVisits(previous, visit)
     }
 
     func mergeWithNextPlace(_ visit: VisitPlace) {
+        guard isLive(visit) else { return }
         guard let next = TimelineNeighbors.nextVisit(for: visit) else {
             presentError(TimelineEditingError.missingNeighbors)
             return
         }
+        guard isLive(next) else { return }
         mergeVisits(visit, next)
     }
 
@@ -93,6 +98,7 @@ final class TimelineEditController: TimelineItemActions {
     }
 
     func requestDeletePlace(_ visit: VisitPlace) {
+        guard isLive(visit) else { return }
         if shouldDissolveOnDelete(visit) {
             dissolve(visit, named: String(localized: "Deleted"))
             return
@@ -121,6 +127,7 @@ final class TimelineEditController: TimelineItemActions {
     }
 
     func setTransportMode(_ mode: TransportMode, for move: MoveSegment) {
+        guard isLive(move) else { return }
         // Restored from a payload: the map rematches this move right away, and that cache
         // write would otherwise leave SwiftData's own undo unable to bring the mode back.
         let payload = TimelineModeChangePayload(move: move)
@@ -136,6 +143,7 @@ final class TimelineEditController: TimelineItemActions {
     }
 
     func mergeWithPreviousMove(_ move: MoveSegment) {
+        guard isLive(move) else { return }
         guard let startPlace = move.startPlace else {
             presentError(TimelineEditingError.missingNeighbors)
             return
@@ -144,6 +152,7 @@ final class TimelineEditController: TimelineItemActions {
     }
 
     func mergeWithNextMove(_ move: MoveSegment) {
+        guard isLive(move) else { return }
         guard let endPlace = move.endPlace else {
             presentError(TimelineEditingError.missingNeighbors)
             return
@@ -152,6 +161,7 @@ final class TimelineEditController: TimelineItemActions {
     }
 
     func requestDeleteMove(_ move: MoveSegment) {
+        guard isLive(move) else { return }
         deleteMove(move)
     }
 
@@ -160,6 +170,7 @@ final class TimelineEditController: TimelineItemActions {
     func applyRename(to visit: VisitPlace, name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        guard isLive(visit) else { presentedSheet = nil; return }
         performProperty(named: String(localized: "Renamed"), around: visit) { repo in
             let nearby = try repo.knownPlaces(near: visit.coordinate, within: NearbyPlaceSuggester.searchRadius)
             if let existing = nearby.first(where: {
@@ -183,6 +194,7 @@ final class TimelineEditController: TimelineItemActions {
     }
 
     func applyCandidate(_ candidate: NearbyPlaceCandidate, to visit: VisitPlace) {
+        guard isLive(visit) else { presentedSheet = nil; return }
         performProperty(named: String(localized: "Renamed"), around: visit) { repo in
             switch candidate.source {
             case .knownPlace(let id):
@@ -216,6 +228,7 @@ final class TimelineEditController: TimelineItemActions {
     // Times and splits are put back from a copy taken first: SwiftData's own undo was seen
     // undoing an unrelated background write instead, or leaving the change in place.
     func applyTimes(to visit: VisitPlace, arrival: Date, departure: Date?) {
+        guard isLive(visit) else { presentedSheet = nil; return }
         let payload = TimelineRowsPayload(
             visits: [visit],
             moves: visit.incomingMoves + visit.outgoingMoves
@@ -228,6 +241,7 @@ final class TimelineEditController: TimelineItemActions {
     }
 
     func applySplitVisit(_ visit: VisitPlace, at date: Date) {
+        guard isLive(visit) else { presentedSheet = nil; return }
         var payload = TimelineRowsPayload(visits: [visit], moves: visit.outgoingMoves)
         performStructural(named: String(localized: "Split")) { repo, context in
             let (_, second) = try repo.splitVisit(visit, at: date)
@@ -238,6 +252,7 @@ final class TimelineEditController: TimelineItemActions {
     }
 
     func applySplitMove(_ move: MoveSegment, at date: Date) {
+        guard isLive(move) else { presentedSheet = nil; return }
         var payload = TimelineRowsPayload(visits: [], moves: [move])
         performStructural(named: String(localized: "Split")) { repo, context in
             let (_, stop, second) = try repo.splitMove(move, at: date)
@@ -259,6 +274,7 @@ final class TimelineEditController: TimelineItemActions {
     }
 
     func confirmReview(_ visit: VisitPlace) {
+        guard isLive(visit) else { return }
         let payload = ReviewStatesPayload(visits: [(visit.id, visit.reviewStateRaw)], moves: [])
         performStructural(named: String(localized: "Confirmed")) { _, context in
             visit.reviewState = .confirmed
@@ -268,6 +284,7 @@ final class TimelineEditController: TimelineItemActions {
 
     /// Accepts the place a stay was matched to, so later stays there match it too.
     func confirmPlace(_ visit: VisitPlace) {
+        guard isLive(visit) else { return }
         guard let place = visit.knownPlace else {
             confirmReview(visit)
             return
@@ -285,6 +302,7 @@ final class TimelineEditController: TimelineItemActions {
 
     /// Keeps a brief stay as a stop.
     func keepStop(_ visit: VisitPlace) {
+        guard isLive(visit) else { return }
         let payload = ReviewStatesPayload(visits: [(visit.id, visit.reviewStateRaw)], moves: [])
         performStructural(named: String(localized: "Kept stop")) { _, context in
             visit.reviewState = .confirmed
@@ -303,10 +321,10 @@ final class TimelineEditController: TimelineItemActions {
         // Restored from a payload, so a bulk change is exactly one step on the Undo pill.
         performStructural(named: name) { _, context in
             let visits = visitIDs.isEmpty ? [] : try context.fetch(FetchDescriptor<VisitPlace>(
-                predicate: #Predicate { visitIDs.contains($0.id) }
+                predicate: #Predicate { visitIDs.contains($0.id) && $0.dayTimeline != nil }
             ))
             let moves = moveIDs.isEmpty ? [] : try context.fetch(FetchDescriptor<MoveSegment>(
-                predicate: #Predicate { moveIDs.contains($0.id) }
+                predicate: #Predicate { moveIDs.contains($0.id) && $0.dayTimeline != nil }
             ))
             let payload = ReviewStatesPayload(
                 visits: visits.map { ($0.id, $0.reviewStateRaw) },
@@ -334,22 +352,16 @@ final class TimelineEditController: TimelineItemActions {
 
     // MARK: - Lookups
 
+    /// The live stay with this id; nil once the rebuild retired it.
     func visit(id: UUID) -> VisitPlace? {
         guard let context = modelContext else { return nil }
-        var descriptor = FetchDescriptor<VisitPlace>(
-            predicate: #Predicate { $0.id == id }
-        )
-        descriptor.fetchLimit = 1
-        return try? context.fetch(descriptor).first
+        return LiveTimelineRows.visit(id, in: context)
     }
 
+    /// The live trip with this id; nil once the rebuild retired it.
     func move(id: UUID) -> MoveSegment? {
         guard let context = modelContext else { return nil }
-        var descriptor = FetchDescriptor<MoveSegment>(
-            predicate: #Predicate { $0.id == id }
-        )
-        descriptor.fetchLimit = 1
-        return try? context.fetch(descriptor).first
+        return LiveTimelineRows.move(id, in: context)
     }
 
     func knownPlace(id: UUID) -> KnownPlace? {
@@ -374,6 +386,24 @@ final class TimelineEditController: TimelineItemActions {
 
     // MARK: - Private
 
+    /// A view can still show a row the rebuild retired on another context a moment ago.
+    /// Editing it would attach it to a place or day again, so the edit says it is gone.
+    private func isLive(_ visit: VisitPlace) -> Bool {
+        guard !visit.isDeleted, !TimelineRetirement.isRetired(visit) else {
+            presentError(TimelineEditingError.visitNotFound)
+            return false
+        }
+        return true
+    }
+
+    private func isLive(_ move: MoveSegment) -> Bool {
+        guard !move.isDeleted, !TimelineRetirement.isRetired(move) else {
+            presentError(TimelineEditingError.moveNotFound)
+            return false
+        }
+        return true
+    }
+
     private func dissolve(_ visit: VisitPlace, named name: String) {
         guard let incoming = visit.incomingMoves.sorted(by: { $0.endDate < $1.endDate }).last,
               let outgoing = visit.outgoingMoves.sorted(by: { $0.startDate < $1.startDate }).first,
@@ -396,10 +426,12 @@ final class TimelineEditController: TimelineItemActions {
                 move.clearCachedRouteCoordinates()
             }
             registerRestore(payload, on: context)
-            let moves = result.movesNeedingRouteRefresh
+            // Ids, not rows: each match awaits, and a trip can be undone, deleted, or
+            // retired before the next one starts.
+            let moveIDs = result.movesNeedingRouteRefresh.map(\.id)
             Task { @MainActor in
-                for move in moves {
-                    _ = await RoadRouteMatcher.matchedCoordinates(for: move)
+                for id in moveIDs {
+                    _ = await RoadRouteMatcher.matchedCoordinates(moveID: id, in: context)
                 }
             }
         }
@@ -606,23 +638,36 @@ extension ModelContext {
 /// when they run. A reference they held could be a deleted instance by then.
 private enum LiveTimelineRows {
     // Fetched by id, not by loading every row: the phone holds thousands of them.
+    // A row the rebuild retired since is gone too: putting it back would revive it.
     static func visit(_ id: UUID?, in context: ModelContext) -> VisitPlace? {
         guard let id else { return nil }
-        var descriptor = FetchDescriptor<VisitPlace>(predicate: #Predicate { $0.id == id })
+        var descriptor = FetchDescriptor<VisitPlace>(predicate: #Predicate { $0.id == id && $0.dayTimeline != nil })
         descriptor.fetchLimit = 1
-        return (try? context.fetch(descriptor))?.first
+        return (try? context.fetch(descriptor))?.first.flatMap { TimelineRetirement.isRetired($0) ? nil : $0 }
     }
 
     static func move(_ id: UUID?, in context: ModelContext) -> MoveSegment? {
         guard let id else { return nil }
-        var descriptor = FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.id == id })
+        var descriptor = FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.id == id && $0.dayTimeline != nil })
         descriptor.fetchLimit = 1
-        return (try? context.fetch(descriptor))?.first
+        return (try? context.fetch(descriptor))?.first.flatMap { TimelineRetirement.isRetired($0) ? nil : $0 }
     }
 
     static func moves(_ ids: [UUID], in context: ModelContext) -> [MoveSegment] {
         guard !ids.isEmpty else { return [] }
-        return (try? context.fetch(FetchDescriptor<MoveSegment>(predicate: #Predicate { ids.contains($0.id) }))) ?? []
+        return ((try? context.fetch(FetchDescriptor<MoveSegment>(
+            predicate: #Predicate { ids.contains($0.id) && $0.dayTimeline != nil }
+        ))) ?? []).filter { !TimelineRetirement.isRetired($0) }
+    }
+
+    /// Whether any row with this id is still in the store, retired or not, so a restore
+    /// never makes a second row with the same id.
+    static func visitExists(_ id: UUID, in context: ModelContext) -> Bool {
+        ((try? context.fetchCount(FetchDescriptor<VisitPlace>(predicate: #Predicate { $0.id == id }))) ?? 0) > 0
+    }
+
+    static func moveExists(_ id: UUID, in context: ModelContext) -> Bool {
+        ((try? context.fetchCount(FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.id == id }))) ?? 0) > 0
     }
 
     static func knownPlace(_ id: UUID?, in context: ModelContext) -> KnownPlace? {
@@ -637,6 +682,15 @@ private enum LiveTimelineRows {
         var descriptor = FetchDescriptor<DayTimeline>(predicate: #Predicate { $0.dayKey == key })
         descriptor.fetchLimit = 1
         return (try? context.fetch(descriptor))?.first
+    }
+
+    /// The fixes with these keys that are still in the store.
+    static func samples(_ keys: [String], in context: ModelContext) -> [LocationSample] {
+        guard !keys.isEmpty else { return [] }
+        let wanted = Array(Set(keys))
+        return (try? context.fetch(FetchDescriptor<LocationSample>(
+            predicate: #Predicate { wanted.contains($0.dedupeKey) }
+        ))) ?? []
     }
 
     /// Only the stay's own photos: the library can hold tens of thousands, and this runs
@@ -714,6 +768,7 @@ private struct NamingAreaPayload: TimelineUndoRestoring {
         let minLon = visit.longitude - longitudeDelta, maxLon = visit.longitude + longitudeDelta
         let nearbyVisits = (try? context.fetch(FetchDescriptor<VisitPlace>(predicate: #Predicate {
             $0.latitude >= minLat && $0.latitude <= maxLat && $0.longitude >= minLon && $0.longitude <= maxLon
+                && $0.dayTimeline != nil
         }))) ?? []
         let allPlaces = (try? context.fetch(FetchDescriptor<KnownPlace>())) ?? []
         let nearbyPlaces = allPlaces.filter {
@@ -757,13 +812,22 @@ private struct ReviewStatesPayload: TimelineUndoRestoring {
         let moveStates = Dictionary(moves, uniquingKeysWith: { first, _ in first })
         let visitIDs = Array(visitStates.keys)
         let moveIDs = Array(moveStates.keys)
+        // Live rows only: a retired stay's review field carries its retirement mark.
         if !visitIDs.isEmpty {
-            let rows = (try? context.fetch(FetchDescriptor<VisitPlace>(predicate: #Predicate { visitIDs.contains($0.id) }))) ?? []
-            for row in rows { row.reviewStateRaw = visitStates[row.id] ?? row.reviewStateRaw }
+            let rows = (try? context.fetch(FetchDescriptor<VisitPlace>(
+                predicate: #Predicate { visitIDs.contains($0.id) && $0.dayTimeline != nil }
+            ))) ?? []
+            for row in rows where !TimelineRetirement.isRetired(row) {
+                row.reviewStateRaw = visitStates[row.id] ?? row.reviewStateRaw
+            }
         }
         if !moveIDs.isEmpty {
-            let rows = (try? context.fetch(FetchDescriptor<MoveSegment>(predicate: #Predicate { moveIDs.contains($0.id) }))) ?? []
-            for row in rows { row.reviewStateRaw = moveStates[row.id] ?? row.reviewStateRaw }
+            let rows = (try? context.fetch(FetchDescriptor<MoveSegment>(
+                predicate: #Predicate { moveIDs.contains($0.id) && $0.dayTimeline != nil }
+            ))) ?? []
+            for row in rows where !TimelineRetirement.isRetired(row) {
+                row.reviewStateRaw = moveStates[row.id] ?? row.reviewStateRaw
+            }
         }
     }
 }
@@ -817,7 +881,8 @@ struct TimelineRowsPayload: TimelineUndoRestoring {
         let routeMatchPolicyRaw: String
         let routeMatchConfidenceRaw: String
         let routeMatchSummary: String?
-        let samples: [PersistentIdentifier]
+        /// Fix keys, not rows: a fix can be deleted on another context before Undo runs.
+        let sampleKeys: [String]
     }
 
     let visits: [VisitFields]
@@ -853,7 +918,7 @@ struct TimelineRowsPayload: TimelineUndoRestoring {
                 routeMatchPolicyRaw: move.routeMatchPolicyRaw,
                 routeMatchConfidenceRaw: move.routeMatchConfidenceRaw,
                 routeMatchSummary: move.routeMatchSummary,
-                samples: move.samples.map(\.persistentModelID)
+                sampleKeys: move.samples.map(\.dedupeKey)
             )
         }
     }
@@ -875,10 +940,8 @@ struct TimelineRowsPayload: TimelineUndoRestoring {
             move.routeMatchPolicyRaw = fields.routeMatchPolicyRaw
             move.routeMatchConfidenceRaw = fields.routeMatchConfidenceRaw
             move.routeMatchSummary = fields.routeMatchSummary
-            for sampleID in fields.samples {
-                if let sample = context.model(for: sampleID) as? LocationSample, !sample.isDeleted {
-                    sample.moveSegment = move
-                }
+            for sample in LiveTimelineRows.samples(fields.sampleKeys, in: context) {
+                sample.moveSegment = move
             }
         }
         for fields in visits {
@@ -925,7 +988,8 @@ struct TimelineDeletedPlacePayload: TimelineUndoRestoring {
     let thoroughfare: String?
     let formattedAddress: String?
     let reviewStateRaw: String
-    let dayTimeline: DayTimeline?
+    /// The day's key, not the row: Undo can run after the day was replaced.
+    let dayKey: String?
     let knownPlaceID: UUID?
     let outgoingMoveIDs: [UUID]
     let incomingMoveIDs: [UUID]
@@ -952,7 +1016,7 @@ struct TimelineDeletedPlacePayload: TimelineUndoRestoring {
         thoroughfare = place.thoroughfare
         formattedAddress = place.formattedAddress
         reviewStateRaw = place.reviewStateRaw
-        dayTimeline = place.dayTimeline
+        dayKey = place.dayTimeline?.dayKey
         knownPlaceID = place.knownPlace?.id
         outgoingMoveIDs = place.outgoingMoves.map(\.id)
         incomingMoveIDs = place.incomingMoves.map(\.id)
@@ -961,7 +1025,9 @@ struct TimelineDeletedPlacePayload: TimelineUndoRestoring {
 
     /// Re-creates the visit and points its surviving moves and photos back at it.
     func restore(in context: ModelContext) {
-        guard LiveTimelineRows.visit(id, in: context) == nil else { return }
+        // A retired row with this id stays retired; a second row with its id is never made.
+        guard !LiveTimelineRows.visitExists(id, in: context),
+              let day = LiveTimelineRows.day(dayKey, in: context) else { return }
         let restored = VisitPlace(
             arrivalDate: arrivalDate,
             departureDate: departureDate,
@@ -984,7 +1050,7 @@ struct TimelineDeletedPlacePayload: TimelineUndoRestoring {
         restored.thoroughfare = thoroughfare
         restored.formattedAddress = formattedAddress
         restored.reviewStateRaw = reviewStateRaw
-        restored.dayTimeline = dayTimeline
+        restored.dayTimeline = day
         restored.knownPlace = LiveTimelineRows.knownPlace(knownPlaceID, in: context)
         if knownPlaceID != nil, restored.knownPlace == nil {
             restored.assignmentSource = .none
@@ -1015,7 +1081,8 @@ struct TimelineDeletedMovePayload: TimelineUndoRestoring {
     let createdAt: Date
     let startPlaceID: UUID?
     let endPlaceID: UUID?
-    let dayTimeline: DayTimeline?
+    /// Keys, not rows: the day or a fix can be gone from the store by the time Undo runs.
+    let dayKey: String?
     let routeCacheSignature: String?
     let routeCacheCoordinatesData: Data?
     let manualRouteCoordinatesData: Data?
@@ -1026,7 +1093,7 @@ struct TimelineDeletedMovePayload: TimelineUndoRestoring {
     let routeMatchConfidenceRaw: String
     let routeMatchSummary: String?
     let reviewStateRaw: String
-    let samples: [LocationSample]
+    let sampleKeys: [String]
 
     init(segment: MoveSegment) {
         id = segment.id
@@ -1040,7 +1107,7 @@ struct TimelineDeletedMovePayload: TimelineUndoRestoring {
         createdAt = segment.createdAt
         startPlaceID = segment.startPlace?.id
         endPlaceID = segment.endPlace?.id
-        dayTimeline = segment.dayTimeline
+        dayKey = segment.dayTimeline?.dayKey
         routeCacheSignature = segment.routeCacheSignature
         routeCacheCoordinatesData = segment.routeCacheCoordinatesData
         manualRouteCoordinatesData = segment.manualRouteCoordinatesData
@@ -1051,11 +1118,13 @@ struct TimelineDeletedMovePayload: TimelineUndoRestoring {
         routeMatchConfidenceRaw = segment.routeMatchConfidenceRaw
         routeMatchSummary = segment.routeMatchSummary
         reviewStateRaw = segment.reviewStateRaw
-        samples = segment.samples
+        sampleKeys = segment.samples.map(\.dedupeKey)
     }
 
     func restore(in context: ModelContext) {
-        guard LiveTimelineRows.move(id, in: context) == nil else { return }
+        // A retired row with this id stays retired; a second row with its id is never made.
+        guard !LiveTimelineRows.moveExists(id, in: context),
+              let day = LiveTimelineRows.day(dayKey, in: context) else { return }
         let restored = MoveSegment(
             dedupeKey: dedupeKey,
             startDate: startDate,
@@ -1069,7 +1138,7 @@ struct TimelineDeletedMovePayload: TimelineUndoRestoring {
         restored.createdAt = createdAt
         restored.startPlace = LiveTimelineRows.visit(startPlaceID, in: context)
         restored.endPlace = LiveTimelineRows.visit(endPlaceID, in: context)
-        restored.dayTimeline = dayTimeline
+        restored.dayTimeline = day
         restored.routeCacheSignature = routeCacheSignature
         restored.routeCacheCoordinatesData = routeCacheCoordinatesData
         restored.manualRouteCoordinatesData = manualRouteCoordinatesData
@@ -1081,7 +1150,7 @@ struct TimelineDeletedMovePayload: TimelineUndoRestoring {
         restored.routeMatchSummary = routeMatchSummary
         restored.reviewStateRaw = reviewStateRaw
         context.insert(restored)
-        for sample in samples {
+        for sample in LiveTimelineRows.samples(sampleKeys, in: context) {
             sample.moveSegment = restored
         }
     }

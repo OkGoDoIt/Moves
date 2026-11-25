@@ -11,7 +11,7 @@ struct PlacesTabView: View {
     @Query(sort: \KnownPlace.name)
     private var knownPlaces: [KnownPlace]
 
-    @Query(sort: \VisitPlace.arrivalDate, order: .reverse)
+    @Query(filter: #Predicate<VisitPlace> { $0.dayTimeline != nil }, sort: \VisitPlace.arrivalDate, order: .reverse)
     private var visits: [VisitPlace]
 
     @State private var index = PlacesIndex()
@@ -218,7 +218,7 @@ struct PlacesTabView: View {
         guard !Self.didClusterSeededVisits else { return }
         Self.didClusterSeededVisits = true
         for _ in 0..<80 {
-            let visitCount = (try? modelContext.fetchCount(FetchDescriptor<VisitPlace>())) ?? 0
+            let visitCount = (try? modelContext.fetchCount(FetchDescriptor<VisitPlace>.live())) ?? 0
             if visitCount > 0 { break }
             try? await Task.sleep(for: .milliseconds(250))
         }

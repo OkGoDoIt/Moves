@@ -263,8 +263,10 @@ final class MapTileTests: XCTestCase {
         for month in 1...3 {
             let start = date(2026, month, 10, calendar: calendar)
             moves.append(insertTrip(context, start: start, latitude: 11.9 + Double(month) * 0.01))
-            context.insert(VisitPlace(arrivalDate: start.addingTimeInterval(-3_600), departureDate: start,
-                                      latitude: 11.9, longitude: 108.4, horizontalAccuracy: 10))
+            let stay = VisitPlace(arrivalDate: start.addingTimeInterval(-3_600), departureDate: start,
+                                  latitude: 11.9, longitude: 108.4, horizontalAccuracy: 10)
+            context.insert(stay)
+            stay.dayTimeline = day(containing: stay.arrivalDate, in: context)
         }
         try context.save()
         let database = try makeDatabase()
@@ -345,6 +347,7 @@ final class MapTileTests: XCTestCase {
         let move = MoveSegment(dedupeKey: "m", startDate: start, endDate: start.addingTimeInterval(900),
                                transportMode: .walking, distanceMeters: 800, stepCount: nil)
         context.insert(move)
+        move.dayTimeline = day(containing: start, in: context)
         let fixes: [(Double, Double, Double, LocationSampleSource)] = [
             (11.940, 108.440, 8, .significantChange), (12.050, 108.600, 1_200, .significantChange),
             (11.990, 108.300, 10, .photoLibrary), (11.944, 108.444, 10, .significantChange)
@@ -359,8 +362,10 @@ final class MapTileTests: XCTestCase {
             context.insert(sample)
         }
         // Two days with nothing recorded between photos: not a trip.
-        context.insert(MoveSegment(dedupeKey: "gap", startDate: start.addingTimeInterval(3_600), endDate: start.addingTimeInterval(2 * 86_400),
-                                   transportMode: .automotive, distanceMeters: 300, stepCount: nil))
+        let gap = MoveSegment(dedupeKey: "gap", startDate: start.addingTimeInterval(3_600), endDate: start.addingTimeInterval(2 * 86_400),
+                              transportMode: .automotive, distanceMeters: 300, stepCount: nil)
+        context.insert(gap)
+        gap.dayTimeline = day(containing: gap.startDate, in: context)
         try context.save()
         let values = try MapTileSource.values(in: MapTileBucket.interval(ofMonth: 202_602, calendar: calendar), container: container)
         XCTAssertEqual(values.tracks.count, 1)
@@ -642,6 +647,7 @@ final class MapTileTests: XCTestCase {
         let move = MoveSegment(dedupeKey: UUID().uuidString, startDate: start, endDate: start.addingTimeInterval(1_200),
                                transportMode: .walking, distanceMeters: 1_500, stepCount: nil)
         context.insert(move)
+        move.dayTimeline = day(containing: start, in: context)
         for step in 0..<6 {
             let sample = LocationSample(
                 location: CLLocation(coordinate: CLLocationCoordinate2D(latitude: latitude + Double(step) * 0.002, longitude: 108.44),
@@ -652,6 +658,17 @@ final class MapTileTests: XCTestCase {
             context.insert(sample)
         }
         return move
+    }
+
+    /// A live stay or trip is always on a day; reuse the one already inserted for this date.
+    private func day(containing date: Date, in context: ModelContext) -> DayTimeline {
+        let key = DayTimeline.makeDayKey(for: date)
+        if let existing = try? context.fetch(FetchDescriptor<DayTimeline>(predicate: #Predicate { $0.dayKey == key })).first {
+            return existing
+        }
+        let day = DayTimeline(dayStart: date)
+        context.insert(day)
+        return day
     }
 
     private func syntheticValues(trips: Int, stays: Int, start: Date, seed generator: inout SeededGenerator, modes: [TransportMode]) -> MapTileSourceValues {

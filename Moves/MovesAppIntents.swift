@@ -290,7 +290,7 @@ final class MovesIntentRuntime {
         guard let modelContainer else { throw MovesIntentError.runtimeUnavailable }
 
         let context = ModelContext(modelContainer)
-        let descriptor = FetchDescriptor<VisitPlace>(
+        let descriptor = FetchDescriptor<VisitPlace>.live(
             sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .reverse)]
         )
         let places = try context.fetch(descriptor)
@@ -324,7 +324,7 @@ final class MovesIntentRuntime {
         let start = interval?.start ?? .distantPast
         let end = interval?.end ?? .distantFuture
         let descriptor = FetchDescriptor<VisitPlace>(
-            predicate: #Predicate { visit in visit.arrivalDate >= start && visit.arrivalDate < end },
+            predicate: #Predicate { visit in visit.arrivalDate >= start && visit.arrivalDate < end && visit.dayTimeline != nil },
             sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .reverse)]
         )
         let visits = try context.fetch(descriptor)
@@ -347,7 +347,7 @@ final class MovesIntentRuntime {
         let end = interval?.end ?? .distantFuture
         // `timelineStartDate` is computed, so fetch every move touching the period and check it here.
         let descriptor = FetchDescriptor<MoveSegment>(
-            predicate: #Predicate { move in move.endDate >= start && move.startDate < end },
+            predicate: #Predicate { move in move.endDate >= start && move.startDate < end && move.dayTimeline != nil },
             sortBy: [SortDescriptor(\MoveSegment.startDate, order: .reverse)]
         )
         let moves = try context.fetch(descriptor).filter { move in
@@ -365,8 +365,8 @@ final class MovesIntentRuntime {
     func whereWasI(at date: Date, includeCoordinates: Bool) throws -> String {
         guard let modelContainer else { throw MovesIntentError.runtimeUnavailable }
         let context = ModelContext(modelContainer)
-        let visits = try context.fetch(FetchDescriptor<VisitPlace>())
-        let moves = try context.fetch(FetchDescriptor<MoveSegment>())
+        let visits = try context.fetch(FetchDescriptor<VisitPlace>.live())
+        let moves = try context.fetch(FetchDescriptor<MoveSegment>.live())
         let result = TimelineLocator.locate(at: date, visits: visits, moves: moves)
         return TimelineMomentSummary.text(
             result: result,

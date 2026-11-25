@@ -120,6 +120,7 @@ struct AutomaticModeHistory {
         let descriptor = FetchDescriptor<MoveSegment>(predicate: #Predicate {
             rawModes.contains($0.transportModeRawValue)
                 && $0.transportModeSourceRaw == automatic && $0.originRaw == sensor
+                && $0.dayTimeline != nil
         })
         return try context.fetch(descriptor).filter(\.permitsAutomaticModeChanges)
     }
@@ -164,7 +165,7 @@ struct AutomaticModeHistory {
         let changes = try JSONDecoder().decode([Change].self, from: Data(contentsOf: undoURL))
         if context.hasChanges { try context.save() }
         let ids = changes.map(\.id)
-        let rows = try context.fetch(FetchDescriptor<MoveSegment>(predicate: #Predicate { ids.contains($0.id) }))
+        let rows = try context.fetch(FetchDescriptor<MoveSegment>(predicate: #Predicate { ids.contains($0.id) && $0.dayTimeline != nil }))
         // CloudKit mirroring cannot enforce unique IDs, so a duplicated row must
         // not trap here; each copy is restored on its own merits.
         let byID = Dictionary(grouping: rows, by: \.id)
@@ -246,6 +247,7 @@ struct AutomaticModeHistory {
         let user = TransportModeSource.user.rawValue
         let moves = try context.fetch(FetchDescriptor<MoveSegment>(predicate: #Predicate {
             foot.contains($0.transportModeRawValue) && $0.transportModeSourceRaw != user
+                && $0.dayTimeline != nil
         }))
         var report = PaceReport()
         for move in moves where !TimelineRetirement.isRetired(move) && permitsPaceRelabel(move) {

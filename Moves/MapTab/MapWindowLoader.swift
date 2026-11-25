@@ -138,6 +138,7 @@ final class MapWindowLoader {
         if usePerMove {
             await loadMoves(
                 repository: repository,
+                modelContext: modelContext,
                 selection: selection,
                 allowDirections: allowDirections,
                 generation: generation,
@@ -183,7 +184,7 @@ final class MapWindowLoader {
         let source = HistogramSource(
             interval: selection.interval,
             granularity: selection.granularity,
-            moveCount: (try? modelContext.fetchCount(FetchDescriptor<MoveSegment>())) ?? 0
+            moveCount: (try? modelContext.fetchCount(FetchDescriptor<MoveSegment>.live())) ?? 0
         )
         guard source != histogramSource else { return }
         histogramSource = source
@@ -232,6 +233,7 @@ final class MapWindowLoader {
 
     private func loadMoves(
         repository: SwiftDataTimelineRepository,
+        modelContext: ModelContext,
         selection: MapRangeSelection,
         allowDirections: Bool,
         generation: Int,
@@ -239,10 +241,10 @@ final class MapWindowLoader {
     ) async {
         let interval = selection.focus
         let moves: [MoveSegment]
-        let visits: [VisitPlace]
+        let markers: [MapVisitMarker]
         do {
             moves = try repository.moves(in: interval, modes: nil)
-            visits = try repository.visits(in: interval)
+            markers = Self.markers(for: try repository.visits(in: interval))
         } catch {
             return
         }
@@ -251,29 +253,47 @@ final class MapWindowLoader {
             displayedRoute(from: move, coordinates: cachedOrRawCoordinates(for: move))
         }
         guard generation == loadGeneration else { return }
-        apply(routes: immediate, visits: visits, selection: selection)
+        apply(routes: immediate, markers: markers, selection: selection)
 
         guard allowDirections else { return }
 
-        // Route matching suspends, and a move can be deleted while it waits. A deleted model
-        // traps when read, so check before touching each one on either side of the wait.
+        // Route matching suspends, and in that time a trip can be deleted or retired. No row
+        // is held across the wait: each is looked up by id on either side of it.
+        let moveIDs = moves.map(\.id)
         var refined: [MapDisplayedRoute] = []
-        refined.reserveCapacity(moves.count)
-        for move in moves {
-            guard Self.isLive(move) else { continue }
+        refined.reserveCapacity(moveIDs.count)
+        for id in moveIDs {
+            guard let move = Self.liveMove(id, in: modelContext) else { continue }
             let coordinates = await RoadRouteMatcher.matchedCoordinates(for: move)
             if generation != loadGeneration { return }
-            guard Self.isLive(move) else { continue }
-            if let route = displayedRoute(from: move, coordinates: coordinates) {
+            guard let current = Self.liveMove(id, in: modelContext) else { continue }
+            if let route = displayedRoute(from: current, coordinates: coordinates) {
                 refined.append(route)
             }
         }
-        // `visits` went stale the same way during the wait.
-        apply(routes: refined, visits: visits.filter { Self.isLive($0) }, selection: selection)
+        // Stays can go the same way during the wait; their markers are plain values.
+        let markerIDs = markers.map(\.id)
+        let liveVisitIDs = Set(((try? modelContext.fetch(FetchDescriptor<VisitPlace>(
+            predicate: #Predicate { markerIDs.contains($0.id) && $0.dayTimeline != nil }
+        ))) ?? []).map(\.id))
+        apply(routes: refined, markers: markers.filter { liveVisitIDs.contains($0.id) }, selection: selection)
     }
 
-    private static func isLive<Model: PersistentModel>(_ model: Model) -> Bool {
-        model.modelContext != nil && !model.isDeleted
+    private static func liveMove(_ id: UUID, in context: ModelContext) -> MoveSegment? {
+        var descriptor = FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.id == id && $0.dayTimeline != nil })
+        descriptor.fetchLimit = 1
+        return try? context.fetch(descriptor).first
+    }
+
+    private static func markers(for visits: [VisitPlace]) -> [MapVisitMarker] {
+        visits.map { place in
+            MapVisitMarker(
+                id: place.id,
+                coordinate: place.coordinate,
+                title: place.displayTitle,
+                arrivalDate: place.arrivalDate
+            )
+        }
     }
 
     private func loadAggregates(
@@ -364,7 +384,7 @@ final class MapWindowLoader {
 
         let visitRows = (try? repository.visits(in: interval)) ?? []
         guard generation == loadGeneration else { return }
-        apply(routes: routes, visits: visitRows, selection: selection)
+        apply(routes: routes, markers: Self.markers(for: visitRows), selection: selection)
 
         let container = modelContext.container
         let periodStart = interval.start
@@ -375,18 +395,11 @@ final class MapWindowLoader {
 
     private func apply(
         routes: [MapDisplayedRoute],
-        visits: [VisitPlace],
+        markers: [MapVisitMarker],
         selection: MapRangeSelection
     ) {
         self.routes = routes
-        self.visits = visits.map { place in
-            MapVisitMarker(
-                id: place.id,
-                coordinate: place.coordinate,
-                title: place.displayTitle,
-                arrivalDate: place.arrivalDate
-            )
-        }
+        self.visits = markers
         presentModes = TransportMode.allCases.filter { mode in
             mode != .stationary && routes.contains { $0.transportMode == mode }
         }

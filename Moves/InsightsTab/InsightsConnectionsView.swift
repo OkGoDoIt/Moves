@@ -7,7 +7,7 @@ private struct ConnectionLegDestination: View {
     @Query private var moves: [MoveSegment]
 
     init(legID: UUID) {
-        var descriptor = FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.id == legID })
+        var descriptor = FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.id == legID && $0.dayTimeline != nil })
         descriptor.fetchLimit = 1
         _moves = Query(descriptor)
     }

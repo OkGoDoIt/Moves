@@ -174,7 +174,7 @@ final class MovesCalendarSync: ObservableObject {
             let context = ModelContext(container)
             // Copied out at once with the learned place prefetched: the reconciler deletes
             // visits on its own context, and a lazy fault on a deleted row aborts.
-            var fetch = FetchDescriptor<VisitPlace>(predicate: #Predicate { $0.arrivalDate >= start })
+            var fetch = FetchDescriptor<VisitPlace>(predicate: #Predicate { $0.arrivalDate >= start && $0.dayTimeline != nil })
             fetch.relationshipKeyPathsForPrefetching = [\.knownPlace]
             let visits = try context.fetch(fetch).compactMap { CalendarVisit(visit: $0, since: start, now: now) }
             let wanted = Dictionary(visits.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
@@ -317,7 +317,7 @@ struct CalendarSyncSettingsView: View {
         await Task.detached(priority: .userInitiated) {
             let context = ModelContext(container)
             var fetch = FetchDescriptor<VisitPlace>(
-                predicate: #Predicate { $0.arrivalDate >= start },
+                predicate: #Predicate { $0.arrivalDate >= start && $0.dayTimeline != nil },
                 sortBy: [SortDescriptor(\.arrivalDate, order: .reverse)]
             )
             fetch.fetchLimit = 50

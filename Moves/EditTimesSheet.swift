@@ -12,12 +12,12 @@ enum EditTimesRules {
 
         let arrival = visit.arrivalDate
         var visits = FetchDescriptor<VisitPlace>(
-            predicate: #Predicate { $0.arrivalDate > arrival },
+            predicate: #Predicate { $0.arrivalDate > arrival && $0.dayTimeline != nil },
             sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .forward)]
         )
         visits.fetchLimit = 1
         var moves = FetchDescriptor<MoveSegment>(
-            predicate: #Predicate { $0.startDate > arrival },
+            predicate: #Predicate { $0.startDate > arrival && $0.dayTimeline != nil },
             sortBy: [SortDescriptor(\MoveSegment.startDate, order: .forward)]
         )
         moves.fetchLimit = 1

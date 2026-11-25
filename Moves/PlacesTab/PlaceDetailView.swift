@@ -25,7 +25,7 @@ struct PlaceDetailView: View {
         self.placeID = placeID
         let identifier = placeID
         _knownPlaces = Query(filter: #Predicate<KnownPlace> { $0.id == identifier })
-        _allVisits = Query(filter: #Predicate<VisitPlace> { $0.knownPlace?.id == identifier }, sort: \.arrivalDate, order: .reverse)
+        _allVisits = Query(filter: #Predicate<VisitPlace> { $0.knownPlace?.id == identifier && $0.dayTimeline != nil }, sort: \.arrivalDate, order: .reverse)
         _camera = State(initialValue: .automatic)
     }
 
@@ -350,7 +350,7 @@ struct SuggestedPlaceDetailView: View {
 
     @EnvironmentObject private var rootController: MovesRootController
 
-    @Query(sort: \VisitPlace.arrivalDate, order: .reverse)
+    @Query(filter: #Predicate<VisitPlace> { $0.dayTimeline != nil }, sort: \VisitPlace.arrivalDate, order: .reverse)
     private var allVisits: [VisitPlace]
 
     /// The one name on this screen: the title shows exactly what Confirm will save.

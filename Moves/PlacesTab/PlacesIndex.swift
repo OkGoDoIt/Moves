@@ -1246,7 +1246,7 @@ enum PlacesLibrary {
 
     private static func fetchVisits(ids: [UUID], in context: ModelContext) throws -> [VisitPlace] {
         let wanted = Set(ids)
-        let all = try context.fetch(FetchDescriptor<VisitPlace>())
+        let all = try context.fetch(FetchDescriptor<VisitPlace>.live())
         let byID = Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0) })
         return ids.compactMap { id in
             guard wanted.contains(id) else { return nil }
@@ -1284,6 +1284,7 @@ enum PlacesLibrary {
         let minLon = place.centerLongitude - longitudeDelta, maxLon = place.centerLongitude + longitudeDelta
         return (try? context.fetch(FetchDescriptor<VisitPlace>(predicate: #Predicate {
             $0.latitude >= minLat && $0.latitude <= maxLat && $0.longitude >= minLon && $0.longitude <= maxLon
+                && $0.dayTimeline != nil
         }))) ?? []
     }
 
@@ -1342,7 +1343,7 @@ struct VisitAssignmentSnapshot {
     func restore(in context: ModelContext) {
         let ids = Array(rows.keys)
         guard !ids.isEmpty else { return }
-        let visits = (try? context.fetch(FetchDescriptor<VisitPlace>(predicate: #Predicate { ids.contains($0.id) }))) ?? []
+        let visits = (try? context.fetch(FetchDescriptor<VisitPlace>(predicate: #Predicate { ids.contains($0.id) && $0.dayTimeline != nil }))) ?? []
         let places = (try? context.fetch(FetchDescriptor<KnownPlace>())) ?? []
         let placesByID = Dictionary(places.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         for visit in visits {
@@ -1414,7 +1415,7 @@ struct KnownPlaceUndoPayload {
         write(to: place)
 
         let assignments = Dictionary(visits.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        let allVisits = (try? context.fetch(FetchDescriptor<VisitPlace>())) ?? []
+        let allVisits = (try? context.fetch(FetchDescriptor<VisitPlace>.live())) ?? []
         for visit in allVisits {
             guard let assignment = assignments[visit.id] else { continue }
             visit.knownPlace = place

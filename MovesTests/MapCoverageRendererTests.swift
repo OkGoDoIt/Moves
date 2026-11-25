@@ -347,6 +347,8 @@ final class MapCoverageRendererTests: XCTestCase {
         let move = MoveSegment(dedupeKey: "m", startDate: start, endDate: start.addingTimeInterval(900),
                                transportMode: .walking, distanceMeters: 800, stepCount: nil)
         context.insert(move)
+        let day = insertDay(containing: start, in: context)
+        move.dayTimeline = day
         let good = [(11.940, 108.440, 8.0), (11.942, 108.442, 0.0), (11.944, 108.444, 65.0)]
         let bad = [(12.050, 108.600, 1_200.0), (11.900, 108.300, -1.0), (11.950, 108.500, 101.0)]
         var samples: [LocationSample] = []
@@ -365,6 +367,7 @@ final class MapCoverageRendererTests: XCTestCase {
         let stay = VisitPlace(arrivalDate: start.addingTimeInterval(-3_600), departureDate: start,
                               latitude: 11.939, longitude: 108.439, horizontalAccuracy: 20)
         context.insert(stay)
+        stay.dayTimeline = day
         try context.save()
 
         let index = try MapActivityIndexBuilder.build(container: container, undatedCoverageURL: missingURL())
@@ -391,6 +394,7 @@ final class MapCoverageRendererTests: XCTestCase {
         let drawn = (0..<5).map { CLLocationCoordinate2D(latitude: 11.94 + Double($0) * 0.001, longitude: 108.44) }
         move.storeManualRouteCoordinates(drawn)
         context.insert(move)
+        move.dayTimeline = insertDay(containing: start, in: context)
         try context.save()
         let index = try MapActivityIndexBuilder.build(container: container, undatedCoverageURL: missingURL())
         XCTAssertEqual(index.tracks.first?.mode, .cycling)
@@ -514,6 +518,7 @@ final class MapCoverageRendererTests: XCTestCase {
         let move = MoveSegment(dedupeKey: "m", startDate: start, endDate: start.addingTimeInterval(1_800),
                                transportMode: .walking, distanceMeters: 1_000, stepCount: nil)
         context.insert(move)
+        move.dayTimeline = insertDay(containing: start, in: context)
         let fixes: [(Double, Double, LocationSampleSource)] = [
             (11.940, 108.440, .significantChange), (11.950, 108.470, .photoLibrary), (11.944, 108.444, .routeTracking)
         ]
@@ -627,6 +632,13 @@ final class MapCoverageRendererTests: XCTestCase {
 
     private func missingURL() -> URL {
         FileManager.default.temporaryDirectory.appendingPathComponent("no-coverage-\(UUID().uuidString).json")
+    }
+
+    /// A live stay or trip is always on a day.
+    private func insertDay(containing date: Date, in context: ModelContext) -> DayTimeline {
+        let day = DayTimeline(dayStart: date)
+        context.insert(day)
+        return day
     }
 }
 

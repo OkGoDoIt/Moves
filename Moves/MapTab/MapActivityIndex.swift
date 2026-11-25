@@ -390,7 +390,7 @@ enum MapActivityIndexBuilder {
         context.autosaveEnabled = false
         var index = MapActivityIndex()
 
-        var moves = FetchDescriptor<MoveSegment>(sortBy: [SortDescriptor(\.startDate)])
+        var moves = FetchDescriptor<MoveSegment>.live(sortBy: [SortDescriptor(\.startDate)])
         moves.fetchLimit = pageSize
         moves.includePendingChanges = false
         moves.relationshipKeyPathsForPrefetching = [\.samplesStorage, \.startPlace, \.endPlace]
@@ -426,7 +426,7 @@ enum MapActivityIndexBuilder {
             if count < pageSize { break }
         }
 
-        var visits = FetchDescriptor<VisitPlace>(sortBy: [SortDescriptor(\.arrivalDate)])
+        var visits = FetchDescriptor<VisitPlace>.live(sortBy: [SortDescriptor(\.arrivalDate)])
         visits.includePendingChanges = false
         for visit in try context.fetch(visits) where !visit.isDeleted {
             guard MapRegionFactory.isUsableCoordinate(visit.coordinate) else { continue }

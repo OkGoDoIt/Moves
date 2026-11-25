@@ -228,7 +228,7 @@ struct MovesSearchCorpus: Sendable {
             corpus.knownPlaces = try context.fetch(FetchDescriptor<KnownPlace>(sortBy: [SortDescriptor(\.name)]))
                 .map { Place(id: $0.id, name: $0.name, locality: $0.locality, category: $0.category, countryCode: $0.countryCode) }
 
-            var visitFetch = FetchDescriptor<VisitPlace>(sortBy: [SortDescriptor(\.arrivalDate)])
+            var visitFetch = FetchDescriptor<VisitPlace>.live(sortBy: [SortDescriptor(\.arrivalDate)])
             visitFetch.relationshipKeyPathsForPrefetching = [\.dayTimeline, \.knownPlace]
             var visits: [PersistentIdentifier: [Visit]] = [:]
             var buckets: [PersistentIdentifier: Set<String>] = [:]
@@ -249,7 +249,7 @@ struct MovesSearchCorpus: Sendable {
                 )
             }
 
-            var moveFetch = FetchDescriptor<MoveSegment>(sortBy: [SortDescriptor(\.startDate)])
+            var moveFetch = FetchDescriptor<MoveSegment>.live(sortBy: [SortDescriptor(\.startDate)])
             moveFetch.relationshipKeyPathsForPrefetching = [\.dayTimeline, \.startPlace]
             var moves: [PersistentIdentifier: [Move]] = [:]
             for move in try context.fetch(moveFetch) {

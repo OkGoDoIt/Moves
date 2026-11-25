@@ -364,6 +364,8 @@ enum PlaceLearningEngine {
         knownPlaces: [KnownPlace]
     ) {
         guard visit.assignmentSource != .user else { return }
+        // A retired stay joined to a place would show in that place's visits.
+        guard !TimelineRetirement.isRetired(visit) else { return }
         guard resolution.source == .auto || resolution.source == .autoAmbiguous else { return }
         guard let placeID = resolution.placeID,
               let place = knownPlaces.first(where: { $0.id == placeID })

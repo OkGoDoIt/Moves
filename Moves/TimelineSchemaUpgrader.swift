@@ -1,6 +1,8 @@
 import CoreLocation
 import Foundation
+import os
 import SwiftData
+import UIKit
 
 /// One-shot backfill that fills derived fields added in the WS0 schema.
 ///
@@ -187,6 +189,43 @@ enum TimelineSchemaUpgrader {
         }
     }
 
+    /// Deletes the trips and stops the rebuild retired since the last launch. Runs on every
+    /// launch, after any upgrade, and like it holds the timeline and background work back:
+    /// those rows are deleted only while no view or worker can hold one.
+    ///
+    /// Two indexed counts decide whether there is anything to do, so a launch with nothing
+    /// to purge shows nothing and waits for nothing. The purge saves in batches and stops
+    /// when its background time runs out; what is left stays retired for the next launch.
+    @MainActor
+    static func purgeRetiredRowsIfAny(container: ModelContainer) {
+        let waiting = LaunchLog.measureCount("Retired row probe") {
+            (try? SwiftDataTimelineRepository.retiredRowCount(in: ModelContext(container))) ?? 0
+        }
+        guard waiting > 0 else { return }
+        let earlier = running
+        running = Task.detached(priority: .userInitiated) {
+            await earlier?.value
+            let expired = OSAllocatedUnfairLock(initialState: false)
+            let assertion = await MainActor.run {
+                UIApplication.shared.beginBackgroundTask(withName: "Remove retired timeline rows") {
+                    expired.withLock { $0 = true }
+                }
+            }
+            defer {
+                Task { @MainActor in UIApplication.shared.endBackgroundTask(assertion) }
+            }
+            let context = ModelContext(container)
+            context.autosaveEnabled = false
+            do {
+                _ = try LaunchLog.measureCount("Retired row purge") {
+                    try SwiftDataTimelineRepository.purgeRetiredRows(in: context, shouldStop: { expired.withLock { $0 } })
+                }
+            } catch {
+                LaunchLog.logger.error("Retired row purge failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
     /// Applies every backfill step but the long-trip rebuild on one context. Exposed for
     /// tests; calling twice is a no-op besides rewriting the same derived values.
     static func upgrade(in context: ModelContext, from storedVersion: Int = 0) throws {
@@ -207,7 +246,7 @@ enum TimelineSchemaUpgrader {
     @discardableResult
     static func tagImportedHistory(in context: ModelContext) throws -> Int {
         let sensor = TimelineItemOrigin.sensor.rawValue
-        var moveDescriptor = FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.originRaw == sensor })
+        var moveDescriptor = FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.originRaw == sensor && $0.dayTimeline != nil })
         moveDescriptor.relationshipKeyPathsForPrefetching = [\.samplesStorage]
         var tagged = 0
         for move in try context.fetch(moveDescriptor) where TimelineReviewHeuristics.isImportedHistory(move) {
@@ -216,7 +255,7 @@ enum TimelineSchemaUpgrader {
             tagged += 1
         }
         guard tagged > 0 else { return 0 }
-        let visits = try context.fetch(FetchDescriptor<VisitPlace>(predicate: #Predicate { $0.originRaw == sensor }))
+        let visits = try context.fetch(FetchDescriptor<VisitPlace>(predicate: #Predicate { $0.originRaw == sensor && $0.dayTimeline != nil }))
         for visit in visits where TimelineReviewHeuristics.isImportedHistory(visit) {
             visit.origin = .imported
             if visit.reviewState == .pending { visit.reviewState = .none }
@@ -236,7 +275,7 @@ enum TimelineSchemaUpgrader {
         var changed = 0
 
         let pendingVisits = try context.fetch(FetchDescriptor<VisitPlace>(
-            predicate: #Predicate { $0.reviewStateRaw == pending }
+            predicate: #Predicate { $0.reviewStateRaw == pending && $0.dayTimeline != nil }
         ))
         for visit in pendingVisits where TimelineReviewHeuristics.question(for: visit, now: now) == nil {
             visit.reviewState = .none
@@ -244,7 +283,7 @@ enum TimelineSchemaUpgrader {
         }
 
         let pendingMoves = try context.fetch(FetchDescriptor<MoveSegment>(
-            predicate: #Predicate { $0.reviewStateRaw == pending }
+            predicate: #Predicate { $0.reviewStateRaw == pending && $0.dayTimeline != nil }
         ))
         for move in pendingMoves where TimelineReviewHeuristics.question(for: move, now: now) == nil {
             move.reviewState = .none
@@ -258,6 +297,7 @@ enum TimelineSchemaUpgrader {
                     && visit.originRaw == sensor
                     && visit.arrivalDate >= windowStart
                     && visit.departureDate != nil
+                    && visit.dayTimeline != nil
             }
         ))
         for visit in recentStays where TimelineReviewHeuristics.shouldAskAboutStay(visit, now: now) {
@@ -314,7 +354,7 @@ enum TimelineSchemaUpgrader {
     /// one cell per second. Returns how many fields were cleared.
     @discardableResult
     static func clearCellCopiedAddresses(in context: ModelContext) throws -> Int {
-        let visits = try context.fetch(FetchDescriptor<VisitPlace>())
+        let visits = try context.fetch(FetchDescriptor<VisitPlace>.live())
         var groups: [String: [VisitPlace]] = [:]
         for visit in visits {
             guard let address = PlaceDisplayNamer.meaningful(visit.formattedAddress) else { continue }
@@ -361,7 +401,7 @@ enum TimelineSchemaUpgrader {
     @discardableResult
     static func clearCountryNamedCities(in context: ModelContext) throws -> Int {
         var cleared = 0
-        for visit in try context.fetch(FetchDescriptor<VisitPlace>())
+        for visit in try context.fetch(FetchDescriptor<VisitPlace>.live())
         where PlaceGeocodeRegion.isCountryName(visit.locality, countryCode: visit.countryCode) {
             visit.locality = nil
             cleared += 1
@@ -422,7 +462,7 @@ enum TimelineSchemaUpgrader {
     /// Returns how many labels changed.
     @discardableResult
     static func unifyAutomaticLabels(in context: ModelContext) throws -> Int {
-        let visits = try context.fetch(FetchDescriptor<VisitPlace>()).filter { visit in
+        let visits = try context.fetch(FetchDescriptor<VisitPlace>.live()).filter { visit in
             visit.knownPlace == nil
                 && visit.assignmentSource == .none
                 && PlaceDisplayNamer.meaningful(visit.userLabel) == nil
@@ -483,7 +523,7 @@ enum TimelineSchemaUpgrader {
     /// place is made for it. A reinstall that starts again from version 0 then ends with
     /// the places the phone had, not one-stay twins beside them.
     static func clusterUserLabeledPlaces(in context: ModelContext) throws {
-        let visits = try context.fetch(FetchDescriptor<VisitPlace>())
+        let visits = try context.fetch(FetchDescriptor<VisitPlace>.live())
         let unlabeled = visits.filter { visit in
             visit.knownPlace == nil
                 && visit.assignmentSource == .none
@@ -566,7 +606,7 @@ enum TimelineSchemaUpgrader {
     }
 
     private static func backfillRouteMatchPolicies(in context: ModelContext) throws {
-        let moves = try context.fetch(FetchDescriptor<MoveSegment>())
+        let moves = try context.fetch(FetchDescriptor<MoveSegment>.live())
         for move in moves {
             if move.manualRouteCoordinatesData != nil {
                 move.routeMatchPolicy = .manual

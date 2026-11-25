@@ -201,23 +201,28 @@ final class TimelineTabTests: XCTestCase {
             longitude: 13.41,
             horizontalAccuracy: 10
         )
+        // A live stay or trip is always on a day.
+        let day = DayTimeline(dayStart: date(9, 0))
+        context.insert(day)
         context.insert(earlier)
         context.insert(latest)
+        earlier.dayTimeline = day
+        latest.dayTimeline = day
         try context.save()
 
         XCTAssertEqual(EditTimesRules.nextItemStart(after: earlier, in: context), date(12, 0))
         XCTAssertNil(EditTimesRules.nextItemStart(after: latest, in: context))
 
-        context.insert(
-            MoveSegment(
-                dedupeKey: "later-move",
-                startDate: date(13, 0),
-                endDate: date(13, 30),
-                transportMode: .walking,
-                distanceMeters: 800,
-                stepCount: nil
-            )
+        let laterMove = MoveSegment(
+            dedupeKey: "later-move",
+            startDate: date(13, 0),
+            endDate: date(13, 30),
+            transportMode: .walking,
+            distanceMeters: 800,
+            stepCount: nil
         )
+        context.insert(laterMove)
+        laterMove.dayTimeline = day
         try context.save()
 
         XCTAssertEqual(EditTimesRules.nextItemStart(after: latest, in: context), date(13, 0))

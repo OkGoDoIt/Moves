@@ -382,8 +382,8 @@ final class MovesCloudDataPresencePublisher: ObservableObject {
         let context = ModelContext(modelContainer)
 
         do {
-            let placeCount = try context.fetchCount(FetchDescriptor<VisitPlace>())
-            let moveCount = try context.fetchCount(FetchDescriptor<MoveSegment>())
+            let placeCount = try context.fetchCount(FetchDescriptor<VisitPlace>.live())
+            let moveCount = try context.fetchCount(FetchDescriptor<MoveSegment>.live())
 
             CloudDataPresenceStore.publish(
                 recordCountsByKey: [

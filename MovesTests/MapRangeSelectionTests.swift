@@ -235,26 +235,29 @@ final class MapRangeSelectionTests: XCTestCase {
         let context = ModelContext(container)
         let calendar = Self.newYorkCalendar()
         let now = Self.date(2026, 9, 20, 20, 0, calendar: calendar)
-        context.insert(
-            MoveSegment(
-                dedupeKey: "morning",
-                startDate: Self.date(2026, 9, 20, 8, 0, calendar: calendar),
-                endDate: Self.date(2026, 9, 20, 9, 0, calendar: calendar),
-                transportMode: .walking,
-                distanceMeters: 1_000,
-                stepCount: nil
-            )
+        // A live trip is always on a day.
+        let day = DayTimeline(containing: Self.date(2026, 9, 20, 8, 0, calendar: calendar), in: calendar.timeZone)
+        context.insert(day)
+        let morning = MoveSegment(
+            dedupeKey: "morning",
+            startDate: Self.date(2026, 9, 20, 8, 0, calendar: calendar),
+            endDate: Self.date(2026, 9, 20, 9, 0, calendar: calendar),
+            transportMode: .walking,
+            distanceMeters: 1_000,
+            stepCount: nil
         )
-        context.insert(
-            MoveSegment(
-                dedupeKey: "evening",
-                startDate: Self.date(2026, 9, 20, 18, 0, calendar: calendar),
-                endDate: Self.date(2026, 9, 20, 19, 0, calendar: calendar),
-                transportMode: .cycling,
-                distanceMeters: 5_000,
-                stepCount: nil
-            )
+        context.insert(morning)
+        morning.dayTimeline = day
+        let eveningMove = MoveSegment(
+            dedupeKey: "evening",
+            startDate: Self.date(2026, 9, 20, 18, 0, calendar: calendar),
+            endDate: Self.date(2026, 9, 20, 19, 0, calendar: calendar),
+            transportMode: .cycling,
+            distanceMeters: 5_000,
+            stepCount: nil
         )
+        context.insert(eveningMove)
+        eveningMove.dayTimeline = day
         try context.save()
 
         let today = MapRangeSelection.preset(.today, now: now, calendar: calendar)

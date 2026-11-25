@@ -1,5 +1,6 @@
 import CoreLocation
 import Foundation
+import SwiftData
 
 /// A timestamped point used to estimate speed along a rendered route.
 ///
@@ -155,6 +156,10 @@ enum SpeedProfileBuilder {
         let startDate = move.timelineStartDate
         let endDate = move.endDate
         let modeRaw = move.transportMode.rawValue
+        // The row is not held across the await: it is looked up again by id afterwards,
+        // and a trip deleted or retired meanwhile just doesn't get the cached profile.
+        let moveID = move.id
+        let context = move.modelContext
         let packed = coordinates.map { SIMD2(Double($0.latitude), Double($0.longitude)) }
         let fractions = await Task.detached(priority: .utility) {
             let unpacked = packed.map {
@@ -169,7 +174,11 @@ enum SpeedProfileBuilder {
                 mode: mode
             )
         }.value
-        store(fractions, on: move, signature: signature)
+        guard let context else { return fractions }
+        var descriptor = FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.id == moveID && $0.dayTimeline != nil })
+        descriptor.fetchLimit = 1
+        guard let current = try? context.fetch(descriptor).first, !current.isDeleted else { return fractions }
+        store(fractions, on: current, signature: signature)
         return fractions
     }
 

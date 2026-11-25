@@ -104,12 +104,12 @@ struct MovesStatisticsSnapshot: Sendable {
         try await Task.detached(priority: .userInitiated) {
             let context = ModelContext(container)
             context.autosaveEnabled = false
-            var placeFetch = FetchDescriptor<VisitPlace>()
+            var placeFetch = FetchDescriptor<VisitPlace>.live()
             placeFetch.relationshipKeyPathsForPrefetching = [\.dayTimeline]
             let visits = try context.fetch(placeFetch)
                 .filter { $0.dayTimeline != nil }
                 .map(ConnectionVisit.init)
-            var moveFetch = FetchDescriptor<MoveSegment>()
+            var moveFetch = FetchDescriptor<MoveSegment>.live()
             moveFetch.relationshipKeyPathsForPrefetching = [\.dayTimeline, \.startPlace, \.endPlace]
             let moves = try context.fetch(moveFetch)
                 .filter { $0.dayTimeline != nil }

@@ -299,7 +299,7 @@ final class PlacesIndexTests: XCTestCase {
             userLabel: "Rijksmuseum"
         )
         visit.countryCode = "NL"
-        context.insert(visit)
+        context.insertOnDay(visit)
         let place = KnownPlace(name: "Rijksmuseum", latitude: 52.37, longitude: 4.89)
         context.insert(place)
         try context.save()
@@ -339,8 +339,8 @@ final class PlacesIndexTests: XCTestCase {
             horizontalAccuracy: 10,
             userLabel: "Orsay"
         )
-        context.insert(first)
-        context.insert(second)
+        context.insertOnDay(first)
+        context.insertOnDay(second)
         try context.save()
 
         let created = try PlacesLibrary.confirmSuggested(
@@ -565,7 +565,7 @@ final class PlacesIndexTests: XCTestCase {
             horizontalAccuracy: 10
         )
         visit.thoroughfare = "Museumstraat"
-        context.insert(visit)
+        context.insertOnDay(visit)
         try context.save()
 
         let created = try PlacesLibrary.confirmSuggested(
@@ -599,7 +599,7 @@ final class PlacesIndexTests: XCTestCase {
             longitude: 106.7100,
             horizontalAccuracy: 12
         )
-        context.insert(visit)
+        context.insertOnDay(visit)
         try context.save()
 
         let region = PlaceGeocodeRegion(
@@ -649,7 +649,7 @@ final class PlacesIndexTests: XCTestCase {
         )
         autoVisit.knownPlace = duplicate
         autoVisit.assignmentSource = .auto
-        context.insert(autoVisit)
+        context.insertOnDay(autoVisit)
         try context.save()
 
         try PlacesLibrary.merge(duplicate, into: keeper, in: context)
@@ -680,7 +680,7 @@ final class PlacesIndexTests: XCTestCase {
         visit.knownPlace = place
         visit.assignmentSource = .user
         visit.assignmentConfidence = 1
-        context.insert(visit)
+        context.insertOnDay(visit)
         try context.save()
         let placeID = place.id
 
@@ -726,7 +726,7 @@ final class PlacesIndexTests: XCTestCase {
         )
         visit.knownPlace = duplicate
         visit.assignmentSource = .user
-        context.insert(visit)
+        context.insertOnDay(visit)
         try context.save()
         let duplicateID = duplicate.id
 
@@ -853,6 +853,19 @@ final class PlacesIndexTests: XCTestCase {
 
     private func hours(_ value: Int) -> Date {
         now.addingTimeInterval(TimeInterval(-value) * 3_600)
+    }
+}
+
+private extension ModelContext {
+    /// Inserts a stay on the day it starts, as the app always files one: a stay with no
+    /// day is retired and every reader leaves it out.
+    func insertOnDay(_ visit: VisitPlace) {
+        insert(visit)
+        let key = DayTimeline.makeDayKey(for: visit.arrivalDate)
+        let existing = try? fetch(FetchDescriptor<DayTimeline>(predicate: #Predicate { $0.dayKey == key })).first
+        let day = existing ?? DayTimeline(dayStart: visit.arrivalDate)
+        if existing == nil { insert(day) }
+        visit.dayTimeline = day
     }
 }
 

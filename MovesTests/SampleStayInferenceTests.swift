@@ -366,15 +366,6 @@ final class SampleStayInferenceTests: XCTestCase {
 
 @MainActor
 final class SampleStayReconciliationTests: XCTestCase {
-    /// `MOVES_RETIREMENT_DEFERRED=1` (as `TEST_RUNNER_MOVES_RETIREMENT_DEFERRED`) runs the
-    /// whole class with rows retired instead of deleted.
-    override func setUp() async throws {
-        TimelineRetirement.isDeferred = ProcessInfo.processInfo.environment["MOVES_RETIREMENT_DEFERRED"] == "1"
-    }
-
-    override func tearDown() async throws {
-        TimelineRetirement.isDeferred = false
-    }
 
     func testPrematureVisitDepartureIsExtendedAndTheSpanningMoveIsReplaced() async throws {
         let container = try makeContainer()
@@ -1380,8 +1371,6 @@ final class SampleStayReconciliationTests: XCTestCase {
     // MARK: - H: retiring rows instead of deleting them
 
     func testDissolvedStopIsRetiredAndStaysReadableElsewhere() async throws {
-        TimelineRetirement.isDeferred = true
-        defer { TimelineRetirement.isDeferred = false }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("Retire-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
@@ -1471,8 +1460,6 @@ final class SampleStayReconciliationTests: XCTestCase {
     /// A late report of a visit whose stop the rebuild retired makes a new stop; the
     /// retired row stays retired.
     func testLateVisitReportDoesNotReviveARetiredStop() throws {
-        TimelineRetirement.isDeferred = true
-        defer { TimelineRetirement.isDeferred = false }
         let container = try makeContainer()
         let context = ModelContext(container)
         let repository = SwiftDataTimelineRepository(modelContext: context)
@@ -1488,6 +1475,50 @@ final class SampleStayReconciliationTests: XCTestCase {
         XCTAssertNotEqual(again.id, first.id)
         XCTAssertNil(first.dayTimeline, "The retired row is not given a day again")
         XCTAssertEqual(try context.liveVisits().map(\.id), [again.id])
+    }
+
+    /// The person deletes a stop on the view's context while the rebuild waits on Core
+    /// Motion for the trip into it. The rebuild holds no stop across that wait: it looks
+    /// both ends up again, leaves that trip out, and finishes without touching the row.
+    func testAStopDeletedWhileItsTripIsClassifiedIsSkippedQuietly() async throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let repository = SwiftDataTimelineRepository(modelContext: context)
+        let classifier = InterruptingMotionClassifier()
+        let assembler = DefaultTimelineAssembler(
+            repository: repository,
+            motionClassifier: classifier,
+            placeNameResolver: EmptyPlaceNameResolver(),
+            automaticModes: { .init() }
+        )
+        let start = Date().addingTimeInterval(-6 * 60 * 60)
+        let home = CLLocationCoordinate2D(latitude: 10.76, longitude: 106.70)
+        let work = offset(home, north: 4_000, east: 0)
+        let left = start.addingTimeInterval(2 * 60 * 60)
+        let arrived = left.addingTimeInterval(20 * 60)
+        _ = try repository.addOrUpdateVisit(from: MockVisit(coordinate: home, horizontalAccuracy: 20, arrivalDate: start, departureDate: left))
+        let workStop = try repository.addOrUpdateVisit(from: MockVisit(coordinate: work, horizontalAccuracy: 20,
+                                                                       arrivalDate: arrived, departureDate: arrived.addingTimeInterval(2 * 60 * 60)))
+        let along = (1...9).map { step in
+            location(offset(home, north: Double(step) * 400, east: 0), at: left.addingTimeInterval(Double(step) * 2 * 60))
+        }
+        _ = try repository.appendSamples(from: along, source: .significantChange)
+        try context.save()
+
+        let workID = workStop.id
+        classifier.whileClassifying = {
+            let view = ModelContext(container)
+            guard let stop = try? view.fetch(FetchDescriptor<VisitPlace>(predicate: #Predicate { $0.id == workID })).first else { return }
+            view.delete(stop)
+            try? view.save()
+        }
+        await assembler.reconcileSampleStays()
+
+        XCTAssertGreaterThan(classifier.classified, 0, "The trip into the stop was classified")
+        let check = ModelContext(container)
+        XCTAssertEqual(try check.fetchCount(FetchDescriptor<VisitPlace>(predicate: #Predicate { $0.id == workID })), 0)
+        XCTAssertFalse(try check.liveMoves().contains { $0.endPlace == nil || $0.startPlace == nil },
+                       "No trip was written to a stop that is gone")
     }
 
     /// Photo-inferred history is the photo import's: never dissolved, trimmed, or relabeled,
@@ -1711,19 +1742,6 @@ final class SampleStayReconciliationTests: XCTestCase {
         try await rebuild.assertSettled()
     }
 
-    func testRetireDeletesWhileRetirementIsOff() throws {
-        TimelineRetirement.isDeferred = false
-        let container = try makeContainer()
-        let context = ModelContext(container)
-        let repository = SwiftDataTimelineRepository(modelContext: context)
-        let stop = VisitPlace(arrivalDate: .now, departureDate: .now, latitude: 10, longitude: 106, horizontalAccuracy: 20)
-        context.insert(stop)
-        try context.save()
-        repository.retire(stop)
-        try context.save()
-        XCTAssertEqual(try ModelContext(container).fetchCount(FetchDescriptor<VisitPlace>()), 0)
-    }
-
     private func identities(in context: ModelContext) throws -> (visits: Set<UUID>, moves: Set<UUID>) {
         (Set(try context.liveVisits().map(\.id)), Set(try context.liveMoves().map(\.id)))
     }
@@ -1892,6 +1910,24 @@ private struct EmptyPlaceNameResolver: PlaceNameResolver {
     }
 }
 
+/// Runs `whileClassifying` inside the Core Motion wait for a new trip, as a person's edit
+/// on another context can land in that wait.
+private final class InterruptingMotionClassifier: MotionClassifier {
+    var whileClassifying: () -> Void = {}
+    private(set) var classified = 0
+
+    func classifyTransport(start: Date, end: Date, locations: [CLLocation]) async -> (mode: TransportMode, confidence: Double) {
+        classified += 1
+        await Task.yield()
+        whileClassifying()
+        whileClassifying = {}
+        await Task.yield()
+        return (.automotive, 0.9)
+    }
+
+    func stepCount(start: Date, end: Date) async -> Int? { 0 }
+}
+
 private func fix(
     _ coordinate: CLLocationCoordinate2D,
     at date: Date,
@@ -1906,7 +1942,6 @@ private func fix(
 }
 
 /// What a reader of the timeline sees: rows the rebuild retired are not part of it.
-/// With `TimelineRetirement.isDeferred` off this is every row, as before.
 extension ModelContext {
     func liveVisits() throws -> [VisitPlace] {
         try fetch(FetchDescriptor<VisitPlace>(sortBy: [SortDescriptor(\.arrivalDate)]))

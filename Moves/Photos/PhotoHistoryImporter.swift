@@ -544,7 +544,7 @@ struct PhotoHistoryImporter {
             let visitsThrough = range.end.addingTimeInterval(slack + configuration.maximumFlightGap)
             visits = try context.fetch(
                 FetchDescriptor<VisitPlace>(
-                    predicate: #Predicate { $0.arrivalDate >= visitsFrom && $0.arrivalDate <= visitsThrough },
+                    predicate: #Predicate { $0.arrivalDate >= visitsFrom && $0.arrivalDate <= visitsThrough && $0.dayTimeline != nil },
                     sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .forward)]
                 )
             )

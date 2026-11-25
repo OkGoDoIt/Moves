@@ -697,6 +697,12 @@ private func insertVisit(
     visit.assignmentSource = source
     visit.knownPlace = knownPlace
     context.insert(visit)
+    // On its day, as the app always files a stay: one with no day is retired.
+    let key = DayTimeline.makeDayKey(for: arrival)
+    let existing = try? context.fetch(FetchDescriptor<DayTimeline>(predicate: #Predicate { $0.dayKey == key })).first
+    let day = existing ?? DayTimeline(dayStart: arrival)
+    if existing == nil { context.insert(day) }
+    visit.dayTimeline = day
     return visit
 }
 

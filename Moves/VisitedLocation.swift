@@ -356,7 +356,7 @@ extension DayTimeline {
         let start = dayStart
         var descriptor = FetchDescriptor<VisitPlace>(
             predicate: #Predicate { place in
-                place.arrivalDate < start
+                place.arrivalDate < start && place.dayTimeline != nil
             },
             sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .reverse)]
         )
@@ -408,13 +408,15 @@ final class VisitPlace {
     @Relationship(originalName: "incomingMoves", inverse: \MoveSegment.endPlace)
     var incomingMovesStorage: [MoveSegment]? = nil
 
+    /// Trips on the timeline that leave this stay. Retiring a trip detaches it already;
+    /// this also leaves out one a stale edit attached again.
     var outgoingMoves: [MoveSegment] {
-        get { outgoingMovesStorage ?? [] }
+        get { (outgoingMovesStorage ?? []).filter { !TimelineRetirement.isRetired($0) } }
         set { outgoingMovesStorage = newValue }
     }
 
     var incomingMoves: [MoveSegment] {
-        get { incomingMovesStorage ?? [] }
+        get { (incomingMovesStorage ?? []).filter { !TimelineRetirement.isRetired($0) } }
         set { incomingMovesStorage = newValue }
     }
 
@@ -777,27 +779,50 @@ struct SampleStayMoveLeg {
     var keptDistance: Double? = nil
 }
 
-/// How the stay rebuild removes trips and stops.
+/// How the stay rebuild removes trips and stops while views may hold them.
 ///
-/// Off (today): rows are deleted. A view on another context that still holds one then
-/// aborts on the deleted fault. On: rows are retired: kept, detached, and marked by a
-/// nil `dayTimeline` (no live trip or stop has one), then purged at launch with
-/// `SwiftDataTimelineRepository.purgeRetiredRows(in:)`.
+/// Deleting a row another context still holds aborts the process on the deleted fault,
+/// so the rebuild never deletes: it retires. A retired row is kept, detached from
+/// everything that reaches it, and has no `dayTimeline` (no live trip or stop lacks
+/// one). Readers leave out rows with no day (`FetchDescriptor.live`); the launch purge
+/// (`SwiftDataTimelineRepository.purgeRetiredRows(in:)`) deletes them before any view
+/// exists.
+///
+/// The purge also needs the row's own mark (`dedupeKeyPrefix` on a trip,
+/// `visitReviewStateRaw` on a stop), because a row iCloud is still bringing in can have
+/// no day for a while: its day may not have arrived yet. Deleting that row would delete
+/// it on every device.
 enum TimelineRetirement {
-    static var isDeferred = false
-
     static let dedupeKeyPrefix = "retired-"
+
+    /// Written to a retired stop's `reviewStateRaw`. Reads as `ReviewState.none`.
+    static let visitReviewStateRaw = "retired"
 
     static func dedupeKey(for id: UUID) -> String { dedupeKeyPrefix + id.uuidString }
 
-    /// True for a row the rebuild retired. Always false while retirement is off, so
-    /// nothing changes for rows that never had a day.
+    /// True for a row no reader should show: the rebuild retired it, or it is not on a day.
     static func isRetired(_ move: MoveSegment) -> Bool {
-        isDeferred && move.dayTimeline == nil
+        move.dayTimeline == nil
     }
 
     static func isRetired(_ visit: VisitPlace) -> Bool {
-        isDeferred && visit.dayTimeline == nil
+        visit.dayTimeline == nil
+    }
+}
+
+extension FetchDescriptor where T == VisitPlace {
+    /// Every stay on the timeline, without the retired ones. Add `$0.dayTimeline != nil`
+    /// to a predicate of your own instead.
+    static func live(sortBy: [SortDescriptor<VisitPlace>] = []) -> FetchDescriptor<VisitPlace> {
+        FetchDescriptor<VisitPlace>(predicate: #Predicate { $0.dayTimeline != nil }, sortBy: sortBy)
+    }
+}
+
+extension FetchDescriptor where T == MoveSegment {
+    /// Every trip on the timeline, without the retired ones. Add `$0.dayTimeline != nil`
+    /// to a predicate of your own instead.
+    static func live(sortBy: [SortDescriptor<MoveSegment>] = []) -> FetchDescriptor<MoveSegment> {
+        FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.dayTimeline != nil }, sortBy: sortBy)
     }
 }
 
@@ -838,8 +863,10 @@ final class KnownPlace {
     var lastVisitAt: Date? = nil
     @Relationship(inverse: \VisitPlace.knownPlace) var visitsStorage: [VisitPlace]? = nil
 
+    /// The place's stays on the timeline. Retiring a stay detaches it from its place;
+    /// this also leaves out one an edit on a stale view attached again.
     var visits: [VisitPlace] {
-        get { visitsStorage ?? [] }
+        get { (visitsStorage ?? []).filter { !TimelineRetirement.isRetired($0) } }
         set { visitsStorage = newValue }
     }
 
@@ -1022,6 +1049,8 @@ protocol TimelineRepository {
     func visitWasRemoved(_ visit: CLVisit) throws -> Bool
     func appendSamples(from locations: [CLLocation], source: LocationSampleSource) throws -> [LocationSample]
     func latestPlace(before date: Date, excluding placeID: UUID?) throws -> VisitPlace?
+    /// The live stop with this id, or nil once it is deleted or retired.
+    func livePlace(id: UUID) throws -> VisitPlace?
     func samples(from startDate: Date, to endDate: Date) throws -> [LocationSample]
     /// Rebuilds stops and the automatic trips between them from stored fixes.
     ///
@@ -1325,14 +1354,10 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             )
         )
         let places = try modelContext.fetch(
-            FetchDescriptor<VisitPlace>(
-                sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .forward)]
-            )
+            FetchDescriptor<VisitPlace>.live(sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .forward)])
         )
         let moves = try modelContext.fetch(
-            FetchDescriptor<MoveSegment>(
-                sortBy: [SortDescriptor(\MoveSegment.startDate, order: .forward)]
-            )
+            FetchDescriptor<MoveSegment>.live(sortBy: [SortDescriptor(\MoveSegment.startDate, order: .forward)])
         )
         let samples = try modelContext.fetch(
             FetchDescriptor<LocationSample>(
@@ -1453,13 +1478,19 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             try modelContext.fetch(FetchDescriptor<KnownPlace>()).map { ($0.id, $0) },
             uniquingKeysWith: { first, _ in first }
         )
+        // The run retired the rows it removed, and undo brings those back. Any other row
+        // retired since was retired by the rebuild: undo neither revives it nor makes a
+        // second row with its id.
+        let removedPlaceIDs = snapshot.removedPlaceIDs.map { Set($0) }
+        let allPlaces = try modelContext.fetch(FetchDescriptor<VisitPlace>())
+        let retiredPlaceIDs = Set(allPlaces.filter(TimelineRetirement.isRetired).map(\.id))
+            .subtracting(removedPlaceIDs ?? [])
         var placesByID = Dictionary(
-            try modelContext.fetch(FetchDescriptor<VisitPlace>()).map { ($0.id, $0) },
+            allPlaces.filter { !retiredPlaceIDs.contains($0.id) }.map { ($0.id, $0) },
             uniquingKeysWith: { first, _ in first }
         )
-        let removedPlaceIDs = snapshot.removedPlaceIDs.map { Set($0) }
 
-        for placeSnapshot in snapshot.places {
+        for placeSnapshot in snapshot.places where !retiredPlaceIDs.contains(placeSnapshot.id) {
             let place: VisitPlace
             if let live = placesByID[placeSnapshot.id] {
                 place = live
@@ -1481,13 +1512,16 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             apply(placeSnapshot, to: place, timelinesByDayKey: timelinesByDayKey, knownPlacesByID: knownPlacesByID)
         }
 
+        let removedMoveIDs = snapshot.removedMoveIDs.map { Set($0) }
+        let allMoves = try modelContext.fetch(FetchDescriptor<MoveSegment>())
+        let retiredMoveIDs = Set(allMoves.filter(TimelineRetirement.isRetired).map(\.id))
+            .subtracting(removedMoveIDs ?? [])
         var movesByID = Dictionary(
-            try modelContext.fetch(FetchDescriptor<MoveSegment>()).map { ($0.id, $0) },
+            allMoves.filter { !retiredMoveIDs.contains($0.id) }.map { ($0.id, $0) },
             uniquingKeysWith: { first, _ in first }
         )
-        let removedMoveIDs = snapshot.removedMoveIDs.map { Set($0) }
 
-        for moveSnapshot in snapshot.moves {
+        for moveSnapshot in snapshot.moves where !retiredMoveIDs.contains(moveSnapshot.id) {
             let move: MoveSegment
             if let live = movesByID[moveSnapshot.id] {
                 move = live
@@ -1561,6 +1595,9 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         place.thoroughfare = snapshot.thoroughfare ?? place.thoroughfare
         place.formattedAddress = snapshot.formattedAddress ?? place.formattedAddress
         place.reviewStateRaw = snapshot.reviewStateRaw ?? place.reviewStateRaw
+        if place.reviewStateRaw == TimelineRetirement.visitReviewStateRaw {
+            place.reviewState = .none
+        }
 
         // A snapshot saved before these fields existed says nothing about the assignment.
         guard let assignmentSourceRaw = snapshot.assignmentSourceRaw else { return }
@@ -1577,6 +1614,10 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         timelinesByDayKey: [String: DayTimeline],
         placesByID: [UUID: VisitPlace]
     ) {
+        // A trip the run retired comes back under its own key.
+        if move.dedupeKey.hasPrefix(TimelineRetirement.dedupeKeyPrefix) {
+            move.dedupeKey = snapshot.dedupeKey
+        }
         move.startDate = snapshot.startDate
         move.endDate = snapshot.endDate
         move.transportModeRawValue = snapshot.transportModeRawValue
@@ -1601,21 +1642,15 @@ final class SwiftDataTimelineRepository: TimelineRepository {
     }
 
     func runHistoricalDeduplication() throws -> HistoricalDeduplicationReport {
-        // Duplicate trips are retired (not deleted) while retirement is deferred: count live rows.
+        // Duplicate trips are retired, not deleted: count live rows.
         func liveCounts() throws -> (places: Int, moves: Int) {
-            guard TimelineRetirement.isDeferred else {
-                return (try modelContext.fetchCount(FetchDescriptor<VisitPlace>()),
-                        try modelContext.fetchCount(FetchDescriptor<MoveSegment>()))
-            }
-            return (try modelContext.fetch(FetchDescriptor<VisitPlace>()).filter { !TimelineRetirement.isRetired($0) }.count,
-                    try modelContext.fetch(FetchDescriptor<MoveSegment>()).filter { !TimelineRetirement.isRetired($0) }.count)
+            (try modelContext.fetchCount(FetchDescriptor<VisitPlace>.live()),
+             try modelContext.fetchCount(FetchDescriptor<MoveSegment>.live()))
         }
         let (placeCountBefore, moveCountBefore) = try liveCounts()
 
         let placeIDs = try modelContext.fetch(
-            FetchDescriptor<VisitPlace>(
-                sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .forward)]
-            )
+            FetchDescriptor<VisitPlace>.live(sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .forward)])
         )
         .map(\.id)
 
@@ -1625,9 +1660,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         }
 
         let moveIDs = try modelContext.fetch(
-            FetchDescriptor<MoveSegment>(
-                sortBy: [SortDescriptor(\MoveSegment.startDate, order: .forward)]
-            )
+            FetchDescriptor<MoveSegment>.live(sortBy: [SortDescriptor(\MoveSegment.startDate, order: .forward)])
         )
         .map(\.id)
 
@@ -1654,7 +1687,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
     /// touched, and stops the person named differently stay separate.
     func repairDuplicateStays() throws {
         let sortedPlaces = try modelContext.fetch(
-            FetchDescriptor<VisitPlace>(sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .forward)])
+            FetchDescriptor<VisitPlace>.live(sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .forward)])
         )
         // Collapsing only ever finds stops arriving within the dedupe window of each other,
         // and it never moves an arrival, so a stop with no neighbour that close is left as
@@ -1674,7 +1707,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         try saveIfNeeded()
 
         var places = try modelContext.fetch(
-            FetchDescriptor<VisitPlace>(sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .forward)])
+            FetchDescriptor<VisitPlace>.live(sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .forward)])
         )
         let samples = try modelContext.fetch(
             FetchDescriptor<LocationSample>(sortBy: [SortDescriptor(\LocationSample.timestamp, order: .forward)])
@@ -1684,7 +1717,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         trimOverlappingStops(places)
         try saveIfNeeded()
 
-        for move in try modelContext.fetch(FetchDescriptor<MoveSegment>()) where !isUserCurated(move) {
+        for move in try modelContext.fetch(FetchDescriptor<MoveSegment>.live()) where !isUserCurated(move) {
             if let start = move.startPlace?.id, start == move.endPlace?.id {
                 modelContext.delete(move)
             }
@@ -1692,7 +1725,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         try saveIfNeeded()
 
         let moveIDs = try modelContext.fetch(
-            FetchDescriptor<MoveSegment>(sortBy: [SortDescriptor(\MoveSegment.startDate, order: .forward)])
+            FetchDescriptor<MoveSegment>.live(sortBy: [SortDescriptor(\MoveSegment.startDate, order: .forward)])
         ).map(\.id)
         for moveID in moveIDs {
             guard let move = try findMove(byID: moveID) else { continue }
@@ -1704,7 +1737,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
     /// One-time correction of labels the rules would no longer give: rides read as walks,
     /// and short hops still marked stationary or unknown. Corrected trips stay as they are.
     func repairTripLabels() throws {
-        for move in try modelContext.fetch(FetchDescriptor<MoveSegment>()) where !isUserCurated(move) {
+        for move in try modelContext.fetch(FetchDescriptor<MoveSegment>.live()) where !isUserCurated(move) {
             guard let start = move.startPlace?.coordinate, let end = move.endPlace?.coordinate else { continue }
             let straightLine = Self.distanceMeters(from: start, to: end)
             let duration = move.endDate.timeIntervalSince(move.startDate)
@@ -2130,7 +2163,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         bulkDayTimelineCache = cache
 
         let labeled = try modelContext.fetch(
-            FetchDescriptor<VisitPlace>(predicate: #Predicate { $0.userLabel != nil })
+            FetchDescriptor<VisitPlace>(predicate: #Predicate { $0.userLabel != nil && $0.dayTimeline != nil })
         )
         bulkLabeledPlaces = labeled.compactMap { place in
             guard let label = place.userLabel?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty else {
@@ -2164,7 +2197,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         let windowEnd = stay.departureDate.addingTimeInterval(Self.logPlaceMatchSlack)
         var descriptor = FetchDescriptor<VisitPlace>(
             predicate: #Predicate { place in
-                place.arrivalDate >= windowStart && place.arrivalDate <= windowEnd
+                place.arrivalDate >= windowStart && place.arrivalDate <= windowEnd && place.dayTimeline != nil
             },
             sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .reverse)]
         )
@@ -2418,7 +2451,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
     ) throws -> MoveSegment? {
         var descriptor = FetchDescriptor<MoveSegment>(
             predicate: #Predicate { move in
-                move.startDate <= endDate && move.endDate >= startDate
+                move.startDate <= endDate && move.endDate >= startDate && move.dayTimeline != nil
             },
             sortBy: [SortDescriptor(\MoveSegment.startDate, order: .forward)]
         )
@@ -2441,7 +2474,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
     func latestPlace(before date: Date, excluding placeID: UUID?) throws -> VisitPlace? {
         var descriptor = FetchDescriptor<VisitPlace>(
             predicate: #Predicate { place in
-                place.arrivalDate < date
+                place.arrivalDate < date && place.dayTimeline != nil
             },
             sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .reverse)]
         )
@@ -2509,7 +2542,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
 
     func splitStopsAroundContainedOnes() throws -> [DateInterval] {
         let places = try modelContext.fetch(
-            FetchDescriptor<VisitPlace>(sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .forward)])
+            FetchDescriptor<VisitPlace>.live(sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .forward)])
         )
         var stretches: [DateInterval] = []
 
@@ -2568,7 +2601,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
 
     func implausiblyLongTrips() throws -> [DateInterval] {
         try modelContext.fetch(
-            FetchDescriptor<MoveSegment>(sortBy: [SortDescriptor(\MoveSegment.startDate, order: .forward)])
+            FetchDescriptor<MoveSegment>.live(sortBy: [SortDescriptor(\MoveSegment.startDate, order: .forward)])
         )
         .compactMap { move -> DateInterval? in
             let duration = move.endDate.timeIntervalSince(move.startDate)
@@ -2665,16 +2698,12 @@ final class SwiftDataTimelineRepository: TimelineRepository {
 
     // MARK: Retiring rows during the rebuild
 
-    /// The one way the rebuild removes a trip. With retirement deferred the row stays,
-    /// detached from everything that reaches it, so a view on another context that still
-    /// holds it reads a stale but valid object instead of aborting on a deleted fault.
+    /// The one way the rebuild removes a trip. The row stays, detached from everything
+    /// that reaches it, so a view on another context that still holds it reads a stale
+    /// but valid object instead of aborting on a deleted fault.
     func retire(_ move: MoveSegment) {
         guard !move.isDeleted else { return }
-        guard TimelineRetirement.isDeferred else {
-            modelContext.delete(move)
-            return
-        }
-        guard !TimelineRetirement.isRetired(move) else { return }
+        guard !move.dedupeKey.hasPrefix(TimelineRetirement.dedupeKeyPrefix) || move.dayTimeline != nil else { return }
         // Fixes go back to no trip, as the delete rule (nullify) does.
         for sample in move.samples where sample.moveSegment?.persistentModelID == move.persistentModelID {
             sample.moveSegment = nil
@@ -2689,38 +2718,75 @@ final class SwiftDataTimelineRepository: TimelineRepository {
     /// The one way the rebuild removes a stop. See `retire(_:)` for trips.
     func retire(_ visit: VisitPlace) {
         guard !visit.isDeleted else { return }
-        guard TimelineRetirement.isDeferred else {
-            modelContext.delete(visit)
-            return
-        }
-        guard !TimelineRetirement.isRetired(visit) else { return }
+        guard visit.reviewStateRaw != TimelineRetirement.visitReviewStateRaw || visit.dayTimeline != nil else { return }
         // Trips lose this end, as the delete rule (nullify) does.
-        for move in Array(visit.incomingMoves) where move.endPlace?.persistentModelID == visit.persistentModelID {
+        for move in visit.incomingMovesStorage ?? [] where move.endPlace?.persistentModelID == visit.persistentModelID {
             move.endPlace = nil
         }
-        for move in Array(visit.outgoingMoves) where move.startPlace?.persistentModelID == visit.persistentModelID {
+        for move in visit.outgoingMovesStorage ?? [] where move.startPlace?.persistentModelID == visit.persistentModelID {
             move.startPlace = nil
         }
         // Deleting would cascade any photo still attached; retiring keeps it on the day.
-        // The rebuild moves photos before removing a stop, so this is a safety net.
-        visit.keepPhotosOnDay()
+        // The rebuild and merges move photos before removing a stop, so this is a safety
+        // net, and it leaves alone a photo already moved to the stop that took over.
+        for photo in visit.photoAttachments where photo.visitPlace?.persistentModelID == visit.persistentModelID {
+            if photo.dayTimeline == nil { photo.dayTimeline = visit.dayTimeline }
+            photo.visitPlace = nil
+        }
         visit.knownPlace = nil
         visit.dayTimeline = nil
-        visit.reviewStateRaw = ReviewState.none.rawValue
+        visit.reviewStateRaw = TimelineRetirement.visitReviewStateRaw
     }
 
-    /// Hard-deletes every retired trip and stop. Run where no view holds timeline rows
-    /// (at launch, while the timeline is held back). Returns the number of rows removed.
-    static func purgeRetiredRows(in context: ModelContext) throws -> Int {
+    private static var retiredMoves: FetchDescriptor<MoveSegment> {
+        let prefix = TimelineRetirement.dedupeKeyPrefix
+        return FetchDescriptor<MoveSegment>(predicate: #Predicate {
+            $0.dayTimeline == nil && $0.dedupeKey.starts(with: prefix)
+        })
+    }
+
+    private static var retiredVisits: FetchDescriptor<VisitPlace> {
+        let marker = TimelineRetirement.visitReviewStateRaw
+        return FetchDescriptor<VisitPlace>(predicate: #Predicate {
+            $0.dayTimeline == nil && $0.reviewStateRaw == marker
+        })
+    }
+
+    /// How many retired rows are waiting for the purge. Two indexed counts.
+    static func retiredRowCount(in context: ModelContext) throws -> Int {
+        try context.fetchCount(retiredMoves) + context.fetchCount(retiredVisits)
+    }
+
+    /// Hard-deletes every retired trip and stop: no day and the rebuild's mark. Run where
+    /// no view holds timeline rows (at launch, while the timeline is held back). Saves
+    /// every `batchSize` rows, so a purge cut short leaves only retired rows behind and
+    /// the next launch finishes it. Returns the number of rows removed.
+    /// `shouldStop` is asked after each saved batch; the rest waits for the next launch.
+    @discardableResult
+    static func purgeRetiredRows(
+        in context: ModelContext,
+        batchSize: Int = 500,
+        shouldStop: () -> Bool = { false }
+    ) throws -> Int {
         var removed = 0
-        for move in try context.fetch(FetchDescriptor<MoveSegment>()) where move.dayTimeline == nil {
-            context.delete(move)
+        var stopped = false
+        func countOne() throws {
             removed += 1
+            guard removed.isMultiple(of: max(batchSize, 1)) else { return }
+            if context.hasChanges { try context.save() }
+            stopped = shouldStop()
         }
-        for visit in try context.fetch(FetchDescriptor<VisitPlace>()) where visit.dayTimeline == nil {
-            visit.keepPhotosOnDay()
+        for move in try context.fetch(retiredMoves) {
+            context.delete(move)
+            try countOne()
+            if stopped { return removed }
+        }
+        for visit in try context.fetch(retiredVisits) {
+            // Retiring moved its photos to the day already; nothing may cascade with it.
+            for photo in visit.photoAttachmentsStorage ?? [] { photo.visitPlace = nil }
             context.delete(visit)
-            removed += 1
+            try countOne()
+            if stopped { return removed }
         }
         if context.hasChanges { try context.save() }
         return removed
@@ -3239,11 +3305,12 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         let moves = try modelContext.fetch(
             FetchDescriptor<MoveSegment>(
                 predicate: #Predicate { move in
-                    move.endDate >= start && move.startDate <= end
+                    move.endDate >= start && move.startDate <= end && move.dayTimeline != nil
                 },
                 sortBy: [SortDescriptor(\MoveSegment.startDate, order: .forward)]
             )
         )
+        // Also in code: a row retired earlier in this pass is not saved yet.
         .filter { !$0.isDeleted && !TimelineRetirement.isRetired($0) }
         let ordered = places.sorted { $0.arrivalDate < $1.arrivalDate }
         var position: [UUID: Int] = [:]
@@ -3310,11 +3377,12 @@ final class SwiftDataTimelineRepository: TimelineRepository {
     private func placesArriving(from start: Date, through end: Date) throws -> [VisitPlace] {
         let descriptor = FetchDescriptor<VisitPlace>(
             predicate: #Predicate { place in
-                place.arrivalDate >= start && place.arrivalDate <= end
+                place.arrivalDate >= start && place.arrivalDate <= end && place.dayTimeline != nil
             },
             sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .forward)]
         )
         // Retired stops are not evidence and must never be matched, extended, or revived.
+        // Also in code: a stop retired earlier in this pass is not saved yet.
         return try modelContext.fetch(descriptor).filter { !$0.isDeleted && !TimelineRetirement.isRetired($0) }
     }
 
@@ -3789,7 +3857,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         let moves = try modelContext.fetch(
             FetchDescriptor<MoveSegment>(
                 predicate: #Predicate { move in
-                    move.endDate >= start && move.startDate <= end
+                    move.endDate >= start && move.startDate <= end && move.dayTimeline != nil
                 }
             )
         )
@@ -4128,12 +4196,12 @@ final class SwiftDataTimelineRepository: TimelineRepository {
 
         var descriptor = FetchDescriptor<VisitPlace>(
             predicate: #Predicate { place in
-                place.id == placeID
+                place.id == placeID && place.dayTimeline != nil
             }
         )
         descriptor.fetchLimit = 1
 
-        guard let place = try modelContext.fetch(descriptor).first else {
+        guard let place = try modelContext.fetch(descriptor).first, !TimelineRetirement.isRetired(place) else {
             return
         }
 
@@ -4629,6 +4697,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             predicate: #Predicate { visit in
                 visit.latitude >= minLatitude && visit.latitude <= maxLatitude
                     && visit.longitude >= minLongitude && visit.longitude <= maxLongitude
+                    && visit.dayTimeline != nil
             }
         ))
     }
@@ -4734,7 +4803,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         let rangeEnd = range.end
         let descriptor = FetchDescriptor<MoveSegment>(
             predicate: #Predicate { move in
-                move.startDate < rangeEnd && move.endDate > rangeStart
+                move.startDate < rangeEnd && move.endDate > rangeStart && move.dayTimeline != nil
             },
             sortBy: [SortDescriptor(\MoveSegment.startDate, order: .forward)]
         )
@@ -4753,6 +4822,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             predicate: #Predicate { place in
                 place.arrivalDate < rangeEnd
                     && (place.arrivalDate >= earliestArrival || place.departureDate == nil)
+                    && place.dayTimeline != nil
             },
             sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .forward)]
         )
@@ -4874,13 +4944,13 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         let lookback = date.addingTimeInterval(-8 * 24 * 60 * 60)
         let nearby = FetchDescriptor<VisitPlace>(
             predicate: #Predicate { place in
-                place.arrivalDate <= date && place.arrivalDate >= lookback
+                place.arrivalDate <= date && place.arrivalDate >= lookback && place.dayTimeline != nil
             }
         )
         var results = try modelContext.fetch(nearby)
         var older = FetchDescriptor<VisitPlace>(
             predicate: #Predicate { place in
-                place.arrivalDate < lookback
+                place.arrivalDate < lookback && place.dayTimeline != nil
             },
             sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .reverse)]
         )
@@ -4894,7 +4964,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         let windowEnd = date.addingTimeInterval(36 * 60 * 60)
         let descriptor = FetchDescriptor<MoveSegment>(
             predicate: #Predicate { move in
-                move.startDate <= windowEnd && move.endDate >= windowStart
+                move.startDate <= windowEnd && move.endDate >= windowStart && move.dayTimeline != nil
             }
         )
         return try modelContext.fetch(descriptor)
@@ -5149,7 +5219,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         let windowEnd = date.addingTimeInterval(Self.placeDedupeArrivalWindow)
         var descriptor = FetchDescriptor<VisitPlace>(
             predicate: #Predicate { place in
-                place.arrivalDate >= windowStart && place.arrivalDate <= windowEnd
+                place.arrivalDate >= windowStart && place.arrivalDate <= windowEnd && place.dayTimeline != nil
             },
             sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .reverse)]
         )
@@ -5175,7 +5245,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         let windowEnd = date.addingTimeInterval(24 * 60 * 60)
         var descriptor = FetchDescriptor<VisitPlace>(
             predicate: #Predicate { place in
-                place.arrivalDate >= windowStart && place.arrivalDate <= windowEnd
+                place.arrivalDate >= windowStart && place.arrivalDate <= windowEnd && place.dayTimeline != nil
             },
             sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .forward)]
         )
@@ -5214,7 +5284,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
     }
 
     private func fillMissingDeparturesFromMoves() throws {
-        let places = try modelContext.fetch(FetchDescriptor<VisitPlace>())
+        let places = try modelContext.fetch(FetchDescriptor<VisitPlace>.live())
         for place in places where place.departureDate == nil {
             if let leave = place.outgoingMoves.min(by: { $0.startDate < $1.startDate }) {
                 place.departureDate = leave.timelineStartDate
@@ -5344,7 +5414,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
 
         var descriptor = FetchDescriptor<VisitPlace>(
             predicate: #Predicate { place in
-                place.arrivalDate >= windowStart && place.arrivalDate <= windowEnd
+                place.arrivalDate >= windowStart && place.arrivalDate <= windowEnd && place.dayTimeline != nil
             },
             sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .reverse)]
         )
@@ -5402,42 +5472,50 @@ final class SwiftDataTimelineRepository: TimelineRepository {
     private func findMove(byDedupeKey dedupeKey: String) throws -> MoveSegment? {
         var descriptor = FetchDescriptor<MoveSegment>(
             predicate: #Predicate { move in
-                move.dedupeKey == dedupeKey
+                move.dedupeKey == dedupeKey && move.dayTimeline != nil
             }
         )
         descriptor.fetchLimit = 1
-        return try modelContext.fetch(descriptor).first
+        return try modelContext.fetch(descriptor).first.flatMap { TimelineRetirement.isRetired($0) ? nil : $0 }
     }
 
     private func findMove(startPlaceID: UUID, endPlaceID: UUID) throws -> MoveSegment? {
         var descriptor = FetchDescriptor<MoveSegment>(
             predicate: #Predicate { move in
-                move.startPlace?.id == startPlaceID && move.endPlace?.id == endPlaceID
+                move.startPlace?.id == startPlaceID && move.endPlace?.id == endPlaceID && move.dayTimeline != nil
             },
             sortBy: [SortDescriptor(\MoveSegment.createdAt, order: .forward)]
         )
         descriptor.fetchLimit = 1
-        return try modelContext.fetch(descriptor).first
+        return try modelContext.fetch(descriptor).first.flatMap { TimelineRetirement.isRetired($0) ? nil : $0 }
     }
 
+    /// The live stop with this id on this repository's context, or nil once it is deleted
+    /// or retired. Work that awaits looks its stops up again with this afterwards.
+    func livePlace(id placeID: UUID) throws -> VisitPlace? {
+        try findPlace(byID: placeID).flatMap { $0.isDeleted ? nil : $0 }
+    }
+
+    /// A retired stop reads as gone, so nothing reuses or merges into it.
     private func findPlace(byID placeID: UUID) throws -> VisitPlace? {
         var descriptor = FetchDescriptor<VisitPlace>(
             predicate: #Predicate { place in
-                place.id == placeID
+                place.id == placeID && place.dayTimeline != nil
             }
         )
         descriptor.fetchLimit = 1
-        return try modelContext.fetch(descriptor).first
+        return try modelContext.fetch(descriptor).first.flatMap { TimelineRetirement.isRetired($0) ? nil : $0 }
     }
 
+    /// A retired trip reads as gone, so nothing reuses or merges into it.
     private func findMove(byID moveID: UUID) throws -> MoveSegment? {
         var descriptor = FetchDescriptor<MoveSegment>(
             predicate: #Predicate { move in
-                move.id == moveID
+                move.id == moveID && move.dayTimeline != nil
             }
         )
         descriptor.fetchLimit = 1
-        return try modelContext.fetch(descriptor).first
+        return try modelContext.fetch(descriptor).first.flatMap { TimelineRetirement.isRetired($0) ? nil : $0 }
     }
 
     private func findSimilarMove(
@@ -5453,7 +5531,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
 
         var descriptor = FetchDescriptor<MoveSegment>(
             predicate: #Predicate { move in
-                move.startDate >= windowStart && move.startDate <= windowEnd
+                move.startDate >= windowStart && move.startDate <= windowEnd && move.dayTimeline != nil
             },
             sortBy: [SortDescriptor(\MoveSegment.createdAt, order: .forward)]
         )
@@ -5479,7 +5557,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
 
         var descriptor = FetchDescriptor<VisitPlace>(
             predicate: #Predicate { place in
-                place.arrivalDate >= windowStart && place.arrivalDate <= windowEnd
+                place.arrivalDate >= windowStart && place.arrivalDate <= windowEnd && place.dayTimeline != nil
             }
         )
         descriptor.fetchLimit = 32
@@ -5497,7 +5575,8 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         let canonical = try canonicalPlace(from: duplicateGroup)
         for candidate in duplicateGroup where candidate.id != canonical.id {
             mergePlace(candidate, into: canonical)
-            modelContext.delete(candidate)
+            // Capture and imports land here while the timeline is on screen: retire, never delete.
+            retire(candidate)
         }
 
         return canonical
@@ -5673,7 +5752,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
 
         var descriptor = FetchDescriptor<MoveSegment>(
             predicate: #Predicate { move in
-                move.endDate >= windowStart && move.startDate <= windowEnd
+                move.endDate >= windowStart && move.startDate <= windowEnd && move.dayTimeline != nil
             },
             sortBy: [SortDescriptor(\MoveSegment.startDate, order: .forward)]
         )
@@ -5764,7 +5843,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
 
         var descriptor = FetchDescriptor<MoveSegment>(
             predicate: #Predicate { move in
-                move.startDate >= windowStart && move.startDate <= windowEnd
+                move.startDate >= windowStart && move.startDate <= windowEnd && move.dayTimeline != nil
             }
         )
         descriptor.fetchLimit = 32
@@ -5851,10 +5930,9 @@ final class SwiftDataTimelineRepository: TimelineRepository {
     }
 
     private func repairMissingStaysAroundMoves() throws {
+        // Live stays only: giving a retired stay a day below would revive it.
         let places = try modelContext.fetch(
-            FetchDescriptor<VisitPlace>(
-                sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .forward)]
-            )
+            FetchDescriptor<VisitPlace>.live(sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .forward)])
         )
 
         for place in places {
@@ -6103,7 +6181,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
 
         let descriptor = FetchDescriptor<VisitPlace>(
             predicate: #Predicate { place in
-                place.userLabel != nil
+                place.userLabel != nil && place.dayTimeline != nil
             }
         )
 

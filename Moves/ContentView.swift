@@ -365,7 +365,6 @@ struct ContentView: View {
     @State private var selectedPageIndex = 0
 
     @State private var selectedDay: DayTimeline?
-    @State private var todayTimeline: DayTimeline?
 
     /// The page the horizontal pager is showing or scrolling towards. It follows the finger;
     /// `selectedPageIndex` only changes once the pager comes to rest, so a page never
@@ -514,7 +513,6 @@ struct ContentView: View {
     }
 
     private func refreshVisibleDays() {
-        todayTimeline = fetchDay(DayTimeline.makeDayKey(for: .now))
         guard dayTimelines.indices.contains(selectedPageIndex) else { selectedDay = nil; return }
         let entry = dayTimelines[selectedPageIndex]
         selectedDay = fetchDay(entry.dayKey) ?? DayTimeline(dayStart: entry.dayStart)
@@ -710,12 +708,8 @@ struct ContentView: View {
             syncPagerToSelection(animated: false)
             publishWidgetSnapshot()
         }
-        .onChange(of: todayTimeline?.moves.count ?? 0) { _, _ in
-            publishWidgetSnapshot()
-        }
-        .onChange(of: todayTimeline?.places.count ?? 0) { _, _ in
-            publishWidgetSnapshot()
-        }
+        // Every save, iCloud change, and new fix lands here, so today's counts need no
+        // observers of their own to refresh the widgets.
         .onReceive(historyChanges) { _ in
                 refreshDayIndex()
                 publishWidgetSnapshot()
@@ -948,10 +942,10 @@ struct ContentView: View {
         }
     }
 
-    /// The widgets and the watch always describe today, whatever day is on screen.
+    /// The widgets and the watch always describe today, whatever day is on screen. Built
+    /// from today's rows on a context of its own, not from the rows this view holds.
     private func publishWidgetSnapshot() {
-        guard let todayTimeline else { return }
-        TimelineWidgetSnapshotStore.save(.make(from: todayTimeline))
+        TimelineWidgetSnapshotPublisher.publishToday(from: modelContext.container)
     }
 
     private func refreshSpotlightIndex() {
@@ -964,7 +958,7 @@ struct ContentView: View {
                 let entities = try await importWorkerValue(Task.detached(priority: .utility) {
                     let context = ModelContext(container)
                     var entities: [VisitedPlaceEntity] = []
-                    var query = FetchDescriptor<VisitPlace>(sortBy: [SortDescriptor(\.arrivalDate)])
+                    var query = FetchDescriptor<VisitPlace>.live(sortBy: [SortDescriptor(\.arrivalDate)])
                     query.fetchLimit = 500
                     query.propertiesToFetch = [\.id, \.arrivalDate, \.userLabel, \.autoLabel]
                     query.relationshipKeyPathsForPrefetching = [\.knownPlace, \.dayTimeline]
@@ -992,7 +986,7 @@ struct ContentView: View {
     }
 
     private func selectPlace(_ placeID: UUID) {
-        var query = FetchDescriptor<VisitPlace>(predicate: #Predicate { $0.id == placeID })
+        var query = FetchDescriptor<VisitPlace>(predicate: #Predicate { $0.id == placeID && $0.dayTimeline != nil })
         query.fetchLimit = 1
         guard let date = (try? modelContext.fetch(query).first)?.arrivalDate else { return }
         jumpToDate(date)
@@ -2047,7 +2041,7 @@ private struct RequestedMoveDetailView: View {
         }
         .task(id: id) {
             let requestedID = id
-            var query = FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.id == requestedID })
+            var query = FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.id == requestedID && $0.dayTimeline != nil })
             query.fetchLimit = 1
             move = try? modelContext.fetch(query).first
             didLoad = true

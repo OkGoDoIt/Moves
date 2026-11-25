@@ -527,7 +527,8 @@ final class TimelineDayMapModel {
 
     private func fetchMove(_ id: UUID) -> MoveSegment? {
         guard let modelContext else { return nil }
-        var descriptor = FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.id == id })
+        // A trip the rebuild retired meanwhile is gone too.
+        var descriptor = FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.id == id && $0.dayTimeline != nil })
         descriptor.fetchLimit = 1
         return try? modelContext.fetch(descriptor).first
     }

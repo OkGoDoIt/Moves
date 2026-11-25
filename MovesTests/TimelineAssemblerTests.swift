@@ -80,14 +80,6 @@ final class MovesTimelinePeriodTests: XCTestCase {
 
 @MainActor
 final class TimelineAssemblerTests: XCTestCase {
-    /// `MOVES_RETIREMENT_DEFERRED=1` runs the class with rebuild removals retired.
-    override func setUp() async throws {
-        TimelineRetirement.isDeferred = ProcessInfo.processInfo.environment["MOVES_RETIREMENT_DEFERRED"] == "1"
-    }
-
-    override func tearDown() async throws {
-        TimelineRetirement.isDeferred = false
-    }
 
     func testLocationSamplesAreDeduplicatedAcrossSourcesForTheSameFix() throws {
         let container = try makeInMemoryContainer()
@@ -366,7 +358,9 @@ final class TimelineAssemblerTests: XCTestCase {
         XCTAssertNil(segment.cachedRouteCoordinates(for: signature))
     }
 
-    func testMatchedRouteSynchronizesMoveDistanceWithDisplayedCoordinates() async {
+    func testMatchedRouteSynchronizesMoveDistanceWithDisplayedCoordinates() async throws {
+        let container = try makeInMemoryContainer()
+        let context = ModelContext(container)
         let displayedCoordinates = [
             CLLocationCoordinate2D(latitude: 53.481587, longitude: 9.695481),
             CLLocationCoordinate2D(latitude: 53.482779, longitude: 9.684570),
@@ -380,6 +374,12 @@ final class TimelineAssemblerTests: XCTestCase {
             distanceMeters: 539,
             stepCount: nil
         )
+        // A trip in the store and on its day, as the matcher only reads live trips.
+        let timeline = DayTimeline(dayStart: segment.startDate)
+        context.insert(timeline)
+        context.insert(segment)
+        segment.dayTimeline = timeline
+        try context.save()
         segment.storeManualRouteCoordinates(displayedCoordinates)
 
         let matchedCoordinates = await RoadRouteMatcher.matchedCoordinates(for: segment)
@@ -1015,7 +1015,7 @@ final class TimelineAssemblerTests: XCTestCase {
         let report = try repository.runHistoricalDeduplication()
 
         let verificationContext = ModelContext(container)
-        let places = try verificationContext.fetch(FetchDescriptor<VisitPlace>())
+        let places = try verificationContext.fetch(FetchDescriptor<VisitPlace>.live())
 
         XCTAssertEqual(places.count, 1)
         XCTAssertEqual(places.first?.id, longStay.id)

@@ -223,7 +223,7 @@ private enum ReviewInboxQuery {
     static var visits: FetchDescriptor<VisitPlace> {
         let pending = ReviewState.pending.rawValue
         return FetchDescriptor(
-            predicate: #Predicate { $0.reviewStateRaw == pending },
+            predicate: #Predicate { $0.reviewStateRaw == pending && $0.dayTimeline != nil },
             sortBy: [SortDescriptor(\.arrivalDate, order: .reverse)]
         )
     }
@@ -231,7 +231,7 @@ private enum ReviewInboxQuery {
     static var moves: FetchDescriptor<MoveSegment> {
         let pending = ReviewState.pending.rawValue
         return FetchDescriptor(
-            predicate: #Predicate { $0.reviewStateRaw == pending },
+            predicate: #Predicate { $0.reviewStateRaw == pending && $0.dayTimeline != nil },
             sortBy: [SortDescriptor(\.startDate, order: .reverse)]
         )
     }

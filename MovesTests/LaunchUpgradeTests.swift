@@ -60,7 +60,7 @@ final class LaunchUpgradeTests: XCTestCase {
         XCTAssertEqual(defaults.integer(forKey: TimelineSchemaUpgrader.userDefaultsKey), TimelineSchemaUpgrader.currentVersion)
         XCTAssertEqual(TimelineUpgradeProgress.shared.fractionCompleted, 1)
         XCTAssertNil(TimelineUpgradeProgress.shared.stepTitle)
-        XCTAssertEqual(try ModelContext(container).fetchCount(FetchDescriptor<VisitPlace>()), 2)
+        XCTAssertEqual(try ModelContext(container).fetchCount(FetchDescriptor<VisitPlace>.live()), 2)
     }
 
     func testDuplicateStopsStillMergeWhileLoneStopsAreLeftAlone() throws {
@@ -78,7 +78,7 @@ final class LaunchUpgradeTests: XCTestCase {
         try SwiftDataTimelineRepository(modelContext: context).repairDuplicateStays()
 
         let arrivals = try context.fetch(
-            FetchDescriptor<VisitPlace>(sortBy: [SortDescriptor(\VisitPlace.arrivalDate)])
+            FetchDescriptor<VisitPlace>.live(sortBy: [SortDescriptor(\VisitPlace.arrivalDate)])
         ).map { $0.arrivalDate.timeIntervalSince(start).rounded() }
         XCTAssertEqual(arrivals.count, 4)
         XCTAssertEqual(Array(arrivals.suffix(2)), [20_000, 30_000])
@@ -102,6 +102,18 @@ final class LaunchUpgradeTests: XCTestCase {
             autoLabel: label
         )
         context.insert(stay)
+        stay.dayTimeline = day(containing: stay.arrivalDate)
         return stay
+    }
+
+    /// A live stay is always on a day; reuse the one already inserted for this date.
+    private func day(containing date: Date) -> DayTimeline {
+        let key = DayTimeline.makeDayKey(for: date)
+        if let existing = try? context.fetch(FetchDescriptor<DayTimeline>(predicate: #Predicate { $0.dayKey == key })).first {
+            return existing
+        }
+        let day = DayTimeline(dayStart: date)
+        context.insert(day)
+        return day
     }
 }

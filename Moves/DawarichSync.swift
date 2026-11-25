@@ -283,7 +283,7 @@ enum LocationUploadFilter {
         now: Date = .now
     ) -> Predicate<VisitPlace> {
         if includingHistory {
-            return #Predicate<VisitPlace> { visit in visit.createdAt > cursor }
+            return #Predicate<VisitPlace> { visit in visit.createdAt > cursor && visit.dayTimeline != nil }
         }
         let origins = importedOrigins
         let cutoff = now.addingTimeInterval(-recentTimelineItemWindow)
@@ -291,6 +291,7 @@ enum LocationUploadFilter {
             visit.createdAt > cursor
                 && !origins.contains(visit.originRaw)
                 && visit.arrivalDate >= cutoff
+                && visit.dayTimeline != nil
         }
     }
 
@@ -300,7 +301,7 @@ enum LocationUploadFilter {
         now: Date = .now
     ) -> Predicate<MoveSegment> {
         if includingHistory {
-            return #Predicate<MoveSegment> { move in move.createdAt > cursor }
+            return #Predicate<MoveSegment> { move in move.createdAt > cursor && move.dayTimeline != nil }
         }
         let origins = importedOrigins
         let cutoff = now.addingTimeInterval(-recentTimelineItemWindow)
@@ -308,6 +309,7 @@ enum LocationUploadFilter {
             move.createdAt > cursor
                 && !origins.contains(move.originRaw)
                 && move.endDate >= cutoff
+                && move.dayTimeline != nil
         }
     }
 }

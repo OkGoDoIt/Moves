@@ -1,4 +1,5 @@
 import Foundation
+import SwiftData
 import WidgetKit
 #if canImport(CoreLocation)
 import CoreLocation
@@ -38,6 +39,39 @@ enum TimelineWidgetSnapshotPhoneRelay {
     }
 }
 #endif
+
+/// Publishes today's snapshot for the widgets and the watch.
+///
+/// Built on a context of its own from one fetch of today's rows, never from rows a view
+/// holds: the rebuild retires trips and stops on another context while the timeline is
+/// on screen. A newer request replaces one still running.
+enum TimelineWidgetSnapshotPublisher {
+    @MainActor private static var running: Task<Void, Never>?
+
+    @MainActor
+    static func publishToday(from container: ModelContainer, now: Date = .now) {
+        running?.cancel()
+        let key = DayTimeline.makeDayKey(for: now)
+        running = Task.detached(priority: .utility) {
+            guard let snapshot = snapshot(forDayKey: key, in: ModelContext(container)), !Task.isCancelled else { return }
+            TimelineWidgetSnapshotStore.save(snapshot)
+        }
+    }
+
+    /// Today's snapshot read on `context`, or nil when the day has no row yet.
+    static func snapshot(forDayKey key: String, in context: ModelContext) -> TimelineWidgetSnapshot? {
+        // The day's trips and their fixes come in with the fetch, so building the snapshot
+        // reads rows already in memory instead of faulting them in one by one.
+        var moves = FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.dayTimeline?.dayKey == key })
+        moves.relationshipKeyPathsForPrefetching = [\.samplesStorage]
+        _ = try? context.fetch(moves)
+        var query = FetchDescriptor<DayTimeline>(predicate: #Predicate { $0.dayKey == key })
+        query.fetchLimit = 1
+        query.relationshipKeyPathsForPrefetching = [\.movesStorage, \.placesStorage]
+        guard let day = try? context.fetch(query).first else { return nil }
+        return TimelineWidgetSnapshot.make(from: day)
+    }
+}
 
 extension TimelineWidgetSnapshot {
     static func make(from dayTimeline: DayTimeline) -> TimelineWidgetSnapshot {

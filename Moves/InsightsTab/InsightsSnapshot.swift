@@ -64,7 +64,7 @@ enum InsightsSourceLoader {
             dayStarts[id] = day.calendarDate()
         }
 
-        var moveFetch = FetchDescriptor<MoveSegment>(sortBy: [SortDescriptor(\.startDate)])
+        var moveFetch = FetchDescriptor<MoveSegment>.live(sortBy: [SortDescriptor(\.startDate)])
         moveFetch.relationshipKeyPathsForPrefetching = [\.dayTimeline, \.startPlace]
         var moves: [PersistentIdentifier: [InsightsMoveRecord]] = [:]
         var moveCount = 0
@@ -74,7 +74,7 @@ enum InsightsSourceLoader {
             moves[day, default: []].append(InsightsMoveRecord(move))
         }
 
-        var visitFetch = FetchDescriptor<VisitPlace>(sortBy: [SortDescriptor(\.arrivalDate)])
+        var visitFetch = FetchDescriptor<VisitPlace>.live(sortBy: [SortDescriptor(\.arrivalDate)])
         visitFetch.relationshipKeyPathsForPrefetching = [\.dayTimeline, \.knownPlace]
         var visits: [PersistentIdentifier: [InsightsVisitRecord]] = [:]
         var visitCount = 0

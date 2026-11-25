@@ -599,7 +599,7 @@ final class DefaultTimelineAssembler: TimelineAssembler {
                 let visitPlace = try repository.addOrUpdateVisit(from: visit)
                 storeGeneration += 1
                 try repository.applyPlaceLearning(to: visitPlace)
-                await fillAutomaticPlaceLabelIfNeeded(for: visitPlace)
+                await fillAutomaticPlaceLabelIfNeeded(forPlaceID: visitPlace.id)
                 try repository.saveIfNeeded()
             } catch {
                 print("Failed to build timeline segment: \(error.localizedDescription)")
@@ -790,22 +790,26 @@ final class DefaultTimelineAssembler: TimelineAssembler {
 
     private func apply(_ result: SampleStayReconciliationResult, asksForReview: Bool = true) async throws {
         var changedTrips = 0
+        // Stops are read before the motion queries and looked up again by id after them,
+        // never held across one: the person can delete a stop meanwhile on another context.
+        let newPlaceIDs = result.newPlaces.map(\.id)
         for leg in result.moveLegs {
-            // Models can leave the store while the motion queries await.
             guard Self.isLive(leg.startPlace), Self.isLive(leg.endPlace) else { continue }
+            let startID = leg.startPlace.id
+            let endID = leg.endPlace.id
             let before = leg.startPlace.outgoingMoves
-                .first { $0.endPlace?.id == leg.endPlace.id }
+                .first { $0.endPlace?.id == endID }
                 .map(TripShape.init)
+            let straightLine = leg.straightLineMeters > 0
+                ? leg.straightLineMeters
+                : CLLocation(latitude: leg.startPlace.latitude, longitude: leg.startPlace.longitude)
+                    .distance(from: CLLocation(latitude: leg.endPlace.latitude, longitude: leg.endPlace.longitude))
             var steps = await motionClassifier.stepCount(start: leg.startDate, end: leg.endDate)
             if steps == nil, let id = leg.existingMoveID,
                let health = HealthStepEvidenceLookup.evidence(for: id)?.steps.known {
                 // Older than the pedometer's week, or imported: Health may still know.
                 steps = Int(health.rounded())
             }
-            let straightLine = leg.straightLineMeters > 0
-                ? leg.straightLineMeters
-                : CLLocation(latitude: leg.startPlace.latitude, longitude: leg.startPlace.longitude)
-                    .distance(from: CLLocation(latitude: leg.endPlace.latitude, longitude: leg.endPlace.longitude))
             let duration = leg.endDate.timeIntervalSince(leg.startDate)
 
             let classification: (mode: TransportMode, confidence: Double)
@@ -853,7 +857,8 @@ final class DefaultTimelineAssembler: TimelineAssembler {
                 // Read the current preference after the motion query awaits.
                 transportMode = automaticModes().allowedMode(proposedMode)
             }
-            guard Self.isLive(leg.startPlace), Self.isLive(leg.endPlace) else { continue }
+            guard let startPlace = try repository.livePlace(id: startID),
+                  let endPlace = try repository.livePlace(id: endID) else { continue }
 
             var distance = leg.keptDistance ?? leg.distanceMeters
             if leg.keptDistance == nil,
@@ -879,8 +884,8 @@ final class DefaultTimelineAssembler: TimelineAssembler {
             }
             let between = try repository.samples(from: leg.startDate, to: leg.endDate)
             let move = try repository.upsertMove(
-                startPlace: leg.startPlace,
-                endPlace: leg.endPlace,
+                startPlace: startPlace,
+                endPlace: endPlace,
                 startDate: leg.startDate,
                 endDate: leg.endDate,
                 transportMode: transportMode,
@@ -922,16 +927,17 @@ final class DefaultTimelineAssembler: TimelineAssembler {
                !TimelineReviewHeuristics.isImportedHistory(move) {
                 move.reviewState = .pending
             }
-            if asksForReview, TimelineReviewHeuristics.shouldAskAboutStay(leg.startPlace) {
-                leg.startPlace.reviewState = .pending
+            if asksForReview, TimelineReviewHeuristics.shouldAskAboutStay(startPlace) {
+                startPlace.reviewState = .pending
             }
         }
 
-        for place in result.newPlaces {
+        for id in newPlaceIDs {
+            guard let place = try repository.livePlace(id: id) else { continue }
             try repository.applyPlaceLearning(to: place)
         }
-        for place in result.newPlaces.prefix(8) {
-            await fillAutomaticPlaceLabelIfNeeded(for: place)
+        for id in newPlaceIDs.prefix(8) {
+            await fillAutomaticPlaceLabelIfNeeded(forPlaceID: id)
         }
         try repository.saveIfNeeded()
 
@@ -960,7 +966,8 @@ final class DefaultTimelineAssembler: TimelineAssembler {
         return OnFootDistanceEstimate.defaultStride * learned.k
     }
 
-    private func fillAutomaticPlaceLabelIfNeeded(for place: VisitPlace) async {
+    private func fillAutomaticPlaceLabelIfNeeded(forPlaceID placeID: UUID) async {
+        guard let place = try? repository.livePlace(id: placeID) else { return }
         let hasUserLabel = !(place.userLabel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         let hasAutoLabel = !(place.autoLabel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
 
@@ -970,7 +977,6 @@ final class DefaultTimelineAssembler: TimelineAssembler {
 
         // Earlier stays at this spot already have a name; a fresh geocode would only
         // add another house number for the same building.
-        let placeID = place.id
         do {
             if let reused = try repository.reusableAutomaticLabel(for: placeID) {
                 try repository.setAutomaticLabel(reused, for: placeID)
@@ -988,18 +994,18 @@ final class DefaultTimelineAssembler: TimelineAssembler {
         let name = await BoundedWait.run(seconds: 8, fallback: nil) {
             await resolver.resolveName(for: coordinate)
         }
-        // The wait may have outlived the stay: a rebuild can remove it meanwhile.
-        guard !place.isDeleted, place.modelContext != nil else { return }
+        // The wait may have outlived the stay: it is not touched again, only its id and
+        // where it was; `setAutomaticLabel` looks it up and skips one deleted or retired.
         if let resolvedName = name {
             do {
                 let nearby = try repository.knownPlaces(
-                    near: place.coordinate,
+                    near: coordinate,
                     within: PlaceLearningEngine.rejectedLabelSearchRadius
                 )
                 if PlaceLearningEngine.shouldSuppress(resolvedName, nearbyPlaces: nearby) {
                     return
                 }
-                try repository.setAutomaticLabel(resolvedName, for: place.id)
+                try repository.setAutomaticLabel(resolvedName, for: placeID)
                 try repository.saveIfNeeded()
             } catch {
                 print("Failed to persist automatic place label: \(error.localizedDescription)")

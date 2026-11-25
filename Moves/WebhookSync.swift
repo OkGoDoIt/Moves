@@ -827,7 +827,7 @@ final class WebhookSyncManager: ObservableObject {
         createdDescriptor.fetchLimit = Self.batchSize
         var visits = try modelContext.fetch(createdDescriptor)
 
-        var recentDescriptor = FetchDescriptor<VisitPlace>(
+        var recentDescriptor = FetchDescriptor<VisitPlace>.live(
             sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .reverse)]
         )
         recentDescriptor.fetchLimit = Self.batchSize

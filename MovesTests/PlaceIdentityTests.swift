@@ -192,7 +192,7 @@ final class PlaceIdentityTests: XCTestCase {
         }
         _ = try repository.appendSamples(from: fixes, source: .significantChange)
         try repository.repairDuplicateStays()
-        let remaining = try context.fetch(FetchDescriptor<VisitPlace>())
+        let remaining = try context.fetch(FetchDescriptor<VisitPlace>.live())
         XCTAssertEqual(remaining.count, 1)
         XCTAssertEqual(remaining.first?.id, first.id)
         XCTAssertLessThan(distance(try XCTUnwrap(remaining.first).coordinate, offset(origin, north: 3)), 2)
@@ -542,6 +542,12 @@ final class PlaceIdentityTests: XCTestCase {
             autoLabel: label
         )
         context.insert(visit)
+        // On its day, as the app always files a stay: one with no day is retired.
+        let key = DayTimeline.makeDayKey(for: visit.arrivalDate)
+        let existing = try? context.fetch(FetchDescriptor<DayTimeline>(predicate: #Predicate { $0.dayKey == key })).first
+        let timelineDay = existing ?? DayTimeline(dayStart: visit.arrivalDate)
+        if existing == nil { context.insert(timelineDay) }
+        visit.dayTimeline = timelineDay
         return visit
     }
 }

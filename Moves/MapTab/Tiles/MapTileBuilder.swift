@@ -21,9 +21,9 @@ enum MapTileSource {
     static func months(container: ModelContainer, now: Date, calendar: Calendar) throws -> [Int] {
         let context = ModelContext(container)
         context.autosaveEnabled = false
-        var firstMove = FetchDescriptor<MoveSegment>(sortBy: [SortDescriptor(\.startDate)])
+        var firstMove = FetchDescriptor<MoveSegment>.live(sortBy: [SortDescriptor(\.startDate)])
         firstMove.fetchLimit = 1
-        var firstVisit = FetchDescriptor<VisitPlace>(sortBy: [SortDescriptor(\.arrivalDate)])
+        var firstVisit = FetchDescriptor<VisitPlace>.live(sortBy: [SortDescriptor(\.arrivalDate)])
         firstVisit.fetchLimit = 1
         let earliest = [try context.fetch(firstMove).first?.startDate, try context.fetch(firstVisit).first?.arrivalDate]
             .compactMap { $0 }
@@ -49,7 +49,7 @@ enum MapTileSource {
         let start = interval.start, end = interval.end
 
         var moves = FetchDescriptor<MoveSegment>(
-            predicate: #Predicate { $0.startDate >= start && $0.startDate < end },
+            predicate: #Predicate { $0.startDate >= start && $0.startDate < end && $0.dayTimeline != nil },
             sortBy: [SortDescriptor(\.startDate)]
         )
         moves.propertiesToFetch = [\.id, \.startDate, \.endDate, \.transportModeRawValue, \.distanceMeters, \.originRaw]
@@ -70,7 +70,7 @@ enum MapTileSource {
         }
 
         var visits = FetchDescriptor<VisitPlace>(
-            predicate: #Predicate { $0.arrivalDate >= start && $0.arrivalDate < end },
+            predicate: #Predicate { $0.arrivalDate >= start && $0.arrivalDate < end && $0.dayTimeline != nil },
             sortBy: [SortDescriptor(\.arrivalDate)]
         )
         visits.propertiesToFetch = [\.id, \.arrivalDate, \.departureDate, \.latitude, \.longitude]
@@ -114,7 +114,7 @@ enum MapTileSource {
                 let context = ModelContext(container)
                 context.autosaveEnabled = false
                 var moves = FetchDescriptor<MoveSegment>(
-                    predicate: #Predicate { $0.startDate >= start && $0.startDate < end },
+                    predicate: #Predicate { $0.startDate >= start && $0.startDate < end && $0.dayTimeline != nil },
                     sortBy: [SortDescriptor(\.startDate)]
                 )
                 moves.fetchOffset = offset
@@ -152,7 +152,7 @@ enum MapTileSource {
         let context = ModelContext(container)
         context.autosaveEnabled = false
         var visits = FetchDescriptor<VisitPlace>(
-            predicate: #Predicate { $0.arrivalDate >= start && $0.arrivalDate < end },
+            predicate: #Predicate { $0.arrivalDate >= start && $0.arrivalDate < end && $0.dayTimeline != nil },
             sortBy: [SortDescriptor(\.arrivalDate)]
         )
         visits.propertiesToFetch = [\.arrivalDate, \.departureDate, \.latitude, \.longitude]
@@ -175,7 +175,7 @@ enum MapTileSource {
     static func track(id: UUID, container: ModelContainer) throws -> MapTileTrack? {
         let context = ModelContext(container)
         context.autosaveEnabled = false
-        var descriptor = FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.id == id })
+        var descriptor = FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.id == id && $0.dayTimeline != nil })
         descriptor.fetchLimit = 1
         descriptor.relationshipKeyPathsForPrefetching = [\.samplesStorage, \.startPlace, \.endPlace]
         guard let move = try context.fetch(descriptor).first, !move.isDeleted else { return nil }

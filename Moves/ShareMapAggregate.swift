@@ -260,13 +260,13 @@ enum ShareMapAggregateBuilder {
         var places: [ShareMapAggregateStore.SourceRow]
 
         init(in context: ModelContext) throws {
-            var moveFetch = FetchDescriptor<MoveSegment>()
+            var moveFetch = FetchDescriptor<MoveSegment>.live()
             moveFetch.relationshipKeyPathsForPrefetching = [\.dayTimeline]
             moves = try context.fetch(moveFetch).compactMap { move in
                 // Months and years group days by their own date on the phone's calendar.
                 move.dayTimeline.map { ShareMapAggregateStore.moveRow(move, dayStart: $0.calendarDate()) }
             }
-            var placeFetch = FetchDescriptor<VisitPlace>()
+            var placeFetch = FetchDescriptor<VisitPlace>.live()
             placeFetch.relationshipKeyPathsForPrefetching = [\.dayTimeline]
             places = try context.fetch(placeFetch).compactMap { place in
                 place.dayTimeline.map { ShareMapAggregateStore.placeRow(place, dayStart: $0.calendarDate()) }
@@ -390,7 +390,7 @@ enum ShareMapAggregateBuilder {
         let lowerBound = interval.start.addingTimeInterval(-24 * 60 * 60)
         let upperBound = interval.end.addingTimeInterval(24 * 60 * 60)
         var fetch = FetchDescriptor<MoveSegment>(
-            predicate: #Predicate { $0.startDate >= lowerBound && $0.startDate < upperBound },
+            predicate: #Predicate { $0.startDate >= lowerBound && $0.startDate < upperBound && $0.dayTimeline != nil },
             sortBy: [SortDescriptor(\.startDate)]
         )
         fetch.relationshipKeyPathsForPrefetching = [\.dayTimeline, \.startPlace, \.endPlace, \.samplesStorage]

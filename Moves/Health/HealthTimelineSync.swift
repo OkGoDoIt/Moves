@@ -184,7 +184,7 @@ enum HealthTimelineSnapshotReader {
 
         let lower = start.addingTimeInterval(-86_400)
         let upper = end.addingTimeInterval(86_400)
-        var moveFetch = FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.startDate >= lower && $0.startDate < upper })
+        var moveFetch = FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.startDate >= lower && $0.startDate < upper && $0.dayTimeline != nil })
         moveFetch.relationshipKeyPathsForPrefetching = [\.dayTimeline, \.startPlace, \.endPlace, \.samplesStorage]
         var tripsByDay: [String: [HealthTripFacts]] = [:]
         var seenMoves = Set<UUID>()
@@ -194,7 +194,7 @@ enum HealthTimelineSnapshotReader {
             tripsByDay[dayKey, default: []].append(facts(for: move))
         }
 
-        var placeFetch = FetchDescriptor<VisitPlace>(predicate: #Predicate { $0.arrivalDate >= lower && $0.arrivalDate < upper })
+        var placeFetch = FetchDescriptor<VisitPlace>(predicate: #Predicate { $0.arrivalDate >= lower && $0.arrivalDate < upper && $0.dayTimeline != nil })
         placeFetch.relationshipKeyPathsForPrefetching = [\.dayTimeline]
         var staysByDay: [String: [HealthStayFacts]] = [:]
         var seenPlaces = Set<UUID>()
@@ -273,7 +273,7 @@ enum HealthTimelineWriter {
         var applied = Set<UUID>()
         for write in writes {
             let id = write.id
-            var fetch = FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.id == id })
+            var fetch = FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.id == id && $0.dayTimeline != nil })
             fetch.relationshipKeyPathsForPrefetching = [\.samplesStorage]
             for move in try context.fetch(fetch) where !move.isDeleted {
                 guard abs(move.startDate.timeIntervalSince(write.expectedStart)) < 1,

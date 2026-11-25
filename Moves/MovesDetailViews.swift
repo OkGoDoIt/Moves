@@ -997,7 +997,8 @@ struct MoveMapDetailView: View {
     /// The trip as it is in the store now, or nil once it is gone. Looked up again after
     /// every await, so work that outlives a delete or a pop never touches a dead row.
     private func liveSegment(_ id: UUID) -> MoveSegment? {
-        var descriptor = FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.id == id })
+        // A trip the rebuild retired meanwhile counts as gone.
+        var descriptor = FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.id == id && $0.dayTimeline != nil })
         descriptor.fetchLimit = 1
         return try? modelContext.fetch(descriptor).first
     }
@@ -1013,16 +1014,16 @@ struct MoveMapDetailView: View {
     @MainActor
     private func refreshRouteCoordinates() async {
         let id = segment.id
-        let matched = await RoadRouteMatcher.matchedCoordinates(for: segment)
+        let matched = await RoadRouteMatcher.matchedCoordinates(moveID: id, in: modelContext)
         guard !Task.isCancelled, let current = liveSegment(id) else { return }
         routeCoordinates = matched
         _ = await SpeedProfileBuilder.buildAndCache(for: current, coordinates: matched)
-        guard !Task.isCancelled, liveSegment(id) != nil else { return }
+        guard !Task.isCancelled, let latest = liveSegment(id) else { return }
         refreshMoveGPXShareFile()
         if isEditingManualRoute, manualRouteDrag == nil {
             manualRouteWaypointCoordinates = ManualRouteGeometry.waypoints(
                 for: routeCoordinates,
-                transportMode: segment.transportMode
+                transportMode: latest.transportMode
             )
         }
         if modelContext.hasChanges {
@@ -1210,12 +1211,13 @@ struct MoveMapDetailView: View {
         do {
             try SwiftDataTimelineRepository(modelContext: modelContext)
                 .setRouteMatchPolicy(.auto, for: segment)
+            let id = segment.id
             startRouteWork {
                 await refreshRouteCoordinates()
-                if isEditingManualRoute {
+                if isEditingManualRoute, let live = liveSegment(id) {
                     manualRouteWaypointCoordinates = ManualRouteGeometry.waypoints(
                         for: routeCoordinates,
-                        transportMode: segment.transportMode
+                        transportMode: live.transportMode
                     )
                 }
                 isSavingManualRoute = false
