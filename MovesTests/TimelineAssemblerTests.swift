@@ -80,6 +80,15 @@ final class MovesTimelinePeriodTests: XCTestCase {
 
 @MainActor
 final class TimelineAssemblerTests: XCTestCase {
+    /// `MOVES_RETIREMENT_DEFERRED=1` runs the class with rebuild removals retired.
+    override func setUp() async throws {
+        TimelineRetirement.isDeferred = ProcessInfo.processInfo.environment["MOVES_RETIREMENT_DEFERRED"] == "1"
+    }
+
+    override func tearDown() async throws {
+        TimelineRetirement.isDeferred = false
+    }
+
     func testLocationSamplesAreDeduplicatedAcrossSourcesForTheSameFix() throws {
         let container = try makeInMemoryContainer()
         let repository = SwiftDataTimelineRepository(modelContainer: container)
@@ -822,7 +831,9 @@ final class TimelineAssemblerTests: XCTestCase {
                 coordinate: CLLocationCoordinate2D(latitude: 52.505, longitude: 13.408),
                 horizontalAccuracy: 15,
                 arrivalDate: t0.addingTimeInterval(32 * 60),
-                departureDate: t0.addingTimeInterval(34 * 60)
+                // Three and a half minutes: still a short transit stop to ask about. A
+                // two-minute stop only visit monitoring saw is now dissolved instead.
+                departureDate: t0.addingTimeInterval(35.5 * 60)
             )
         )
         await assembler.ingestVisit(
@@ -1097,8 +1108,8 @@ final class TimelineAssemblerTests: XCTestCase {
         let report = try repository.runHistoricalDeduplication()
 
         let verificationContext = ModelContext(container)
-        let places = try verificationContext.fetch(FetchDescriptor<VisitPlace>())
-        let moves = try verificationContext.fetch(FetchDescriptor<MoveSegment>())
+        let places = try verificationContext.liveVisits()
+        let moves = try verificationContext.liveMoves()
 
         XCTAssertEqual(places.count, 3)
         XCTAssertGreaterThanOrEqual(report.removedPlaceCount, 1)
@@ -1276,8 +1287,8 @@ final class TimelineAssemblerTests: XCTestCase {
         let report = try repository.runHistoricalDeduplication()
 
         let verificationContext = ModelContext(container)
-        let places = try verificationContext.fetch(FetchDescriptor<VisitPlace>())
-        let moves = try verificationContext.fetch(FetchDescriptor<MoveSegment>())
+        let places = try verificationContext.liveVisits()
+        let moves = try verificationContext.liveMoves()
 
         XCTAssertEqual(places.count, 2)
         XCTAssertEqual(moves.count, 1)
@@ -1383,8 +1394,8 @@ final class TimelineAssemblerTests: XCTestCase {
         _ = try repository.runHistoricalDeduplication()
 
         let verificationContext = ModelContext(container)
-        let moves = try verificationContext.fetch(FetchDescriptor<MoveSegment>())
-        let allPlaces = try verificationContext.fetch(FetchDescriptor<VisitPlace>())
+        let moves = try verificationContext.liveMoves()
+        let allPlaces = try verificationContext.liveVisits()
         let repairedOrigin = try XCTUnwrap(allPlaces.first(where: { $0.id == origin.id }))
 
         XCTAssertEqual(moves.count, 2)

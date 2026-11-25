@@ -171,9 +171,30 @@ final class StoreResilienceTests: XCTestCase {
             saves += 1
         }
         defer { NotificationCenter.default.removeObserver(observer) }
+        var currentPass = 0
+        // What a later pass touched, against the stored row, for diagnosis.
+        let willSave = NotificationCenter.default.addObserver(forName: ModelContext.willSave, object: writerContext, queue: nil) { _ in
+            guard currentPass >= 2 else { return }
+            let stored = ModelContext(container)
+            for model in writerContext.changedModelsArray {
+                if let place = model as? VisitPlace {
+                    let id = place.id
+                    let old = try? stored.fetch(FetchDescriptor<VisitPlace>(predicate: #Predicate { $0.id == id })).first
+                    print("Pass \(currentPass) stop \(id.uuidString.prefix(4)) origin=\(place.origin.rawValue) arrival \(String(describing: old?.arrivalDate))→\(place.arrivalDate) departure \(String(describing: old?.departureDate))→\(String(describing: place.departureDate)) review \(old?.reviewStateRaw ?? "-")→\(place.reviewStateRaw) day changed=\(old?.dayTimeline?.persistentModelID != place.dayTimeline?.persistentModelID)")
+                } else if let move = model as? MoveSegment {
+                    let id = move.id
+                    let old = try? stored.fetch(FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.id == id })).first
+                    print("Pass \(currentPass) trip \(id.uuidString.prefix(4)) \(String(describing: old?.startDate))→\(move.startDate) \(String(describing: old?.endDate))→\(move.endDate) mode \(old?.transportModeRawValue ?? "-")→\(move.transportModeRawValue) distance \(old?.distanceMeters ?? -1)→\(move.distanceMeters) review \(old?.reviewStateRaw ?? "-")→\(move.reviewStateRaw) confidence \(old?.routeMatchConfidenceRaw ?? "-")→\(move.routeMatchConfidenceRaw)")
+                }
+            }
+        }
+        defer { NotificationCenter.default.removeObserver(willSave) }
+        // Full, trip-only, full, trip-only, as capture runs them.
+        let tripSince = Date().addingTimeInterval(-2 * 60 * 60)
         for pass in 1...4 {
             saves = 0
-            await assembler.reconcileSampleStays()
+            currentPass = pass
+            await assembler.reconcile(pass.isMultiple(of: 2) ? .recentTrip(since: tripSince) : .week)
             let current = try Self.identities(in: ModelContext(container))
             // The first pass may repair what older builds left; after that, nothing is new.
             if pass >= 2 {
@@ -240,6 +261,252 @@ final class StoreResilienceTests: XCTestCase {
             }
             print("Insights \(period.id) on backup copy: \(Int(new.totalDistanceMeters)) m, \(Int(new.totalMovingDuration)) s, \(new.activeDayCount) active days — matches day walk")
         }
+    }
+
+    /// Before-and-after numbers for the stop and trip rules on a copy of a real store.
+    ///
+    /// Skipped unless `MOVES_REBUILD_STORE` names a `default.store` (pass it to
+    /// `xcodebuild` as `TEST_RUNNER_MOVES_REBUILD_STORE`). `MOVES_REBUILD_NOW` (ISO 8601)
+    /// shifts "now"; the default is just after the newest fix. `MOVES_REBUILD_OUT` names
+    /// a directory the rebuilt copy is written to, for the audit scripts. The copy is a
+    /// private backup: nothing from it is asserted on by name or place.
+    func testRebuildMeasurementsOnAStoreCopy() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let path = environment["MOVES_REBUILD_STORE"], FileManager.default.fileExists(atPath: path) else {
+            throw XCTSkip("Set MOVES_REBUILD_STORE to a copy of default.store")
+        }
+        TimelineRetirement.isDeferred = environment["MOVES_RETIREMENT_DEFERRED"] == "1"
+        defer { TimelineRetirement.isDeferred = false }
+        let directory = try makeTemporaryDirectory()
+        let storeURL = directory.appendingPathComponent("default.store")
+        for suffix in ["", "-wal", "-shm"] {
+            let source = URL(fileURLWithPath: path + suffix)
+            guard FileManager.default.fileExists(atPath: source.path) else { continue }
+            let target = URL(fileURLWithPath: storeURL.path + suffix)
+            try FileManager.default.copyItem(at: source, to: target)
+            try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: target.path)
+        }
+        let container = try makeContainer(storeURL: storeURL)
+        let probe = ModelContext(container)
+        var newest = FetchDescriptor<LocationSample>(sortBy: [SortDescriptor(\.timestamp, order: .reverse)])
+        newest.fetchLimit = 1
+        let newestFix = try probe.fetch(newest).first?.timestamp ?? .now
+        let now = environment["MOVES_REBUILD_NOW"].flatMap { ISO8601DateFormatter().date(from: $0) }
+            ?? newestFix.addingTimeInterval(5 * 60)
+        let windowStart = now.addingTimeInterval(-7 * 24 * 60 * 60)
+
+        let before = try Self.rebuildMetrics(in: ModelContext(container), from: windowStart, to: now)
+        let replay = try ReplayMotionClassifier(context: ModelContext(container))
+        let writerContext = ModelContext(container)
+        let assembler = DefaultTimelineAssembler(
+            repository: SwiftDataTimelineRepository(modelContext: writerContext),
+            motionClassifier: replay,
+            placeNameResolver: NoNamePlaceResolver(),
+            automaticModes: { .init() },
+            now: { now },
+            paceRulesDefaults: nil
+        )
+
+        // The pace sweep over all history, as the app runs it once.
+        let yearStart = ISO8601DateFormatter().date(from: "2026-01-01T00:00:00Z")!
+        let running = try writerContext.fetch(FetchDescriptor<MoveSegment>())
+            .filter { $0.transportMode == .running && $0.startDate >= yearStart }
+        let runningIDs = Set(running.map(\.id))
+        let runningMiles = running.reduce(0) { $0 + $1.distanceMeters } / 1_609.344
+        let pace = try AutomaticModeHistory.applyPaceRules(in: writerContext, now: now, preferences: .init())
+        let relabeled = try writerContext.fetch(FetchDescriptor<MoveSegment>()).filter { runningIDs.contains($0.id) }
+        let outcome = Dictionary(grouping: relabeled, by: { $0.transportMode.rawValue }).mapValues { trips in
+            "\(trips.count) trips, \(Int(trips.reduce(0) { $0 + $1.distanceMeters } / 1_609.344)) mi"
+        }
+        print("REBUILD 2026 running trips: \(running.count) (\(Int(runningMiles)) mi); after the pace sweep: \(outcome.sorted { $0.key < $1.key })")
+        print("REBUILD pace sweep: checked \(pace.checked), changed \(pace.changed.map { "\($0.key.rawValue)=\($0.value)" }.sorted())")
+
+        var counts: [String: Int] = [:]
+        let observer = NotificationCenter.default.addObserver(forName: ModelContext.didSave, object: writerContext, queue: nil) { note in
+            for (key, label) in [(ModelContext.NotificationKey.insertedIdentifiers, "inserted"),
+                                 (.updatedIdentifiers, "updated"), (.deletedIdentifiers, "deleted")] {
+                let ids = (note.userInfo?[key.rawValue] as? [PersistentIdentifier]) ?? []
+                for id in ids where id.entityName == "VisitPlace" || id.entityName == "MoveSegment" {
+                    counts["\(label) \(id.entityName)", default: 0] += 1
+                }
+            }
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        var passNumber = 0
+        // Which rows a later pass touched, and which day row they point at, for diagnosis.
+        let willSave = NotificationCenter.default.addObserver(forName: ModelContext.willSave, object: writerContext, queue: nil) { _ in
+            guard passNumber >= 2 else { return }
+            let stored = ModelContext(container)
+            for model in writerContext.changedModelsArray {
+                if let place = model as? VisitPlace {
+                    let id = place.id
+                    if let old = try? stored.fetch(FetchDescriptor<VisitPlace>(predicate: #Predicate { $0.id == id })).first {
+                        let fields: [(String, Bool)] = [
+                            ("arrival", old.arrivalDate != place.arrivalDate), ("departure", old.departureDate != place.departureDate),
+                            ("lat", old.latitude != place.latitude), ("lon", old.longitude != place.longitude),
+                            ("acc", old.horizontalAccuracy != place.horizontalAccuracy),
+                            ("day", old.dayTimeline?.persistentModelID != place.dayTimeline?.persistentModelID),
+                            ("review", old.reviewStateRaw != place.reviewStateRaw), ("auto", old.autoLabel != place.autoLabel),
+                            ("user", old.userLabel != place.userLabel), ("known", old.knownPlace?.id != place.knownPlace?.id),
+                            ("assign", old.assignmentSourceRaw != place.assignmentSourceRaw),
+                            ("out", Set(old.outgoingMoves.map(\.id)) != Set(place.outgoingMoves.map(\.id))),
+                            ("in", Set(old.incomingMoves.map(\.id)) != Set(place.incomingMoves.map(\.id))),
+                        ]
+                        print("REBUILD pass \(passNumber) stop \(id.uuidString.prefix(4)) differs in: \(fields.filter(\.1).map(\.0)) arrival \(old.arrivalDate)→\(place.arrivalDate) departure \(String(describing: old.departureDate))→\(String(describing: place.departureDate))")
+                    }
+                } else if let move = model as? MoveSegment {
+                    let id = move.id
+                    if let old = try? stored.fetch(FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.id == id })).first {
+                        let fields: [(String, Bool)] = [
+                            ("start", old.startDate != move.startDate), ("end", old.endDate != move.endDate),
+                            ("mode", old.transportModeRawValue != move.transportModeRawValue),
+                            ("distance", old.distanceMeters != move.distanceMeters), ("steps", old.stepCount != move.stepCount),
+                            ("from", old.startPlace?.id != move.startPlace?.id), ("to", old.endPlace?.id != move.endPlace?.id),
+                            ("day", old.dayTimeline?.persistentModelID != move.dayTimeline?.persistentModelID),
+                            ("key", old.dedupeKey != move.dedupeKey), ("review", old.reviewStateRaw != move.reviewStateRaw),
+                            ("confidence", old.routeMatchConfidenceRaw != move.routeMatchConfidenceRaw),
+                            ("summary", old.routeMatchSummary != move.routeMatchSummary),
+                            ("samples", Set(old.samples.map(\.dedupeKey)) != Set(move.samples.map(\.dedupeKey))),
+                            ("cache", old.routeCacheSignature != move.routeCacheSignature),
+                        ]
+                        print("REBUILD pass \(passNumber) trip \(id.uuidString.prefix(4)) differs in: \(fields.filter(\.1).map(\.0))")
+                    }
+                }
+            }
+            for model in writerContext.changedModelsArray {
+                if let place = model as? VisitPlace {
+                    print("REBUILD pass \(passNumber) touched stop \(place.id.uuidString.prefix(4)) day=\(String(describing: place.dayTimeline?.persistentModelID.hashValue)) arrival=\(place.arrivalDate) departure=\(String(describing: place.departureDate))")
+                } else if let move = model as? MoveSegment {
+                    print("REBUILD pass \(passNumber) touched trip \(move.id.uuidString.prefix(4)) day=\(String(describing: move.dayTimeline?.persistentModelID.hashValue)) \(move.startDate)…\(move.endDate) \(move.transportMode.rawValue) from=\(move.startPlace?.id.uuidString.prefix(4) ?? "-") to=\(move.endPlace?.id.uuidString.prefix(4) ?? "-")")
+                }
+            }
+        }
+        defer { NotificationCenter.default.removeObserver(willSave) }
+        var passes: [[String: Int]] = []
+        func snapshot() throws -> [UUID: String] {
+            let check = ModelContext(container)
+            var rows: [UUID: String] = [:]
+            for place in try check.fetch(FetchDescriptor<VisitPlace>()) where place.arrivalDate >= windowStart.addingTimeInterval(-36 * 3_600) {
+                rows[place.id] = "stop \(place.arrivalDate)…\(place.departureDate.map { "\($0)" } ?? "open") src=\(place.origin.rawValue) rv=\(place.reviewState.rawValue) named=\(place.userLabel != nil) kp=\(place.knownPlace != nil) day=\(place.dayTimeline?.dayKey ?? "-") acc=\(place.horizontalAccuracy) at=\(String(format: "%.6f,%.6f", place.latitude, place.longitude)) auto=\(place.autoLabel != nil) assign=\(place.assignmentSource.rawValue)"
+            }
+            for move in try check.fetch(FetchDescriptor<MoveSegment>()) where move.endDate >= windowStart {
+                rows[move.id] = "trip \(move.startDate)…\(move.endDate) \(move.transportMode.rawValue) \(Int(move.distanceMeters)) m steps=\(String(describing: move.stepCount)) from=\(move.startPlace?.id.uuidString.prefix(4) ?? "-") to=\(move.endPlace?.id.uuidString.prefix(4) ?? "-") rv=\(move.reviewState.rawValue) rm=\(move.routeMatchConfidence.rawValue) day=\(move.dayTimeline?.dayKey ?? "-") key=\(move.dedupeKey.prefix(12)) samples=\(move.samples.count)"
+            }
+            return rows
+        }
+        var previousRows = try snapshot()
+        // Full, trip-only, full, trip-only: the live trip's rebuild must agree with the week's.
+        let scopes: [CaptureRebuildScope] = [.week, .recentTrip(since: now.addingTimeInterval(-2 * 60 * 60)),
+                                             .week, .recentTrip(since: now.addingTimeInterval(-2 * 60 * 60))]
+        for pass in 1...4 {
+            counts = [:]
+            passNumber = pass
+            await assembler.reconcile(scopes[pass - 1])
+            passes.append(counts)
+            let rows = try snapshot()
+            if pass >= 2 {
+                for (id, row) in rows where previousRows[id] != row {
+                    print("REBUILD pass \(pass) \(id.uuidString.prefix(4)) was: \(previousRows[id] ?? "-") now: \(row)")
+                }
+                for (id, row) in previousRows where rows[id] == nil {
+                    print("REBUILD pass \(pass) \(id.uuidString.prefix(4)) removed: \(row)")
+                }
+            }
+            previousRows = rows
+        }
+        let after = try Self.rebuildMetrics(in: ModelContext(container), from: windowStart, to: now)
+        // Stops that still run past another anywhere in the store, for diagnosis.
+        let everyStop = try ModelContext(container).liveVisits().filter { $0.departureDate != nil }
+        for (a, b) in zip(everyStop, everyStop.dropFirst()) {
+            guard let aEnd = a.departureDate, let bEnd = b.departureDate, aEnd.timeIntervalSince(b.arrivalDate) > 60 else { continue }
+            let apart = CLLocation(latitude: a.latitude, longitude: a.longitude).distance(from: CLLocation(latitude: b.latitude, longitude: b.longitude))
+            print("REBUILD overlap \(bEnd <= aEnd ? "contained" : "partial"): \(a.origin.rawValue) \(a.arrivalDate)…\(aEnd) rv=\(a.reviewState.rawValue) / \(b.origin.rawValue) \(b.arrivalDate)…\(bEnd) rv=\(b.reviewState.rawValue) \(Int(apart)) m")
+        }
+
+        print("REBUILD now=\(now) window=\(windowStart)…\(now)")
+        print("REBUILD before: \(before.summary)")
+        print("REBUILD after:  \(after.summary)")
+        for (index, pass) in passes.enumerated() {
+            print("REBUILD pass \(index + 1) row changes: \(pass.sorted { $0.key < $1.key })")
+        }
+        for pass in passes.dropFirst() {
+            XCTAssertTrue(pass.isEmpty, "A pass after the first changed rows: \(pass)")
+        }
+        XCTAssertEqual(after.negative, 0)
+        XCTAssertEqual(after.stopOverlaps, 0)
+        XCTAssertEqual(after.tripOverlaps, 0)
+
+        if let out = environment["MOVES_REBUILD_OUT"] {
+            let outURL = URL(fileURLWithPath: out, isDirectory: true)
+            try FileManager.default.createDirectory(at: outURL, withIntermediateDirectories: true)
+            for suffix in ["", "-wal", "-shm"] {
+                let source = URL(fileURLWithPath: storeURL.path + suffix)
+                let target = outURL.appendingPathComponent("default.store" + suffix)
+                try? FileManager.default.removeItem(at: target)
+                if FileManager.default.fileExists(atPath: source.path) {
+                    try FileManager.default.copyItem(at: source, to: target)
+                }
+            }
+        }
+    }
+
+    struct RebuildMetrics {
+        var stops = 0
+        var trips = 0
+        var jumpsWithoutTrip = 0
+        var underTenMinutes = 0
+        var zeroLength = 0
+        var negative = 0
+        var stopOverlaps = 0
+        var tripOverlaps = 0
+        var sameSpanTrips = 0
+        var modes: [String: Int] = [:]
+        var walkingKilometresByDay: [String: Double] = [:]
+
+        var summary: String {
+            let days = walkingKilometresByDay.sorted { $0.key < $1.key }
+                .map { "\($0.key)=\(String(format: "%.1f", $0.value))" }.joined(separator: " ")
+            return "stops \(stops), trips \(trips), jumps without trip \(jumpsWithoutTrip), stops <10 min \(underTenMinutes), "
+                + "zero-length \(zeroLength), negative \(negative), stop overlaps \(stopOverlaps), trip overlaps \(tripOverlaps), "
+                + "same-span trips \(sameSpanTrips), modes \(modes.sorted { $0.key < $1.key }), walking km/day \(days)"
+        }
+    }
+
+    static func rebuildMetrics(in context: ModelContext, from start: Date, to end: Date) throws -> RebuildMetrics {
+        var metrics = RebuildMetrics()
+        let stops = try context.fetch(FetchDescriptor<VisitPlace>(predicate: #Predicate { $0.arrivalDate >= start && $0.arrivalDate <= end },
+                                                                  sortBy: [SortDescriptor(\.arrivalDate)]))
+            .filter { $0.dayTimeline != nil }
+        let trips = try context.fetch(FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.startDate >= start && $0.startDate <= end },
+                                                                   sortBy: [SortDescriptor(\.startDate)]))
+            .filter { $0.dayTimeline != nil }
+        metrics.stops = stops.count
+        metrics.trips = trips.count
+        for stop in stops {
+            guard let departure = stop.departureDate else { continue }
+            let duration = departure.timeIntervalSince(stop.arrivalDate)
+            if duration < 0 { metrics.negative += 1 }
+            if duration == 0 { metrics.zeroLength += 1 }
+            if duration < 600 { metrics.underTenMinutes += 1 }
+        }
+        for (a, b) in zip(stops, stops.dropFirst()) {
+            let end = a.departureDate ?? a.arrivalDate
+            if end.timeIntervalSince(b.arrivalDate) > 1 { metrics.stopOverlaps += 1 }
+            let apart = CLLocation(latitude: a.latitude, longitude: a.longitude)
+                .distance(from: CLLocation(latitude: b.latitude, longitude: b.longitude))
+            if b.arrivalDate.timeIntervalSince(end) <= 60, apart > 120 { metrics.jumpsWithoutTrip += 1 }
+        }
+        for (a, b) in zip(trips, trips.dropFirst()) {
+            if a.endDate.timeIntervalSince(b.startDate) > 1 { metrics.tripOverlaps += 1 }
+            if a.startDate == b.startDate, a.endDate == b.endDate { metrics.sameSpanTrips += 1 }
+        }
+        for trip in trips {
+            metrics.modes[trip.transportMode.rawValue, default: 0] += 1
+            if trip.transportMode == .walking, let day = trip.dayTimeline?.dayKey {
+                metrics.walkingKilometresByDay[day, default: 0] += trip.distanceMeters / 1_000
+            }
+        }
+        return metrics
     }
 
     // MARK: - Helpers
@@ -458,6 +725,7 @@ final class StoreResilienceTests: XCTestCase {
         var partialOverlaps = 0
         var containedStops = 0
         var selfLoops = 0
+        var photoOnlyOverlaps = 0
     }
 
     private static func quality(of context: ModelContext) throws -> Quality {
@@ -470,8 +738,17 @@ final class StoreResilienceTests: XCTestCase {
         for (a, b) in zip(closed, closed.dropFirst()) {
             guard let aEnd = a.departureDate, let bEnd = b.departureDate,
                   aEnd.timeIntervalSince(b.arrivalDate) > 60 else { continue }
+            // Two stays both inferred from photos belong to the photo import, which the
+            // rebuild never rewrites (it has no fixes for them). Counted apart, not as a
+            // rebuild failure.
+            if a.origin == .photoInferred, b.origin == .photoInferred {
+                result.photoOnlyOverlaps += 1
+                print("Overlap between photo-inferred stays (photo import's): \(a.arrivalDate)…\(aEnd) / \(b.arrivalDate)…\(bEnd)")
+                continue
+            }
             if bEnd <= aEnd {
                 result.containedStops += 1
+                print("Contained stop: \(a.origin.rawValue) \(a.arrivalDate)…\(aEnd) rv=\(a.reviewState.rawValue) holds \(b.origin.rawValue) \(b.arrivalDate)…\(bEnd)")
             } else {
                 result.partialOverlaps += 1
             }
@@ -485,8 +762,8 @@ final class StoreResilienceTests: XCTestCase {
     }
 
     private static func identities(in context: ModelContext) throws -> Identities {
-        let visits = try context.fetch(FetchDescriptor<VisitPlace>())
-        let moves = try context.fetch(FetchDescriptor<MoveSegment>())
+        let visits = try context.liveVisits()
+        let moves = try context.liveMoves()
         return Identities(visits: Set(visits.map(\.id)), moves: Set(moves.map(\.id)))
     }
 }
@@ -498,6 +775,43 @@ private struct RecordingMotionClassifier: MotionClassifier {
 
     func stepCount(start: Date, end: Date) async -> Int? {
         0
+    }
+}
+
+/// Answers motion questions from the trips already stored, so a rebuild on a store copy
+/// sees roughly what the phone's Core Motion said: the mode of the trip that overlaps
+/// most, and the measured steps of overlapping trips in proportion to the overlap.
+private struct ReplayMotionClassifier: MotionClassifier {
+    struct Trip { let start: Date; let end: Date; let mode: TransportMode; let steps: Int? }
+    let trips: [Trip]
+
+    @MainActor
+    init(context: ModelContext) throws {
+        trips = try context.fetch(FetchDescriptor<MoveSegment>()).map {
+            Trip(start: $0.startDate, end: $0.endDate, mode: $0.transportMode, steps: $0.knownStepCount)
+        }
+    }
+
+    private func overlap(_ trip: Trip, _ start: Date, _ end: Date) -> TimeInterval {
+        max(0, min(trip.end, end).timeIntervalSince(max(trip.start, start)))
+    }
+
+    func classifyTransport(start: Date, end: Date, locations: [CLLocation]) async -> (mode: TransportMode, confidence: Double) {
+        let best = trips.max { overlap($0, start, end) < overlap($1, start, end) }
+        guard let best, overlap(best, start, end) > 0 else { return (.unknown, 0.3) }
+        return (best.mode, 0.8)
+    }
+
+    func stepCount(start: Date, end: Date) async -> Int? {
+        var total = 0.0
+        var known = false
+        for trip in trips where trip.end > trip.start {
+            let shared = overlap(trip, start, end)
+            guard shared > 0, let steps = trip.steps else { continue }
+            known = true
+            total += Double(steps) * shared / trip.end.timeIntervalSince(trip.start)
+        }
+        return known ? Int(total.rounded()) : nil
     }
 }
 

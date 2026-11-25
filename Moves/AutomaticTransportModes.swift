@@ -61,6 +61,29 @@ extension MoveSegment {
         else { return false }
         return !samples.contains { $0.source == .healthWorkoutRoute }
     }
+
+    /// How long the pedometer keeps its history.
+    static let pedometerHistory: TimeInterval = 7 * 24 * 60 * 60
+
+    /// Steps the automatic rules may treat as measured, or nil when nobody knows.
+    ///
+    /// Health's merged count comes first. A stored count is a measurement when it is
+    /// positive, and a stored zero only when the trip was recorded here while the
+    /// pedometer still held it: older builds also stored 0 for "no data" (an import,
+    /// or a trip rebuilt after the pedometer's seven days had passed).
+    var knownStepCount: Int? {
+        if let health = HealthStepEvidenceLookup.evidence(for: id)?.steps.known {
+            return Int(health.rounded())
+        }
+        guard let stepCount else { return nil }
+        if stepCount > 0 { return stepCount }
+        guard origin == .sensor,
+              transportModeSource != .imported,
+              createdAt.timeIntervalSince(endDate) < Self.pedometerHistory,
+              !samples.contains(where: { $0.source.isHistoryImport })
+        else { return nil }
+        return 0
+    }
 }
 
 /// Local, explicit history cleanup. No rows, points, times, or distances are deleted.
@@ -182,17 +205,88 @@ struct AutomaticModeHistory {
         let proposed = TransportSpeedEvidence(locations: locations).inferredMode
         let direct = first.distance(from: last)
         let duration = move.endDate.timeIntervalSince(move.startDate)
-        // Health's merged steps when known: the stored count is 0 for "no data" too.
-        let stepCount = HealthStepEvidenceLookup.evidence(for: move.id)?.classifierStepCount(stored: move.stepCount)
-            ?? move.stepCount
-        let corrected = ImplausibleWalk.refinedMode(
-            proposed: LastBlockWalk.mode(proposed: proposed, distance: direct, duration: duration, stepCount: stepCount),
-            straightLine: direct, duration: duration, stepCount: stepCount, locations: locations
+        // Health's merged steps when known; a stored 0 only when it was a measurement.
+        let corrected = StepModeRules.refinedMode(
+            proposed: proposed, straightLine: direct, distance: move.distanceMeters, duration: duration,
+            stepCount: move.knownStepCount, locations: locations
         )
         let plausible = CoreMotionTransportClassifier.rejectingImplausibleContinuousTrip(
             corrected, duration: duration, straightLineDistance: direct
         )
         return preferences.allowedMode(plausible)
+    }
+
+    // MARK: Paces nobody keeps on foot, at any age
+
+    /// Bump when `ImplausibleFootPace` changes, so the sweep runs once more.
+    static let paceRulesVersion = 1
+    static let paceRulesVersionKey = "Moves.automaticModes.paceRulesVersion"
+
+    struct PaceReport: Equatable {
+        var checked = 0
+        var changed: [TransportMode: Int] = [:]
+        var total: Int { changed.values.reduce(0, +) }
+    }
+
+    /// Relabels "runs" and "walks" of any age whose pace rules out feet.
+    ///
+    /// The stay rebuild only revisits the last week, and the settings recheck only trips
+    /// whose mode was turned off, so history (much of it imported, with no step data)
+    /// would otherwise keep a 37 km "run" at 21 km/h forever. Speed is the evidence, so
+    /// imported trips are included; a mode the person chose, a reviewed trip, a drawn or
+    /// commented trip, and a Health workout never change. Only recent recorded trips are
+    /// marked for review.
+    @discardableResult
+    static func applyPaceRules(
+        in context: ModelContext,
+        now: Date = .now,
+        preferences: AutomaticTransportModes = .load()
+    ) throws -> PaceReport {
+        let foot = [TransportMode.walking.rawValue, TransportMode.running.rawValue]
+        let user = TransportModeSource.user.rawValue
+        let moves = try context.fetch(FetchDescriptor<MoveSegment>(predicate: #Predicate {
+            foot.contains($0.transportModeRawValue) && $0.transportModeSourceRaw != user
+        }))
+        var report = PaceReport()
+        for move in moves where !TimelineRetirement.isRetired(move) && permitsPaceRelabel(move) {
+            report.checked += 1
+            let duration = move.endDate.timeIntervalSince(move.startDate)
+            var straight: CLLocationDistance = 0
+            if let start = move.startPlace, let end = move.endPlace {
+                straight = CLLocation(latitude: start.latitude, longitude: start.longitude)
+                    .distance(from: CLLocation(latitude: end.latitude, longitude: end.longitude))
+            }
+            guard let paced = ImplausibleFootPace.mode(
+                proposed: move.transportMode,
+                distance: max(move.distanceMeters, straight),
+                duration: duration,
+                stepCount: move.knownStepCount
+            ) else { continue }
+            let mode = preferences.allowedMode(paced)
+            guard mode != move.transportMode else { continue }
+            let recordedHere = move.origin == .sensor && move.transportModeSource == .auto
+                && !TimelineReviewHeuristics.isImportedHistory(move)
+            let asks = recordedHere && move.reviewState == .none
+                && now.timeIntervalSince(move.startDate) <= TimelineReviewHeuristics.newQuestionWindow
+            apply(mode, review: asks ? .pending : move.reviewState, to: move)
+            // The label is now this rule's guess, not the file's.
+            if move.transportModeSource == .imported { move.transportModeSource = .auto }
+            report.changed[mode, default: 0] += 1
+        }
+        if context.hasChanges { try context.save() }
+        return report
+    }
+
+    /// `permitsAutomaticModeChanges` without the imported-origin exclusion.
+    static func permitsPaceRelabel(_ move: MoveSegment) -> Bool {
+        // Photo-inferred trips are not a mode anyone measured; the photo import owns them.
+        move.origin != .photoInferred
+            && move.transportModeSource != .user
+            && move.reviewState != .confirmed && move.reviewState != .dismissed
+            && move.routeMatchPolicy != .manual && move.routeMatchPolicy != .roads
+            && move.manualRouteCoordinatesData == nil
+            && (move.comment?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            && !move.samples.contains { $0.source == .healthWorkoutRoute }
     }
 
     private static func apply(_ mode: TransportMode, review: ReviewState, to move: MoveSegment) {

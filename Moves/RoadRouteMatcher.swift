@@ -433,9 +433,29 @@ enum RoadRouteMatcher {
     ) {
         guard matchesCurrentInput(move, signature: signature) else { return }
         guard move.routeCacheSignature != signature || move.routeCacheCoordinatesData == nil else { return }
+        let matchedDistance = confidentMatchedDistance(coordinates, for: move)
         move.writeDerivedRouteData {
             move.storeCachedRouteCoordinates(coordinates, signature: signature)
+            if let matchedDistance { move.distanceMeters = matchedDistance }
         }
+    }
+
+    /// A confident match follows the streets the person used, so its length is the
+    /// trip's distance. Written only when the match for this input is first stored:
+    /// the distance is not part of the cache signature, so writing it never asks for a
+    /// new match, and a later refinement (Health's walk estimate) is not overwritten
+    /// until the trip's times, mode, or fixes change.
+    static func confidentMatchedDistance(_ coordinates: [CLLocationCoordinate2D], for move: MoveSegment) -> Double? {
+        guard coordinates.count > 1,
+              move.routeMatchConfidence == .high || move.routeMatchConfidence == .medium,
+              move.routeMatchPolicy == .auto,
+              move.origin == .sensor,
+              move.manualRouteCoordinatesData == nil,
+              !move.usesHealthWorkoutRoute
+        else { return nil }
+        let length = routeDistance(for: coordinates)
+        guard length > 0, abs(length - move.distanceMeters) >= 1 else { return nil }
+        return length.rounded()
     }
 
     private static func matchesCurrentInput(_ move: MoveSegment, signature: String) -> Bool {

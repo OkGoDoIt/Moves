@@ -90,15 +90,203 @@ final class SampleStayInferenceTests: XCTestCase {
         XCTAssertEqual(stays.count, 1)
     }
 
-    func testFewStepsDoNotIdentifyABicycle() {
-        // Too fast for this walk, but neither speed nor missing steps identifies a bike.
+    /// Changed deliberately: 7.1 km in 24 minutes (4.9 m/s) with 25 steps a minute used to
+    /// stay unknown. That is the owner's scooter in city traffic, and a motor vehicle is
+    /// the answer; only Core Motion's own cycling reading keeps it from being one.
+    func testFewStepsAtRidingPaceAreARideUnlessMotionSawCycling() {
         XCTAssertEqual(
-            ImplausibleWalk.mode(proposed: .walking, straightLine: 7_100, duration: 24 * 60, stepCount: 600),
-            .unknown
+            ImplausibleWalk.refinedMode(proposed: .walking, straightLine: 7_100, duration: 24 * 60, stepCount: 600, locations: []),
+            .automotive
         )
         XCTAssertEqual(
-            ImplausibleWalk.mode(proposed: .walking, straightLine: 20_000, duration: 25 * 60, stepCount: 200),
+            ImplausibleWalk.refinedMode(proposed: .unknown, straightLine: 2_400, duration: 8 * 60, stepCount: 30, locations: []),
+            .automotive,
+            "A scooter ride motion left unresolved"
+        )
+        XCTAssertEqual(
+            ImplausibleWalk.refinedMode(proposed: .unknown, straightLine: 2_400, duration: 8 * 60, stepCount: 30,
+                                        dominantActivity: .cycling, locations: []),
+            .unknown,
+            "Cycling turned off must not become driving"
+        )
+        XCTAssertEqual(
+            ImplausibleWalk.refinedMode(proposed: .walking, straightLine: 20_000, duration: 25 * 60, stepCount: 200, locations: []),
             .automotive
+        )
+        // A middling step rate still does not identify a vehicle.
+        XCTAssertEqual(
+            ImplausibleWalk.mode(proposed: .walking, straightLine: 7_100, duration: 24 * 60, stepCount: 960),
+            .unknown
+        )
+    }
+
+    func testWalkWithAlmostNoStepsIsNotAWalk() {
+        // 37 minutes, 1.8 km, 261 steps (7 a minute): not on foot, too slow to call a ride.
+        XCTAssertEqual(
+            ImplausibleWalk.refinedMode(proposed: .walking, straightLine: 1_800, duration: 37 * 60, stepCount: 261, locations: []),
+            .unknown
+        )
+        // A "run" of 6 km in 20 minutes with no steps at all is a ride.
+        XCTAssertEqual(
+            ImplausibleWalk.refinedMode(proposed: .running, straightLine: 6_000, duration: 20 * 60, stepCount: 0, locations: []),
+            .automotive
+        )
+        // No step data is not zero steps: the walk stands.
+        XCTAssertEqual(
+            ImplausibleWalk.refinedMode(proposed: .running, straightLine: 6_000, duration: 40 * 60, stepCount: nil, locations: []),
+            .running
+        )
+        // A short walk is not judged on steps.
+        XCTAssertEqual(
+            ImplausibleWalk.refinedMode(proposed: .walking, straightLine: 250, duration: 4 * 60, stepCount: 0, locations: []),
+            .walking
+        )
+    }
+
+    /// Shapes from the owner's 2026 "runs", most imported with no step data.
+    func testPaceNobodyKeepsOnFootIsNotARun() {
+        func paced(_ mode: TransportMode, km: Double, minutes: Double, steps: Int? = nil,
+                   dominant: TransportMode? = nil) -> TransportMode? {
+            ImplausibleFootPace.mode(proposed: mode, distance: km * 1_000, duration: minutes * 60,
+                                     stepCount: steps, dominantActivity: dominant)
+        }
+        XCTAssertEqual(paced(.running, km: 37.3, minutes: 108), .unknown, "20.7 km/h: a bike's pace, not a vehicle's")
+        XCTAssertEqual(paced(.running, km: 37.3, minutes: 108, dominant: .cycling), .cycling)
+        XCTAssertEqual(paced(.running, km: 30.6, minutes: 101), .unknown)
+        XCTAssertEqual(paced(.running, km: 29.6, minutes: 81), .unknown)
+        XCTAssertEqual(paced(.running, km: 13.6, minutes: 43), .unknown, "19 km/h for 43 minutes")
+        XCTAssertEqual(paced(.running, km: 40, minutes: 50), .automotive, "48 km/h is a vehicle")
+        XCTAssertEqual(paced(.running, km: 26, minutes: 200), .unknown, "Longer than 25 km")
+        XCTAssertNil(paced(.running, km: 10, minutes: 50), "12 km/h is a run")
+        XCTAssertNil(paced(.running, km: 5, minutes: 15), "A fast 5 km is too short to judge")
+        XCTAssertNil(paced(.running, km: 13.6, minutes: 43, steps: 6_500), "A running step rate keeps it")
+        XCTAssertEqual(paced(.walking, km: 4, minutes: 20), .unknown, "12 km/h for 20 minutes is not a walk")
+        XCTAssertNil(paced(.walking, km: 1.5, minutes: 9), "Too short to judge")
+        XCTAssertNil(paced(.walking, km: 4, minutes: 50), "4.8 km/h is a walk")
+        XCTAssertNil(paced(.cycling, km: 37.3, minutes: 108))
+        // Reached through the shared rule chain, distance from the trip's own path.
+        XCTAssertEqual(
+            StepModeRules.refinedMode(proposed: .running, straightLine: 9_000, distance: 37_300, duration: 108 * 60,
+                                      stepCount: nil, locations: []),
+            .unknown
+        )
+    }
+
+    /// Running the rules on their own answer changes nothing, so a stored trip is never
+    /// relabeled back and forth.
+    func testStepRulesAreAFixedPoint() {
+        let cases: [(TransportMode, Double, Double, Int?)] = [
+            (.walking, 7_100, 24 * 60, 600), (.walking, 1_800, 37 * 60, 261), (.automotive, 190, 11 * 60, 240),
+            (.unknown, 400, 8 * 60, 10), (.walking, 1_284, 5.7 * 60, 555), (.unknown, 2_400, 8 * 60, 30),
+            (.running, 6_000, 20 * 60, 0), (.automotive, 180, 8 * 60, 0), (.walking, 900, 6 * 60, nil),
+        ]
+        for (mode, distance, duration, steps) in cases {
+            let once = StepModeRules.refinedMode(proposed: mode, straightLine: distance, duration: duration, stepCount: steps, locations: [])
+            let twice = StepModeRules.refinedMode(proposed: once, straightLine: distance, duration: duration, stepCount: steps, locations: [])
+            XCTAssertEqual(twice, once, "\(mode) \(distance) m \(duration) s \(String(describing: steps))")
+        }
+    }
+
+    func testOnFootDistanceFollowsStepsWithinTheStraightLineBounds() {
+        XCTAssertEqual(OnFootDistanceEstimate.distance(straightLine: 500, stepCount: 1_000), 750)
+        XCTAssertEqual(OnFootDistanceEstimate.distance(straightLine: 500, stepCount: 100), 500, "Never under the straight line")
+        XCTAssertEqual(OnFootDistanceEstimate.distance(straightLine: 500, stepCount: 10_000), 1_800, "At most 3 × line + 300 m")
+        XCTAssertEqual(OnFootDistanceEstimate.distance(straightLine: 500, stepCount: nil), 600)
+        XCTAssertEqual(OnFootDistanceEstimate.distance(straightLine: 500, stepCount: 0), 600)
+        XCTAssertEqual(OnFootDistanceEstimate.distance(straightLine: 500, stepCount: 1_000, stride: 0.8), 800)
+        XCTAssertTrue(OnFootDistanceEstimate.applies(mode: .walking, interiorFixCount: 2))
+        XCTAssertFalse(OnFootDistanceEstimate.applies(mode: .walking, interiorFixCount: 3))
+        XCTAssertFalse(OnFootDistanceEstimate.applies(mode: .automotive, interiorFixCount: 0))
+    }
+
+    func testDepartureFollowsTheLastFixAtTheStop() {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let hotel = CLLocationCoordinate2D(latitude: 10, longitude: 106)
+        let street = offset(hotel, north: 300, east: 0)
+        let fixes = [
+            boundaryFix(hotel, at: start.addingTimeInterval(10 * 60)),
+            boundaryFix(hotel, at: start.addingTimeInterval(60 * 60)),
+            boundaryFix(street, at: start.addingTimeInterval(65 * 60)),
+            boundaryFix(offset(street, north: 200, east: 0), at: start.addingTimeInterval(68 * 60)),
+        ]
+        let departure = start.addingTimeInterval(4 * 60 * 60)
+        let noSteps: StopBoundaryEvidence.StepLookup = { _, _ in nil }
+
+        let trimmed = StopBoundaryEvidence.trimmedDeparture(
+            centre: hotel, arrival: start, departure: departure, fixes: fixes, steps: noSteps
+        )
+        XCTAssertEqual(trimmed, start.addingTimeInterval(60 * 60))
+        // Applied to its own answer, nothing more to trim.
+        XCTAssertNil(StopBoundaryEvidence.trimmedDeparture(
+            centre: hotel, arrival: start, departure: try! XCTUnwrap(trimmed), fixes: fixes, steps: noSteps
+        ))
+
+        // Indoor wander: one good fix outside, then nothing. Not a departure without steps.
+        let wander = Array(fixes.prefix(3))
+        XCTAssertNil(StopBoundaryEvidence.trimmedDeparture(
+            centre: hotel, arrival: start, departure: departure, fixes: wander, steps: noSteps
+        ))
+        XCTAssertNil(StopBoundaryEvidence.trimmedDeparture(
+            centre: hotel, arrival: start, departure: departure, fixes: wander, steps: { _, _ in 0 }
+        ))
+        // One fix outside plus walking steps since the last one inside is a departure.
+        XCTAssertEqual(
+            StopBoundaryEvidence.trimmedDeparture(
+                centre: hotel, arrival: start, departure: departure, fixes: wander, steps: { _, _ in 450 }
+            ),
+            start.addingTimeInterval(60 * 60)
+        )
+        // A poor fix far away is not evidence.
+        let poor = Array(fixes.prefix(2)) + [boundaryFix(street, at: start.addingTimeInterval(65 * 60), accuracy: 120),
+                                             boundaryFix(street, at: start.addingTimeInterval(66 * 60), accuracy: 120)]
+        XCTAssertNil(StopBoundaryEvidence.trimmedDeparture(
+            centre: hotel, arrival: start, departure: departure, fixes: poor, steps: noSteps
+        ))
+    }
+
+    func testArrivalFollowsTheFirstFixAtTheStop() {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let cafe = CLLocationCoordinate2D(latitude: 10, longitude: 106)
+        let approach = offset(cafe, north: 0, east: 400)
+        let fixes = [
+            boundaryFix(approach, at: start.addingTimeInterval(60)),
+            boundaryFix(offset(approach, north: 0, east: -150), at: start.addingTimeInterval(3 * 60)),
+            boundaryFix(cafe, at: start.addingTimeInterval(6 * 60)),
+            boundaryFix(cafe, at: start.addingTimeInterval(40 * 60)),
+        ]
+        XCTAssertEqual(
+            StopBoundaryEvidence.trimmedArrival(centre: cafe, arrival: start, departure: start.addingTimeInterval(3_600),
+                                                fixes: fixes, steps: { _, _ in nil }),
+            start.addingTimeInterval(6 * 60)
+        )
+    }
+
+    func testJumpTripTakesAWalksTimeWithinBounds() {
+        let next = Date(timeIntervalSince1970: 1_700_000_000)
+        let arrival = next.addingTimeInterval(-5 * 60 * 60)
+        // 565 m at 1.3 m/s is a bit over seven minutes; the last fix there was hours earlier.
+        XCTAssertEqual(
+            StopBoundaryEvidence.jumpTripStart(firstArrival: arrival, nextArrival: next, distance: 565,
+                                               lastOnSite: next.addingTimeInterval(-4 * 60 * 60)).timeIntervalSince1970,
+            next.addingTimeInterval(-565 / 1.3).timeIntervalSince1970,
+            accuracy: 1,
+            "Whole seconds"
+        )
+        // A later last fix wins, but the trip still lasts two minutes.
+        XCTAssertEqual(
+            StopBoundaryEvidence.jumpTripStart(firstArrival: arrival, nextArrival: next, distance: 565,
+                                               lastOnSite: next.addingTimeInterval(-30)),
+            next.addingTimeInterval(-120)
+        )
+        // Never more than 30 minutes, never before the stop began.
+        XCTAssertEqual(
+            StopBoundaryEvidence.jumpTripStart(firstArrival: arrival, nextArrival: next, distance: 9_000, lastOnSite: nil),
+            next.addingTimeInterval(-30 * 60)
+        )
+        XCTAssertEqual(
+            StopBoundaryEvidence.jumpTripStart(firstArrival: next.addingTimeInterval(-60), nextArrival: next,
+                                               distance: 565, lastOnSite: nil),
+            next.addingTimeInterval(-60)
         )
     }
 
@@ -120,9 +308,11 @@ final class SampleStayInferenceTests: XCTestCase {
             ImplausibleWalk.mode(proposed: .walking, straightLine: 1_284, duration: 5.7 * 60, stepCount: 555),
             .walking
         )
-        // An imported log has no steps, and this pace is a plausible walk.
+        // An imported log has no steps, and this pace is a plausible walk. Changed
+        // deliberately from `stepCount: 0`: imports now pass nil, and a measured zero over
+        // 1.8 km is evidence that nobody walked (see `testWalkWithAlmostNoStepsIsNotAWalk`).
         XCTAssertEqual(
-            ImplausibleWalk.mode(proposed: .walking, straightLine: 1_777, duration: 19 * 60, stepCount: 0),
+            ImplausibleWalk.refinedMode(proposed: .walking, straightLine: 1_777, duration: 19 * 60, stepCount: nil, locations: []),
             .walking
         )
     }
@@ -176,6 +366,16 @@ final class SampleStayInferenceTests: XCTestCase {
 
 @MainActor
 final class SampleStayReconciliationTests: XCTestCase {
+    /// `MOVES_RETIREMENT_DEFERRED=1` (as `TEST_RUNNER_MOVES_RETIREMENT_DEFERRED`) runs the
+    /// whole class with rows retired instead of deleted.
+    override func setUp() async throws {
+        TimelineRetirement.isDeferred = ProcessInfo.processInfo.environment["MOVES_RETIREMENT_DEFERRED"] == "1"
+    }
+
+    override func tearDown() async throws {
+        TimelineRetirement.isDeferred = false
+    }
+
     func testPrematureVisitDepartureIsExtendedAndTheSpanningMoveIsReplaced() async throws {
         let container = try makeContainer()
         let repository = SwiftDataTimelineRepository(modelContainer: container)
@@ -219,10 +419,8 @@ final class SampleStayReconciliationTests: XCTestCase {
         await assembler.ingestLocations(samples, source: .significantChange)
 
         let context = ModelContext(container)
-        let places = try context.fetch(
-            FetchDescriptor<VisitPlace>(sortBy: [SortDescriptor(\VisitPlace.arrivalDate)])
-        )
-        let moves = try context.fetch(FetchDescriptor<MoveSegment>())
+        let places = try context.liveVisits()
+        let moves = try context.liveMoves()
 
         let homeStay = try XCTUnwrap(places.first { distance($0.coordinate, home) < 150 })
         let homeDuration = (homeStay.departureDate ?? now).timeIntervalSince(homeStay.arrivalDate)
@@ -237,7 +435,7 @@ final class SampleStayReconciliationTests: XCTestCase {
 
         let placeCount = places.count
         await assembler.reconcileSampleStays()
-        let placesAfter = try context.fetch(FetchDescriptor<VisitPlace>())
+        let placesAfter = try context.liveVisits()
         XCTAssertEqual(placesAfter.count, placeCount)
     }
 
@@ -492,6 +690,11 @@ final class SampleStayReconciliationTests: XCTestCase {
             longitude: twin.longitude,
             horizontalAccuracy: 14
         )
+        // Every live row has a day; a row without one reads as retired.
+        let day = DayTimeline(dayStart: Calendar.current.startOfDay(for: arrival))
+        context.insert(day)
+        open.dayTimeline = day
+        closed.dayTimeline = day
         context.insert(open)
         context.insert(closed)
         try context.save()
@@ -499,7 +702,7 @@ final class SampleStayReconciliationTests: XCTestCase {
         try repository.repairDuplicateStays()
 
         let verification = ModelContext(container)
-        let places = try verification.fetch(FetchDescriptor<VisitPlace>())
+        let places = try verification.liveVisits()
         XCTAssertEqual(places.count, 1)
         let kept = try XCTUnwrap(places.first)
         XCTAssertEqual(kept.departureDate, arrival.addingTimeInterval(60 * 60))
@@ -547,12 +750,12 @@ final class SampleStayReconciliationTests: XCTestCase {
 
         await assembler.repairLongHistoricalTrips()
 
-        let moves = try ModelContext(container).fetch(FetchDescriptor<MoveSegment>())
+        let moves = try ModelContext(container).liveMoves()
         XCTAssertFalse(
             moves.contains { $0.endDate.timeIntervalSince($0.startDate) > 6 * 60 * 60 },
             "The night should be a stop, not one long trip"
         )
-        let places = try ModelContext(container).fetch(FetchDescriptor<VisitPlace>(sortBy: [SortDescriptor(\.arrivalDate)]))
+        let places = try ModelContext(container).liveVisits()
         XCTAssertGreaterThan(
             try XCTUnwrap(places.first?.departureDate).timeIntervalSince(evening),
             8 * 60 * 60,
@@ -614,8 +817,8 @@ final class SampleStayReconciliationTests: XCTestCase {
         try repository.repairDuplicateStays()
 
         let verification = ModelContext(container)
-        XCTAssertEqual(try verification.fetchCount(FetchDescriptor<VisitPlace>()), 1)
-        XCTAssertEqual(try verification.fetchCount(FetchDescriptor<MoveSegment>()), 0)
+        XCTAssertEqual(try verification.liveVisits().count, 1)
+        XCTAssertEqual(try verification.liveMoves().count, 0)
     }
 
     func testLateReportOfARemovedStopDoesNotBringItBack() async throws {
@@ -722,11 +925,17 @@ final class SampleStayReconciliationTests: XCTestCase {
                                         latitude: office.latitude, longitude: office.longitude + 0.02, horizontalAccuracy: 20)
         let oldUnknownTo = VisitPlace(arrivalDate: base.addingTimeInterval(6 * 60 * 60 + 9 * 60), departureDate: base.addingTimeInterval(8 * 60 * 60),
                                       latitude: office.latitude, longitude: office.longitude + 0.04, horizontalAccuracy: 20)
-        for place in [longStop, inverted, destination, oldUnknownFrom, oldUnknownTo] { context.insert(place) }
+        let day = DayTimeline(dayStart: Calendar.current.startOfDay(for: base))
+        context.insert(day)
+        for place in [longStop, inverted, destination, oldUnknownFrom, oldUnknownTo] {
+            place.dayTimeline = day
+            context.insert(place)
+        }
         let unknown = MoveSegment(dedupeKey: "old-unknown", startDate: oldUnknownFrom.departureDate!, endDate: oldUnknownTo.arrivalDate,
                                   transportMode: .unknown, distanceMeters: 2_200, stepCount: 0)
         unknown.startPlace = oldUnknownFrom
         unknown.endPlace = oldUnknownTo
+        unknown.dayTimeline = day
         context.insert(unknown)
         try context.save()
 
@@ -809,12 +1018,18 @@ final class SampleStayReconciliationTests: XCTestCase {
                               latitude: home.latitude, longitude: home.longitude, horizontalAccuracy: 20)
         let to = VisitPlace(arrivalDate: left.addingTimeInterval(12 * 60), departureDate: left.addingTimeInterval(60 * 60),
                             latitude: work.latitude, longitude: work.longitude, horizontalAccuracy: 20)
+        // Every live row has a day; a row without one reads as retired.
+        let day = DayTimeline(dayStart: Calendar.current.startOfDay(for: left))
+        context.insert(day)
+        from.dayTimeline = day
+        to.dayTimeline = day
         context.insert(from)
         context.insert(to)
         let move = MoveSegment(dedupeKey: "fresh-unknown", startDate: left, endDate: to.arrivalDate,
                                transportMode: .unknown, distanceMeters: 2_000, stepCount: nil)
         move.startPlace = from
         move.endPlace = to
+        move.dayTimeline = day
         context.insert(move)
         try context.save()
 
@@ -822,9 +1037,695 @@ final class SampleStayReconciliationTests: XCTestCase {
         XCTAssertEqual(result.moveLegs.count, 1)
     }
 
+    // MARK: - Stops, trips, and modes follow the evidence
+
+    private struct Rebuild {
+        let container: ModelContainer
+        let context: ModelContext
+        let repository: SwiftDataTimelineRepository
+        let assembler: DefaultTimelineAssembler
+
+        func places() throws -> [VisitPlace] {
+            try context.fetch(FetchDescriptor<VisitPlace>(sortBy: [SortDescriptor(\.arrivalDate)]))
+                .filter { !TimelineRetirement.isRetired($0) }
+        }
+
+        func moves() throws -> [MoveSegment] {
+            try context.fetch(FetchDescriptor<MoveSegment>(sortBy: [SortDescriptor(\.startDate)]))
+                .filter { !TimelineRetirement.isRetired($0) }
+        }
+
+        func visit(_ coordinate: CLLocationCoordinate2D, from arrival: Date, to departure: Date) throws -> VisitPlace {
+            try repository.addOrUpdateVisit(
+                from: MockVisit(coordinate: coordinate, horizontalAccuracy: 20, arrivalDate: arrival, departureDate: departure)
+            )
+        }
+
+        func fixes(_ coordinate: CLLocationCoordinate2D, at dates: [Date]) throws {
+            _ = try repository.appendSamples(from: dates.map { location(coordinate, at: $0) }, source: .significantChange)
+        }
+
+        /// Passes after the first must change nothing and save nothing.
+        func assertSettled(file: StaticString = #filePath, line: UInt = #line) async throws {
+            let before = (Set(try places().map(\.id)), Set(try moves().map(\.id)))
+            var saves = 0
+            let observer = NotificationCenter.default.addObserver(forName: ModelContext.didSave, object: context, queue: nil) { _ in
+                saves += 1
+            }
+            defer { NotificationCenter.default.removeObserver(observer) }
+            for _ in 0..<2 { await assembler.reconcileSampleStays() }
+            XCTAssertEqual(saves, 0, "A rebuild of its own output saved", file: file, line: line)
+            XCTAssertEqual(Set(try places().map(\.id)), before.0, file: file, line: line)
+            XCTAssertEqual(Set(try moves().map(\.id)), before.1, file: file, line: line)
+        }
+
+        func assertInvariants(file: StaticString = #filePath, line: UInt = #line) throws {
+            let stops = try places()
+            for stop in stops {
+                if let departure = stop.departureDate {
+                    XCTAssertGreaterThanOrEqual(departure, stop.arrivalDate, "A stop ends before it begins", file: file, line: line)
+                }
+            }
+            for (a, b) in zip(stops, stops.dropFirst()) {
+                XCTAssertLessThanOrEqual(a.departureDate ?? a.arrivalDate, b.arrivalDate, "Two stops overlap", file: file, line: line)
+            }
+            let trips = try moves()
+            for trip in trips {
+                XCTAssertNotNil(trip.startPlace, file: file, line: line)
+                XCTAssertNotNil(trip.endPlace, file: file, line: line)
+            }
+            for (a, b) in zip(trips, trips.dropFirst()) {
+                XCTAssertLessThanOrEqual(a.endDate, b.startDate.addingTimeInterval(1), "Two trips overlap", file: file, line: line)
+            }
+        }
+    }
+
+    private func makeRebuild(
+        mode: TransportMode = .walking,
+        steps: Int? = 400,
+        stepsPerMinute: Double? = nil
+    ) throws -> Rebuild {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let repository = SwiftDataTimelineRepository(modelContext: context)
+        let assembler = DefaultTimelineAssembler(
+            repository: repository,
+            motionClassifier: RateMotionClassifier(mode: mode, steps: steps, stepsPerMinute: stepsPerMinute),
+            placeNameResolver: EmptyPlaceNameResolver(),
+            automaticModes: { .init() }
+        )
+        return Rebuild(container: container, context: context, repository: repository, assembler: assembler)
+    }
+
+    /// A: visit monitoring said four hours; the fixes say the person left after one.
+    func testStopDepartureFollowsTheFixesNotTheVisit() async throws {
+        let rebuild = try makeRebuild(mode: .automotive, steps: 0)
+        let start = Date().addingTimeInterval(-6 * 60 * 60)
+        let hotel = CLLocationCoordinate2D(latitude: 10.76, longitude: 106.70)
+        let street = offset(hotel, north: 300, east: 0)
+        let cafe = offset(hotel, north: 2_000, east: 0)
+        _ = try rebuild.visit(hotel, from: start, to: start.addingTimeInterval(85 * 60))
+        _ = try rebuild.visit(cafe, from: start.addingTimeInterval(90 * 60), to: start.addingTimeInterval(3 * 60 * 60))
+        try rebuild.fixes(hotel, at: [start.addingTimeInterval(10 * 60), start.addingTimeInterval(60 * 60)])
+        try rebuild.fixes(street, at: [start.addingTimeInterval(65 * 60)])
+        try rebuild.fixes(offset(street, north: 300, east: 0), at: [start.addingTimeInterval(68 * 60)])
+
+        await rebuild.assembler.reconcileSampleStays()
+
+        let stay = try XCTUnwrap(try rebuild.places().first { distance($0.coordinate, hotel) < 100 })
+        XCTAssertEqual(stay.departureDate, start.addingTimeInterval(60 * 60))
+        let trip = try XCTUnwrap(try rebuild.moves().first)
+        XCTAssertEqual(trip.startDate, start.addingTimeInterval(60 * 60))
+        try rebuild.assertInvariants()
+        try await rebuild.assertSettled()
+    }
+
+    /// A guard: one fix outside a building, with no steps, is indoor wander.
+    func testIndoorWanderDoesNotEndAStop() async throws {
+        let rebuild = try makeRebuild(mode: .automotive, steps: 0)
+        let start = Date().addingTimeInterval(-6 * 60 * 60)
+        let hotel = CLLocationCoordinate2D(latitude: 10.76, longitude: 106.70)
+        let cafe = offset(hotel, north: 2_000, east: 0)
+        _ = try rebuild.visit(hotel, from: start, to: start.addingTimeInterval(85 * 60))
+        _ = try rebuild.visit(cafe, from: start.addingTimeInterval(90 * 60), to: start.addingTimeInterval(3 * 60 * 60))
+        try rebuild.fixes(hotel, at: [start.addingTimeInterval(10 * 60), start.addingTimeInterval(60 * 60)])
+        try rebuild.fixes(offset(hotel, north: 0, east: 140), at: [start.addingTimeInterval(65 * 60)])
+
+        await rebuild.assembler.reconcileSampleStays()
+
+        let stay = try XCTUnwrap(try rebuild.places().first { distance($0.coordinate, hotel) < 100 })
+        XCTAssertEqual(stay.departureDate, start.addingTimeInterval(85 * 60))
+        try await rebuild.assertSettled()
+    }
+
+    /// B: a stop that "ends" exactly when one 565 m away begins swallowed the walk.
+    func testStopsThatTouchFarApartGetATrip() async throws {
+        let rebuild = try makeRebuild(steps: 400)
+        let start = Date().addingTimeInterval(-8 * 60 * 60)
+        let hotel = CLLocationCoordinate2D(latitude: 10.76, longitude: 106.70)
+        let cafe = offset(hotel, north: 565, east: 0)
+        let handoff = start.addingTimeInterval(4 * 60 * 60)
+        _ = try rebuild.visit(hotel, from: start, to: handoff)
+        _ = try rebuild.visit(cafe, from: handoff, to: handoff.addingTimeInterval(60 * 60))
+        try rebuild.fixes(hotel, at: [start.addingTimeInterval(5 * 60), start.addingTimeInterval(30 * 60)])
+
+        await rebuild.assembler.reconcileSampleStays()
+
+        let trip = try XCTUnwrap(try rebuild.moves().first, "Every jump gets a trip")
+        XCTAssertEqual(trip.endDate, handoff)
+        let apart = distance(hotel, cafe)
+        XCTAssertEqual(trip.startDate.timeIntervalSince1970, handoff.addingTimeInterval(-apart / 1.3).timeIntervalSince1970, accuracy: 1)
+        XCTAssertEqual(trip.routeMatchConfidence, .estimated, "No fix drew it")
+        XCTAssertEqual(trip.transportMode, .walking)
+        XCTAssertGreaterThanOrEqual(trip.distanceMeters, apart - 1)
+        let stay = try XCTUnwrap(try rebuild.places().first)
+        XCTAssertEqual(stay.departureDate, trip.startDate)
+        try rebuild.assertInvariants()
+        try await rebuild.assertSettled()
+    }
+
+    private func makeBlipScene(
+        blipMinutes: Double,
+        steps: Int?,
+        configure: (VisitPlace, ModelContext) -> Void = { _, _ in }
+    ) async throws -> (Rebuild, CLLocationCoordinate2D) {
+        let rebuild = try makeRebuild(mode: .automotive, steps: steps)
+        let start = Date().addingTimeInterval(-8 * 60 * 60)
+        let home = CLLocationCoordinate2D(latitude: 10.76, longitude: 106.70)
+        let blip = offset(home, north: 1_000, east: 0)
+        let work = offset(home, north: 2_000, east: 0)
+        let left = start.addingTimeInterval(2 * 60 * 60)
+        let blipArrival = left.addingTimeInterval(10 * 60)
+        let blipDeparture = blipArrival.addingTimeInterval(blipMinutes * 60)
+        let atWork = blipDeparture.addingTimeInterval(10 * 60)
+        _ = try rebuild.visit(home, from: start, to: left)
+        let stop = try rebuild.visit(blip, from: blipArrival, to: blipDeparture)
+        _ = try rebuild.visit(work, from: atWork, to: atWork.addingTimeInterval(2 * 60 * 60))
+        try rebuild.fixes(home, at: (0...3).map { start.addingTimeInterval(Double($0) * 40 * 60) })
+        try rebuild.fixes(work, at: (0...3).map { atWork.addingTimeInterval(Double($0) * 40 * 60) })
+        configure(stop, rebuild.context)
+        try rebuild.context.save()
+        await rebuild.assembler.reconcileSampleStays()
+        return (rebuild, blip)
+    }
+
+    /// C: a two-minute stop only visit monitoring saw is not a stop; the trips join.
+    func testVisitOnlyBlipIsDissolvedAndItsTripsJoin() async throws {
+        let (rebuild, blip) = try await makeBlipScene(blipMinutes: 2, steps: 0)
+        XCTAssertFalse(try rebuild.places().contains { distance($0.coordinate, blip) < 100 })
+        XCTAssertEqual(try rebuild.places().count, 2)
+        XCTAssertEqual(try rebuild.moves().count, 1, "One trip from home to work")
+        try rebuild.assertInvariants()
+        try await rebuild.assertSettled()
+    }
+
+    func testZeroLengthVisitOnlyStopIsDissolved() async throws {
+        let (rebuild, blip) = try await makeBlipScene(blipMinutes: 0, steps: 0)
+        XCTAssertFalse(try rebuild.places().contains { distance($0.coordinate, blip) < 100 })
+        try await rebuild.assertSettled()
+    }
+
+    /// C: walked straight through it, by the pedometer.
+    func testShortStopWalkedThroughIsDissolved() async throws {
+        let (walked, blip) = try await makeBlipScene(blipMinutes: 6, steps: 600)
+        XCTAssertFalse(try walked.places().contains { distance($0.coordinate, blip) < 100 })
+        try await walked.assertSettled()
+
+        let (stood, standing) = try await makeBlipScene(blipMinutes: 6, steps: 0)
+        XCTAssertTrue(try stood.places().contains { distance($0.coordinate, standing) < 100 }, "Six minutes standing still is a stop")
+        try await stood.assertSettled()
+    }
+
+    /// C guards: what the person named, placed, photographed, or reviewed stays.
+    func testAnchoredShortStopsAreNeverDissolved() async throws {
+        let named = try await makeBlipScene(blipMinutes: 2, steps: 0) { stop, _ in stop.userLabel = "Kiosk" }
+        XCTAssertTrue(try named.0.places().contains { distance($0.coordinate, named.1) < 100 })
+        try await named.0.assertSettled()
+
+        let known = try await makeBlipScene(blipMinutes: 2, steps: 0) { stop, context in
+            let place = KnownPlace(name: "Bakery", latitude: stop.latitude, longitude: stop.longitude)
+            context.insert(place)
+            stop.knownPlace = place
+            stop.assignmentSource = .user
+        }
+        XCTAssertTrue(try known.0.places().contains { distance($0.coordinate, known.1) < 100 })
+
+        let confirmed = try await makeBlipScene(blipMinutes: 2, steps: 0) { stop, _ in stop.reviewState = .confirmed }
+        XCTAssertTrue(try confirmed.0.places().contains { distance($0.coordinate, confirmed.1) < 100 })
+    }
+
+    /// D: a stop that ends before it begins, and one that ends with another it overlaps.
+    func testStopTimesAreRepairedToTheInvariants() async throws {
+        let rebuild = try makeRebuild(mode: .automotive, steps: 0)
+        let base = Date().addingTimeInterval(-10 * 60 * 60)
+        let home = CLLocationCoordinate2D(latitude: 10.76, longitude: 106.70)
+        let office = offset(home, north: 3_000, east: 0)
+        let market = offset(home, north: 6_000, east: 0)
+        let long = VisitPlace(arrivalDate: base, departureDate: base.addingTimeInterval(3 * 60 * 60),
+                              latitude: home.latitude, longitude: home.longitude, horizontalAccuracy: 20)
+        // Ends with the long stop: one of them is wrong, and it is not the later one.
+        let sameEnd = VisitPlace(arrivalDate: base.addingTimeInterval(60 * 60), departureDate: base.addingTimeInterval(3 * 60 * 60),
+                                 latitude: office.latitude, longitude: office.longitude, horizontalAccuracy: 20)
+        sameEnd.userLabel = "Office"
+        let inverted = VisitPlace(arrivalDate: base.addingTimeInterval(5 * 60 * 60), departureDate: base.addingTimeInterval(4 * 60 * 60),
+                                  latitude: market.latitude, longitude: market.longitude, horizontalAccuracy: 20)
+        inverted.userLabel = "Market"
+        for place in [long, sameEnd, inverted] {
+            let day = DayTimeline(dayStart: Calendar.current.startOfDay(for: place.arrivalDate))
+            rebuild.context.insert(day)
+            place.dayTimeline = day
+            rebuild.context.insert(place)
+        }
+        try rebuild.context.save()
+
+        await rebuild.assembler.reconcileSampleStays()
+
+        // Ends where the office begins, less the drive there that no fix recorded.
+        let longEnd = try XCTUnwrap(long.departureDate)
+        XCTAssertLessThanOrEqual(longEnd, sameEnd.arrivalDate.addingTimeInterval(-StopBoundaryEvidence.jumpMinimumTrip))
+        XCTAssertGreaterThanOrEqual(longEnd, sameEnd.arrivalDate.addingTimeInterval(-StopBoundaryEvidence.jumpMaximumTrip))
+        XCTAssertEqual(inverted.departureDate, inverted.arrivalDate)
+        try rebuild.assertInvariants()
+        try await rebuild.assertSettled()
+    }
+
+    /// E: a stored "run" whose measured steps were zero is a ride, unless the person said so.
+    func testStoredRunWithoutStepsIsRelabeledUnlessThePersonChoseIt() async throws {
+        for confirmed in [false, true] {
+            let rebuild = try makeRebuild(mode: .running, steps: 0)
+            let start = Date().addingTimeInterval(-8 * 60 * 60)
+            let home = CLLocationCoordinate2D(latitude: 10.76, longitude: 106.70)
+            let work = offset(home, north: 6_000, east: 0)
+            let left = start.addingTimeInterval(2 * 60 * 60)
+            let arrived = left.addingTimeInterval(20 * 60)
+            let from = try rebuild.visit(home, from: start, to: left)
+            let to = try rebuild.visit(work, from: arrived, to: arrived.addingTimeInterval(2 * 60 * 60))
+            let run = try rebuild.repository.upsertMove(startPlace: from, endPlace: to, startDate: left, endDate: arrived,
+                                                        transportMode: .running, distanceMeters: 6_000, stepCount: 0, samples: [])
+            if confirmed {
+                try rebuild.repository.setTransportMode(.running, for: run, source: .user)
+            }
+            try rebuild.context.save()
+
+            await rebuild.assembler.reconcileSampleStays()
+
+            let trip = try XCTUnwrap(try rebuild.moves().first)
+            XCTAssertEqual(trip.id, run.id, "The row is updated in place")
+            XCTAssertEqual(trip.transportMode, confirmed ? .running : .automotive)
+            try await rebuild.assertSettled()
+        }
+    }
+
+    /// F1: a trip whose ends moved apart gets a distance at least the line between them.
+    func testTripDistanceFollowsItsEnds() async throws {
+        let rebuild = try makeRebuild(mode: .automotive, steps: 0)
+        let start = Date().addingTimeInterval(-8 * 60 * 60)
+        let home = CLLocationCoordinate2D(latitude: 10.76, longitude: 106.70)
+        let work = offset(home, north: 3_000, east: 0)
+        let left = start.addingTimeInterval(2 * 60 * 60)
+        let arrived = left.addingTimeInterval(10 * 60)
+        let from = try rebuild.visit(home, from: start, to: left)
+        let to = try rebuild.visit(work, from: arrived, to: arrived.addingTimeInterval(2 * 60 * 60))
+        let trip = try rebuild.repository.upsertMove(startPlace: from, endPlace: to, startDate: left, endDate: arrived,
+                                                     transportMode: .automotive, distanceMeters: 900, stepCount: 0, samples: [])
+        try rebuild.context.save()
+
+        await rebuild.assembler.reconcileSampleStays()
+
+        XCTAssertEqual(try rebuild.moves().first?.id, trip.id)
+        XCTAssertGreaterThanOrEqual(trip.distanceMeters, distance(home, work) - 1)
+        XCTAssertEqual(trip.transportMode, .automotive, "Only the distance was stale")
+        try await rebuild.assertSettled()
+    }
+
+    /// The pace sweep reaches history of any age, imported too, and never the person's choice.
+    func testPaceSweepRelabelsOldRunsButNotChosenOnesAndAsksOnlyAboutRecentOnes() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let now = Date()
+        func run(daysAgo: Double, origin: TimelineItemOrigin = .sensor, source: TransportModeSource = .auto) -> MoveSegment {
+            let end = now.addingTimeInterval(-daysAgo * 24 * 60 * 60)
+            let move = MoveSegment(dedupeKey: UUID().uuidString, startDate: end.addingTimeInterval(-108 * 60), endDate: end,
+                                   transportMode: .running, distanceMeters: 37_300, stepCount: 0)
+            move.origin = origin
+            move.transportModeSource = source
+            let day = DayTimeline(dayStart: Calendar.current.startOfDay(for: end))
+            context.insert(day)
+            move.dayTimeline = day
+            context.insert(move)
+            return move
+        }
+        let imported = run(daysAgo: 90, origin: .imported, source: .imported)
+        let old = run(daysAgo: 60)
+        let recent = run(daysAgo: 1)
+        let chosen = run(daysAgo: 60, source: .user)
+        let reviewed = run(daysAgo: 60)
+        reviewed.reviewState = .confirmed
+        try context.save()
+
+        let report = try AutomaticModeHistory.applyPaceRules(in: context, now: now, preferences: .init())
+
+        XCTAssertEqual(report.total, 3)
+        XCTAssertEqual(imported.transportMode, .unknown)
+        XCTAssertEqual(imported.reviewState, ReviewState.none, "Imported history never goes to Review")
+        XCTAssertEqual(old.transportMode, .unknown)
+        XCTAssertEqual(old.reviewState, ReviewState.none, "Old history changes quietly")
+        XCTAssertEqual(recent.transportMode, .unknown)
+        XCTAssertEqual(recent.reviewState, .pending)
+        XCTAssertEqual(chosen.transportMode, .running)
+        XCTAssertEqual(reviewed.transportMode, .running)
+        XCTAssertEqual(try AutomaticModeHistory.applyPaceRules(in: context, now: now, preferences: .init()).total, 0)
+    }
+
+    // MARK: - H: retiring rows instead of deleting them
+
+    func testDissolvedStopIsRetiredAndStaysReadableElsewhere() async throws {
+        TimelineRetirement.isDeferred = true
+        defer { TimelineRetirement.isDeferred = false }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("Retire-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let schema = Schema(MovesTimelineSchema.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(schema: schema, url: directory.appendingPathComponent("default.store"), cloudKitDatabase: .none)
+        )
+        let context = ModelContext(container)
+        let repository = SwiftDataTimelineRepository(modelContext: context)
+        let assembler = DefaultTimelineAssembler(
+            repository: repository,
+            motionClassifier: RateMotionClassifier(mode: .automotive, steps: 0, stepsPerMinute: nil),
+            placeNameResolver: EmptyPlaceNameResolver(),
+            automaticModes: { .init() }
+        )
+        let start = Date().addingTimeInterval(-8 * 60 * 60)
+        let home = CLLocationCoordinate2D(latitude: 10.76, longitude: 106.70)
+        let blip = offset(home, north: 1_000, east: 0)
+        let work = offset(home, north: 2_000, east: 0)
+        let left = start.addingTimeInterval(2 * 60 * 60)
+        let blipArrival = left.addingTimeInterval(10 * 60)
+        let atWork = blipArrival.addingTimeInterval(12 * 60)
+        let homeStop = try repository.addOrUpdateVisit(from: MockVisit(coordinate: home, horizontalAccuracy: 20, arrivalDate: start, departureDate: left))
+        let blipStop = try repository.addOrUpdateVisit(from: MockVisit(coordinate: blip, horizontalAccuracy: 20, arrivalDate: blipArrival, departureDate: blipArrival.addingTimeInterval(120)))
+        let workStop = try repository.addOrUpdateVisit(from: MockVisit(coordinate: work, horizontalAccuracy: 20, arrivalDate: atWork, departureDate: atWork.addingTimeInterval(2 * 60 * 60)))
+        let into = try repository.upsertMove(startPlace: homeStop, endPlace: blipStop, startDate: left, endDate: blipArrival,
+                                             transportMode: .walking, distanceMeters: 1_000, stepCount: 0, samples: [])
+        let outOf = try repository.upsertMove(startPlace: blipStop, endPlace: workStop, startDate: blipArrival.addingTimeInterval(120),
+                                              endDate: atWork, transportMode: .walking, distanceMeters: 1_000, stepCount: 0, samples: [])
+        try context.save()
+        let blipID = blipStop.id
+        let outOfID = outOf.id
+
+        // The view's side: another context holds the rows before the rebuild.
+        let reader = ModelContext(container)
+        let heldStop = try XCTUnwrap(try reader.fetch(FetchDescriptor<VisitPlace>(predicate: #Predicate { $0.id == blipID })).first)
+        let heldTrip = try XCTUnwrap(try reader.fetch(FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.id == outOfID })).first)
+        _ = heldStop.arrivalDate
+        _ = heldTrip.distanceMeters
+
+        await assembler.reconcileSampleStays()
+
+        // Every stored property is still readable on the other context.
+        _ = (heldStop.id, heldStop.arrivalDate, heldStop.departureDate, heldStop.latitude, heldStop.longitude,
+             heldStop.horizontalAccuracy, heldStop.userLabel, heldStop.autoLabel, heldStop.comment, heldStop.reviewState,
+             heldStop.origin, heldStop.countryCode, heldStop.locality, heldStop.isHiddenAsShortStop)
+        _ = (heldTrip.id, heldTrip.startDate, heldTrip.endDate, heldTrip.transportMode, heldTrip.distanceMeters,
+             heldTrip.stepCount, heldTrip.comment, heldTrip.routeMatchSummary, heldTrip.reviewState, heldTrip.dedupeKey)
+        _ = heldTrip.startPlace?.arrivalDate
+        _ = heldTrip.dayTimeline?.dayKey
+
+        let check = ModelContext(container)
+        let allStops = try check.fetch(FetchDescriptor<VisitPlace>())
+        let retiredStop = try XCTUnwrap(allStops.first { $0.id == blipID }, "Retired, not deleted")
+        XCTAssertNil(retiredStop.dayTimeline)
+        XCTAssertNil(retiredStop.knownPlace)
+        XCTAssertEqual(retiredStop.reviewState, ReviewState.none)
+        let allTrips = try check.fetch(FetchDescriptor<MoveSegment>())
+        let retiredTrip = try XCTUnwrap(allTrips.first { $0.id == outOfID })
+        XCTAssertNil(retiredTrip.dayTimeline)
+        XCTAssertNil(retiredTrip.startPlace)
+        XCTAssertTrue(retiredTrip.dedupeKey.hasPrefix(TimelineRetirement.dedupeKeyPrefix))
+        let live = allTrips.filter { $0.dayTimeline != nil }
+        XCTAssertEqual(live.map(\.id), [into.id], "The trip into the blip became the whole trip")
+        XCTAssertEqual(live.first?.endPlace?.id, workStop.id)
+
+        // A rebuild of its own output: nothing retired is read, retired again, or revived.
+        var saves = 0
+        let observer = NotificationCenter.default.addObserver(forName: ModelContext.didSave, object: context, queue: nil) { _ in saves += 1 }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        for _ in 0..<3 { await assembler.reconcileSampleStays() }
+        XCTAssertEqual(saves, 0)
+        XCTAssertNil(try ModelContext(container).fetch(FetchDescriptor<VisitPlace>()).first { $0.id == blipID }?.dayTimeline)
+
+        let retiredCount = try ModelContext(container).fetch(FetchDescriptor<VisitPlace>()).filter { $0.dayTimeline == nil }.count
+            + (try ModelContext(container).fetch(FetchDescriptor<MoveSegment>()).filter { $0.dayTimeline == nil }.count)
+        let liveCount = try ModelContext(container).fetch(FetchDescriptor<VisitPlace>()).filter { $0.dayTimeline != nil }.count
+            + (try ModelContext(container).fetch(FetchDescriptor<MoveSegment>()).filter { $0.dayTimeline != nil }.count)
+        let purge = ModelContext(container)
+        XCTAssertEqual(try SwiftDataTimelineRepository.purgeRetiredRows(in: purge), retiredCount)
+        let after = ModelContext(container)
+        XCTAssertEqual(try after.fetchCount(FetchDescriptor<VisitPlace>()) + after.fetchCount(FetchDescriptor<MoveSegment>()), liveCount)
+        XCTAssertEqual(retiredCount, 2)
+    }
+
+    /// A late report of a visit whose stop the rebuild retired makes a new stop; the
+    /// retired row stays retired.
+    func testLateVisitReportDoesNotReviveARetiredStop() throws {
+        TimelineRetirement.isDeferred = true
+        defer { TimelineRetirement.isDeferred = false }
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let repository = SwiftDataTimelineRepository(modelContext: context)
+        let arrival = Date().addingTimeInterval(-3 * 60 * 60)
+        let kiosk = CLLocationCoordinate2D(latitude: 10.76, longitude: 106.70)
+        let visit = MockVisit(coordinate: kiosk, horizontalAccuracy: 20, arrivalDate: arrival, departureDate: arrival.addingTimeInterval(120))
+        let first = try repository.addOrUpdateVisit(from: visit)
+        repository.retire(first)
+        try context.save()
+
+        let again = try repository.addOrUpdateVisit(from: visit)
+
+        XCTAssertNotEqual(again.id, first.id)
+        XCTAssertNil(first.dayTimeline, "The retired row is not given a day again")
+        XCTAssertEqual(try context.liveVisits().map(\.id), [again.id])
+    }
+
+    /// Photo-inferred history is the photo import's: never dissolved, trimmed, or relabeled,
+    /// and its times are not evidence for the stops beside it.
+    func testPhotoInferredRowsAreLeftToThePhotoImport() async throws {
+        let rebuild = try makeRebuild(mode: .automotive, steps: 0)
+        let start = Date().addingTimeInterval(-8 * 60 * 60)
+        let home = CLLocationCoordinate2D(latitude: 10.76, longitude: 106.70)
+        let photoSpot = offset(home, north: 1_000, east: 0)
+        let work = offset(home, north: 2_000, east: 0)
+        let left = start.addingTimeInterval(2 * 60 * 60)
+        _ = try rebuild.visit(home, from: start, to: left)
+        // Touches the home stop, far away, two minutes long, made from a photo.
+        let photo = VisitPlace(arrivalDate: left, departureDate: left.addingTimeInterval(120),
+                               latitude: photoSpot.latitude, longitude: photoSpot.longitude, horizontalAccuracy: 50)
+        photo.origin = .photoInferred
+        let day = DayTimeline(dayStart: Calendar.current.startOfDay(for: left))
+        rebuild.context.insert(day)
+        photo.dayTimeline = day
+        rebuild.context.insert(photo)
+        _ = try rebuild.visit(work, from: left.addingTimeInterval(30 * 60), to: left.addingTimeInterval(3 * 60 * 60))
+        let run = MoveSegment(dedupeKey: "photo-run", startDate: start.addingTimeInterval(-20 * 24 * 60 * 60),
+                              endDate: start.addingTimeInterval(-20 * 24 * 60 * 60 + 108 * 60),
+                              transportMode: .running, distanceMeters: 37_300, stepCount: nil)
+        run.origin = .photoInferred
+        run.dayTimeline = day
+        rebuild.context.insert(run)
+        try rebuild.context.save()
+
+        await rebuild.assembler.reconcileSampleStays()
+        try AutomaticModeHistory.applyPaceRules(in: rebuild.context, preferences: .init())
+
+        XCTAssertTrue(try rebuild.places().contains { $0.id == photo.id }, "Not dissolved")
+        XCTAssertEqual(photo.departureDate, left.addingTimeInterval(120), "Not trimmed")
+        XCTAssertEqual(try rebuild.places().first?.departureDate, left, "A photo's time does not shorten the stop before it")
+        XCTAssertEqual(run.transportMode, .running, "The pace sweep leaves photo-inferred trips alone")
+        try await rebuild.assertSettled()
+    }
+
+    /// The live trip's rebuild and the full week's agree: alternating them writes nothing
+    /// after the first.
+    func testTripOnlyAndFullPassesAgree() async throws {
+        let rebuild = try makeRebuild(mode: .automotive, steps: 400)
+        let start = Date().addingTimeInterval(-3 * 60 * 60)
+        let hotel = CLLocationCoordinate2D(latitude: 10.76, longitude: 106.70)
+        let street = offset(hotel, north: 300, east: 0)
+        let cafe = offset(hotel, north: 565, east: 0)
+        let far = offset(hotel, north: 3_000, east: 0)
+        let handoff = start.addingTimeInterval(90 * 60)
+        _ = try rebuild.visit(hotel, from: start, to: handoff)
+        _ = try rebuild.visit(cafe, from: handoff, to: handoff.addingTimeInterval(20 * 60))
+        // A two-minute blip, then the trip still under way.
+        let blip = handoff.addingTimeInterval(30 * 60)
+        _ = try rebuild.visit(offset(cafe, north: 1_000, east: 0), from: blip, to: blip.addingTimeInterval(120))
+        _ = try rebuild.visit(far, from: blip.addingTimeInterval(15 * 60), to: blip.addingTimeInterval(40 * 60))
+        try rebuild.fixes(hotel, at: [start.addingTimeInterval(5 * 60), start.addingTimeInterval(40 * 60)])
+        try rebuild.fixes(street, at: [start.addingTimeInterval(45 * 60), start.addingTimeInterval(47 * 60)])
+        try rebuild.fixes(far, at: (0...3).map { blip.addingTimeInterval(Double(15 + $0 * 8) * 60) })
+        // The trip window opens after the hotel stop began, so it sees only part of it.
+        let tripStart = blip.addingTimeInterval(-10 * 60)
+
+        await rebuild.assembler.reconcile(.week)
+        try rebuild.assertInvariants()
+        let settled = (Set(try rebuild.places().map(\.id)), Set(try rebuild.moves().map(\.id)))
+        var saves = 0
+        let observer = NotificationCenter.default.addObserver(forName: ModelContext.didSave, object: rebuild.context, queue: nil) { _ in
+            saves += 1
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        for scope in [CaptureRebuildScope.recentTrip(since: tripStart), .week, .recentTrip(since: tripStart)] {
+            await rebuild.assembler.reconcile(scope)
+        }
+        XCTAssertEqual(saves, 0, "A trip-only pass and a full pass disagreed")
+        XCTAssertEqual(Set(try rebuild.places().map(\.id)), settled.0)
+        XCTAssertEqual(Set(try rebuild.moves().map(\.id)), settled.1)
+    }
+
+    /// Field case: the first walk recorded densely. A stay at a resort, then 23 minutes on
+    /// foot (a fix every 4 s, including laps around a garden within 160 m of its own centre),
+    /// with a launch one-shot fix five minutes in. Trip-only rebuilds every 150 s, as capture
+    /// runs them, must never open a stay on the walk, never leave a trip of no length, and
+    /// a full-week rebuild at the end must change nothing.
+    func testDenseWalkStaysATripWhileItIsUnderWay() async throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let repository = SwiftDataTimelineRepository(modelContext: context)
+        let walkStart = Date().addingTimeInterval(-30 * 60)
+        var clock = walkStart
+        let assembler = DefaultTimelineAssembler(
+            repository: repository,
+            motionClassifier: RateMotionClassifier(mode: .walking, steps: nil, stepsPerMinute: 110),
+            placeNameResolver: EmptyPlaceNameResolver(),
+            automaticModes: { .init() },
+            now: { clock },
+            paceRulesDefaults: nil
+        )
+        let resort = CLLocationCoordinate2D(latitude: 11.94, longitude: 108.44)
+        let arrival = walkStart.addingTimeInterval(-2 * 60 * 60)
+        let resortStop = try repository.addOrUpdateVisit(
+            from: MockVisit(coordinate: resort, horizontalAccuracy: 20, arrivalDate: arrival, departureDate: .distantFuture)
+        )
+        _ = try repository.appendSamples(
+            from: (0...5).map { location(resort, at: arrival.addingTimeInterval(Double($0) * 20 * 60)) },
+            source: .significantChange
+        )
+        try context.save()
+
+        // 0–4 min north to a garden, 4–19 min laps of a 120 m circle, 19–23 min north again.
+        func position(at seconds: Double) -> CLLocationCoordinate2D {
+            let speed = 1.3
+            if seconds < 230 { return offset(resort, north: speed * seconds, east: 0) }
+            if seconds < 1_140 {
+                let angle = speed * (seconds - 230) / 120
+                return offset(resort, north: 420 - 120 * cos(angle), east: 120 * sin(angle))
+            }
+            let start = offset(resort, north: 420 - 120 * cos(speed * 910 / 120), east: 120 * sin(speed * 910 / 120))
+            return offset(start, north: speed * (seconds - 1_140), east: 0)
+        }
+        var lastRebuild = walkStart
+        var longest: Double = 0
+        for step in stride(from: 0.0, through: 23 * 60, by: 4) {
+            clock = walkStart.addingTimeInterval(step)
+            let fix = CLLocation(coordinate: position(at: step), altitude: 0, horizontalAccuracy: 5,
+                                 verticalAccuracy: -1, course: -1, speed: 1.3, timestamp: clock)
+            await assembler.ingestLocations([fix], source: step == 300 ? .launchBackfill : .continuous, reconcile: false)
+            guard clock.timeIntervalSince(lastRebuild) >= 150 else { continue }
+            lastRebuild = clock
+            await assembler.reconcile(.recentTrip(since: walkStart))
+
+            let stops = try context.liveVisits()
+            XCTAssertEqual(stops.map(\.id), [resortStop.id], "A stay opened on the walk at \(Int(step)) s: " + stops.map { stop in
+                "[\(Int(stop.arrivalDate.timeIntervalSince(walkStart)))…\(stop.departureDate.map { "\(Int($0.timeIntervalSince(walkStart)))" } ?? "open") s, \(Int(distance(stop.coordinate, resort))) m]"
+            }.joined(separator: " "))
+            for trip in try context.liveMoves() {
+                XCTAssertGreaterThan(trip.endDate.timeIntervalSince(trip.startDate), 60, "A trip with no length")
+                XCTAssertGreaterThanOrEqual(trip.distanceMeters, longest - 1, "Distance went backwards")
+                longest = max(longest, trip.distanceMeters)
+            }
+        }
+        let departure = try XCTUnwrap(resortStop.departureDate, "The resort stay ends when the walk leaves it")
+        XCTAssertLessThan(departure.timeIntervalSince(walkStart), 90)
+
+        var saves = 0
+        let observer = NotificationCenter.default.addObserver(forName: ModelContext.didSave, object: context, queue: nil) { _ in
+            saves += 1
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        await assembler.reconcile(.week)
+        XCTAssertEqual(saves, 0, "The full week disagreed with the trip-only rebuilds")
+    }
+
+    /// A launch fix or a second visit report split one stay in two at the same spot: one stay.
+    func testTouchingStopsAtTheSameSpotAreOneStay() async throws {
+        let rebuild = try makeRebuild(mode: .automotive, steps: 0)
+        let start = Date().addingTimeInterval(-6 * 60 * 60)
+        let resort = CLLocationCoordinate2D(latitude: 11.94, longitude: 108.44)
+        let first = try rebuild.visit(resort, from: start, to: start.addingTimeInterval(2 * 60 * 60))
+        _ = try rebuild.visit(offset(resort, north: 30, east: 0), from: start.addingTimeInterval(2 * 60 * 60 + 20),
+                              to: start.addingTimeInterval(2 * 60 * 60 + 6 * 60))
+        _ = try rebuild.visit(offset(resort, north: 3_000, east: 0), from: start.addingTimeInterval(3 * 60 * 60),
+                              to: start.addingTimeInterval(4 * 60 * 60))
+
+        await rebuild.assembler.reconcileSampleStays()
+
+        XCTAssertEqual(try rebuild.places().count, 2)
+        XCTAssertEqual(first.departureDate, start.addingTimeInterval(2 * 60 * 60 + 6 * 60))
+        try rebuild.assertInvariants()
+        try await rebuild.assertSettled()
+    }
+
+    /// Field case: after a stay the person confirmed, a few-minute stay the system matched to
+    /// the same place, touching it, is that stay reported twice; the confirmed one keeps its times.
+    func testDuplicateAfterAConfirmedStayGoes() async throws {
+        let rebuild = try makeRebuild(mode: .automotive, steps: 0)
+        let start = Date().addingTimeInterval(-6 * 60 * 60)
+        let resort = CLLocationCoordinate2D(latitude: 11.94, longitude: 108.44)
+        let known = KnownPlace(name: "Resort", latitude: resort.latitude, longitude: resort.longitude)
+        rebuild.context.insert(known)
+        let stay = try rebuild.visit(resort, from: start, to: start.addingTimeInterval(2 * 60 * 60))
+        stay.knownPlace = known
+        stay.assignmentSource = .user
+        stay.reviewState = .confirmed
+        let twice = try rebuild.visit(offset(resort, north: 200, east: 0), from: start.addingTimeInterval(2 * 60 * 60),
+                                      to: start.addingTimeInterval(2 * 60 * 60 + 4 * 60))
+        twice.knownPlace = known
+        twice.assignmentSource = .auto
+        _ = try rebuild.visit(offset(resort, north: 3_000, east: 0), from: start.addingTimeInterval(3 * 60 * 60),
+                              to: start.addingTimeInterval(4 * 60 * 60))
+        try rebuild.context.save()
+
+        await rebuild.assembler.reconcileSampleStays()
+
+        XCTAssertFalse(try rebuild.places().contains { $0.id == twice.id })
+        XCTAssertEqual(stay.departureDate, start.addingTimeInterval(2 * 60 * 60), "A confirmed stay keeps its times")
+        XCTAssertEqual(try rebuild.moves().first?.startPlace?.id, stay.id)
+        try rebuild.assertInvariants()
+        try await rebuild.assertSettled()
+    }
+
+    /// A trip's times are its stops' times: a start left behind when its stop was trimmed is
+    /// brought up to date, so the trip never shows no length.
+    func testTripTimesFollowTheirStops() async throws {
+        let rebuild = try makeRebuild(mode: .automotive, steps: 0)
+        let start = Date().addingTimeInterval(-6 * 60 * 60)
+        let home = CLLocationCoordinate2D(latitude: 10.76, longitude: 106.70)
+        let work = offset(home, north: 3_000, east: 0)
+        let left = start.addingTimeInterval(60 * 60)
+        let arrived = left.addingTimeInterval(10 * 60)
+        let from = try rebuild.visit(home, from: start, to: left)
+        let to = try rebuild.visit(work, from: arrived, to: arrived.addingTimeInterval(60 * 60))
+        // Stored as if the stop had ended four minutes later: within the old tolerance.
+        let trip = try rebuild.repository.upsertMove(startPlace: from, endPlace: to, startDate: left.addingTimeInterval(4 * 60),
+                                                     endDate: arrived, transportMode: .automotive, distanceMeters: 3_000,
+                                                     stepCount: 0, samples: [])
+        try rebuild.context.save()
+
+        await rebuild.assembler.reconcileSampleStays()
+
+        XCTAssertEqual(trip.startDate, left)
+        XCTAssertEqual(trip.transportMode, .automotive)
+        try await rebuild.assertSettled()
+    }
+
+    func testRetireDeletesWhileRetirementIsOff() throws {
+        TimelineRetirement.isDeferred = false
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let repository = SwiftDataTimelineRepository(modelContext: context)
+        let stop = VisitPlace(arrivalDate: .now, departureDate: .now, latitude: 10, longitude: 106, horizontalAccuracy: 20)
+        context.insert(stop)
+        try context.save()
+        repository.retire(stop)
+        try context.save()
+        XCTAssertEqual(try ModelContext(container).fetchCount(FetchDescriptor<VisitPlace>()), 0)
+    }
+
     private func identities(in context: ModelContext) throws -> (visits: Set<UUID>, moves: Set<UUID>) {
-        (Set(try context.fetch(FetchDescriptor<VisitPlace>()).map(\.id)),
-         Set(try context.fetch(FetchDescriptor<MoveSegment>()).map(\.id)))
+        (Set(try context.liveVisits().map(\.id)), Set(try context.liveMoves().map(\.id)))
     }
 
     /// Two stops with fixes that hold still at each and one trip the reconciler built between them.
@@ -968,6 +1869,23 @@ private struct FixedMotionClassifier: MotionClassifier {
     }
 }
 
+/// Steps for any interval: a fixed count, or a rate times its length.
+private struct RateMotionClassifier: MotionClassifier {
+    var mode: TransportMode
+    var steps: Int?
+    var stepsPerMinute: Double?
+    var confidence: Double = 0.9
+
+    func classifyTransport(start: Date, end: Date, locations: [CLLocation]) async -> (mode: TransportMode, confidence: Double) {
+        (mode, confidence)
+    }
+
+    func stepCount(start: Date, end: Date) async -> Int? {
+        if let stepsPerMinute { return Int(stepsPerMinute * end.timeIntervalSince(start) / 60) }
+        return steps
+    }
+}
+
 private struct EmptyPlaceNameResolver: PlaceNameResolver {
     func resolveName(for coordinate: CLLocationCoordinate2D) async -> String? {
         nil
@@ -985,6 +1903,28 @@ private func fix(
         horizontalAccuracy: accuracy,
         timestamp: date
     )
+}
+
+/// What a reader of the timeline sees: rows the rebuild retired are not part of it.
+/// With `TimelineRetirement.isDeferred` off this is every row, as before.
+extension ModelContext {
+    func liveVisits() throws -> [VisitPlace] {
+        try fetch(FetchDescriptor<VisitPlace>(sortBy: [SortDescriptor(\.arrivalDate)]))
+            .filter { !TimelineRetirement.isRetired($0) }
+    }
+
+    func liveMoves() throws -> [MoveSegment] {
+        try fetch(FetchDescriptor<MoveSegment>(sortBy: [SortDescriptor(\.startDate)]))
+            .filter { !TimelineRetirement.isRetired($0) }
+    }
+}
+
+private func boundaryFix(
+    _ coordinate: CLLocationCoordinate2D,
+    at date: Date,
+    accuracy: CLLocationAccuracy = 15
+) -> StopBoundaryEvidence.Fix {
+    StopBoundaryEvidence.Fix(timestamp: date, coordinate: coordinate, horizontalAccuracy: accuracy)
 }
 
 private func location(_ coordinate: CLLocationCoordinate2D, at date: Date) -> CLLocation {

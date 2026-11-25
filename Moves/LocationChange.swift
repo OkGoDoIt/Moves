@@ -125,7 +125,12 @@ struct OneShotLocationRequestGate {
 
 protocol MotionClassifier {
     func classifyTransport(start: Date, end: Date, locations: [CLLocation]) async -> (mode: TransportMode, confidence: Double)
+    /// Steps in the interval, or nil when there is no step data: the interval is older
+    /// than the pedometer's history, or the query failed. Zero means nobody walked.
     func stepCount(start: Date, end: Date) async -> Int?
+    /// Core Motion's own dominant activity over the interval, before any preference or
+    /// speed correction. Nil when it has no reading.
+    func dominantActivity(start: Date, end: Date) async -> TransportMode?
     /// True when the minutes before `date` include a vehicle ride.
     func approachWasAutomotive(before date: Date) async -> Bool
     /// True when the last few minutes are on foot and not in a vehicle.
@@ -133,6 +138,7 @@ protocol MotionClassifier {
 }
 
 extension MotionClassifier {
+    func dominantActivity(start: Date, end: Date) async -> TransportMode? { nil }
     func approachWasAutomotive(before date: Date) async -> Bool { false }
     func recentlyWalking(at date: Date) async -> Bool { false }
 }
@@ -303,8 +309,14 @@ final class CoreMotionTransportClassifier: MotionClassifier {
         }
     }
 
+    /// The pedometer answers for its last seven days only. Older intervals come back
+    /// as zero steps, which would read as "nobody walked".
+    static let pedometerHistory: TimeInterval = MoveSegment.pedometerHistory
+
     func stepCount(start: Date, end: Date) async -> Int? {
-        guard CMPedometer.isStepCountingAvailable(), end > start else {
+        guard CMPedometer.isStepCountingAvailable(), end > start,
+              start > Date.now.addingTimeInterval(-Self.pedometerHistory + 60)
+        else {
             return nil
         }
 
@@ -313,14 +325,30 @@ final class CoreMotionTransportClassifier: MotionClassifier {
         return await BoundedWait.run(seconds: Self.queryTimeLimit, fallback: nil) {
             await withCheckedContinuation { continuation in
                 pedometer.queryPedometerData(from: start, to: end) { data, error in
-                    guard error == nil else {
+                    // No data is not zero steps: the rules treat nil as unknown.
+                    guard error == nil, let data else {
                         continuation.resume(returning: nil)
                         return
                     }
-                    continuation.resume(returning: data?.numberOfSteps.intValue)
+                    continuation.resume(returning: data.numberOfSteps.intValue)
                 }
             }
         }
+    }
+
+    func dominantActivity(start: Date, end: Date) async -> TransportMode? {
+        guard CMMotionActivityManager.isActivityAvailable(),
+              let activities = await queryActivities(from: start, to: end),
+              !activities.isEmpty
+        else { return nil }
+        let scores = Self.durationWeightedActivityScores(
+            activities.map {
+                (start: $0.startDate, confidence: confidenceWeight(for: $0.confidence), mode: Self.mode(for: $0))
+            },
+            from: start,
+            to: end
+        )
+        return scores.max { $0.value < $1.value }?.key
     }
 
     private static let queryTimeLimit: TimeInterval = 6
@@ -486,6 +514,14 @@ final class DefaultTimelineAssembler: TimelineAssembler {
     private let motionClassifier: MotionClassifier
     private let placeNameResolver: PlaceNameResolver
     private let automaticModes: () -> AutomaticTransportModes
+    private let now: () -> Date
+    /// Where the pace-rule sweep records that it ran; nil never runs it.
+    private let paceRulesDefaults: UserDefaults?
+    /// Pedometer answers the stop rules asked for, kept so later passes decide alike.
+    private let stopStepEvidence = ReconcileStepEvidence()
+    /// Pedometer queries per pass, so a first pass over a busy week stays bounded.
+    private static let stepQueriesPerPass = 1_000
+    private static let stepRoundsPerPass = 6
     /// One rebuild at a time. Callers that overlap wait for the running one.
     private var reconcileDriver: Task<Void, Never>?
     /// What callers asked for while a rebuild ran, if it still needs doing.
@@ -506,12 +542,16 @@ final class DefaultTimelineAssembler: TimelineAssembler {
         repository: TimelineRepository,
         motionClassifier: MotionClassifier,
         placeNameResolver: PlaceNameResolver,
-        automaticModes: @escaping () -> AutomaticTransportModes = { .load() }
+        automaticModes: @escaping () -> AutomaticTransportModes = { .load() },
+        now: @escaping () -> Date = Date.init,
+        paceRulesDefaults: UserDefaults? = .standard
     ) {
         self.repository = repository
         self.motionClassifier = motionClassifier
         self.placeNameResolver = placeNameResolver
         self.automaticModes = automaticModes
+        self.now = now
+        self.paceRulesDefaults = paceRulesDefaults
     }
 
     func ingestLocations(_ locations: [CLLocation], source: LocationSampleSource, reconcile: Bool = true) async {
@@ -643,22 +683,62 @@ final class DefaultTimelineAssembler: TimelineAssembler {
 
     private func performSampleStayReconciliation(_ scope: CaptureRebuildScope) async {
         await TimelineSchemaUpgrader.waitUntilFinished()
+        // Once per version of the pace rules: history the weekly rebuild never revisits.
+        if let defaults = paceRulesDefaults,
+           defaults.integer(forKey: AutomaticModeHistory.paceRulesVersionKey) < AutomaticModeHistory.paceRulesVersion {
+            do {
+                let report = try repository.applyPaceRulesToHistory(now: now())
+                defaults.set(AutomaticModeHistory.paceRulesVersion, forKey: AutomaticModeHistory.paceRulesVersionKey)
+                if report.total > 0 {
+                    Self.timelineLog.info("Relabeled \(report.total) foot trips whose pace ruled out feet")
+                }
+            } catch {
+                Self.timelineLog.error("Failed to recheck foot trip paces: \(error.localizedDescription, privacy: .public)")
+            }
+        }
         do {
-            let now = Date.now
+            let now = self.now()
             let started = ContinuousClock.now
+            stopStepEvidence.forget(before: now.addingTimeInterval(-8 * 24 * 60 * 60))
             // Read synchronously with the generation recorded: no write can interleave.
             runningInputs = (storeGeneration, scope)
             defer { runningInputs = nil }
-            let result: SampleStayReconciliationResult
-            switch scope {
-            case .week:
-                lastWeekRebuildReadAt = now
-                result = try repository.reconcileSampleStays(now: now)
-            case .recentTrip(let since):
-                // A clock set back can put `since` after now.
-                let start = min(since, now)
-                result = try repository.reconcileSampleStays(covering: DateInterval(start: start, end: now))
+            // Both entry points read the same pedometer answers, so a trip-only pass never
+            // decides differently from the full week about the stops they share.
+            let rebuild: () throws -> SampleStayReconciliationResult = { [repository, stopStepEvidence] in
+                switch scope {
+                case .week:
+                    return try repository.reconcileSampleStays(now: now, steps: stopStepEvidence)
+                case .recentTrip(let since):
+                    // A clock set back can put `since` after now; the repository allows for it.
+                    return try repository.reconcileRecentTrip(since: since, now: now, steps: stopStepEvidence)
+                }
             }
+            if case .week = scope { lastWeekRebuildReadAt = now }
+            // The stop rules may ask about steps the pass has no answer for. Ask the
+            // pedometer and rebuild again, until the rules ask nothing new: a question left
+            // for the next pass would let that pass decide differently. (Holding the first
+            // rebuild's writes and rolling them back would write each row once, but
+            // `ModelContext.rollback()` aborted inside SwiftData on a real store copy.)
+            var result = try rebuild()
+            var queries = 0
+            for _ in 0..<Self.stepRoundsPerPass {
+                let wanted = stopStepEvidence.takeWanted()
+                guard !wanted.isEmpty, queries < Self.stepQueriesPerPass else { break }
+                for interval in wanted.prefix(Self.stepQueriesPerPass - queries) {
+                    let steps = await motionClassifier.stepCount(start: interval.start, end: interval.end)
+                    stopStepEvidence.record(steps, for: interval)
+                    queries += 1
+                }
+                let earlier = result
+                result = try rebuild()
+                let survivors = earlier.newPlaces.filter { place in
+                    !place.isDeleted && place.modelContext != nil && !TimelineRetirement.isRetired(place)
+                        && !result.newPlaces.contains { $0.id == place.id }
+                }
+                result.newPlaces = survivors + result.newPlaces
+            }
+            _ = stopStepEvidence.takeWanted()
             rebuildCount += 1
             let rebuilt = ContinuousClock.now - started
             try await apply(result)
@@ -711,39 +791,92 @@ final class DefaultTimelineAssembler: TimelineAssembler {
     private func apply(_ result: SampleStayReconciliationResult, asksForReview: Bool = true) async throws {
         var changedTrips = 0
         for leg in result.moveLegs {
+            // Models can leave the store while the motion queries await.
+            guard Self.isLive(leg.startPlace), Self.isLive(leg.endPlace) else { continue }
             let before = leg.startPlace.outgoingMoves
                 .first { $0.endPlace?.id == leg.endPlace.id }
                 .map(TripShape.init)
-            let classification = await motionClassifier.classifyTransport(
-                start: leg.startDate,
-                end: leg.endDate,
-                locations: leg.locations
-            )
-            let steps = await motionClassifier.stepCount(start: leg.startDate, end: leg.endDate)
-            let straightLine = CLLocation(
-                latitude: leg.startPlace.latitude,
-                longitude: leg.startPlace.longitude
-            ).distance(from: CLLocation(
-                latitude: leg.endPlace.latitude,
-                longitude: leg.endPlace.longitude
-            ))
+            var steps = await motionClassifier.stepCount(start: leg.startDate, end: leg.endDate)
+            if steps == nil, let id = leg.existingMoveID,
+               let health = HealthStepEvidenceLookup.evidence(for: id)?.steps.known {
+                // Older than the pedometer's week, or imported: Health may still know.
+                steps = Int(health.rounded())
+            }
+            let straightLine = leg.straightLineMeters > 0
+                ? leg.straightLineMeters
+                : CLLocation(latitude: leg.startPlace.latitude, longitude: leg.startPlace.longitude)
+                    .distance(from: CLLocation(latitude: leg.endPlace.latitude, longitude: leg.endPlace.longitude))
             let duration = leg.endDate.timeIntervalSince(leg.startDate)
-            let afterLastBlock = LastBlockWalk.mode(
-                proposed: classification.mode,
-                distance: straightLine,
-                duration: duration,
-                stepCount: steps
-            )
-            let proposedMode = ImplausibleWalk.refinedMode(
-                proposed: afterLastBlock,
-                straightLine: straightLine,
+
+            let classification: (mode: TransportMode, confidence: Double)
+            let afterLastBlock: TransportMode
+            var transportMode: TransportMode
+            var dominant: TransportMode?
+            if let kept = leg.keptMode {
+                // Only the trip's fixes, ends, or distance changed: its mode stands, unless
+                // the steps now stored with it rule that mode out. The next pass checks the
+                // stored trip with exactly that rule, so it is applied here, not there.
+                classification = (kept, 1)
+                afterLastBlock = kept
+                transportMode = kept
+                if let ruled = ImplausibleWalk.stepEvidenceMode(
+                    proposed: kept,
+                    straightLine: straightLine,
+                    duration: duration,
+                    stepCount: steps
+                ) {
+                    transportMode = automaticModes().allowedMode(ruled)
+                }
+            } else {
+                classification = await motionClassifier.classifyTransport(
+                    start: leg.startDate,
+                    end: leg.endDate,
+                    locations: leg.locations
+                )
+                dominant = await motionClassifier.dominantActivity(start: leg.startDate, end: leg.endDate)
+                afterLastBlock = LastBlockWalk.mode(
+                    proposed: classification.mode,
+                    distance: straightLine,
+                    duration: duration,
+                    stepCount: steps
+                )
+                let proposedMode = ImplausibleWalk.refinedMode(
+                    proposed: afterLastBlock,
+                    straightLine: straightLine,
+                    distance: leg.keptDistance ?? leg.distanceMeters,
+                    duration: duration,
+                    stepCount: steps,
+                    dominantActivity: dominant,
+                    locations: leg.locations
+                )
+                // Post-classification step/distance rules can change a mode too.
+                // Read the current preference after the motion query awaits.
+                transportMode = automaticModes().allowedMode(proposedMode)
+            }
+            guard Self.isLive(leg.startPlace), Self.isLive(leg.endPlace) else { continue }
+
+            var distance = leg.keptDistance ?? leg.distanceMeters
+            if leg.keptDistance == nil,
+               OnFootDistanceEstimate.applies(mode: transportMode, interiorFixCount: leg.interiorFixCount) {
+                // Two or fewer fixes cannot draw a walk; steps measure it better.
+                distance = OnFootDistanceEstimate.distance(
+                    straightLine: straightLine,
+                    stepCount: steps,
+                    stride: Self.onFootStride()
+                )
+            }
+            // The stored distance is what later checks read; the pace rule must agree with it,
+            // or the next pass would relabel the trip it just wrote.
+            if let paced = ImplausibleFootPace.mode(
+                proposed: transportMode,
+                distance: max(distance, straightLine),
                 duration: duration,
                 stepCount: steps,
-                locations: leg.locations
-            )
-            // Post-classification step/distance rules can change a mode too.
-            // Read the current preference after the motion query awaits.
-            let transportMode = automaticModes().allowedMode(proposedMode)
+                dominantActivity: dominant
+            ) {
+                transportMode = automaticModes().allowedMode(paced)
+                distance = leg.keptDistance ?? leg.distanceMeters
+            }
             let between = try repository.samples(from: leg.startDate, to: leg.endDate)
             let move = try repository.upsertMove(
                 startPlace: leg.startPlace,
@@ -751,10 +884,15 @@ final class DefaultTimelineAssembler: TimelineAssembler {
                 startDate: leg.startDate,
                 endDate: leg.endDate,
                 transportMode: transportMode,
-                distanceMeters: leg.distanceMeters,
+                distanceMeters: distance,
                 stepCount: steps,
                 samples: between
             )
+            // No fix between the stops: the path is a guess, shown as one.
+            if leg.interiorFixCount == 0, move.routeMatchConfidence == .unknown, move.routeMatchSummary == nil {
+                move.routeMatchConfidence = .estimated
+                move.routeMatchSummary = RouteMatchSummaries.estimatedNoFixes
+            }
             // Duplicate enrichment may supply an older guessed mode. It must
             // obey the same preference without touching a curated replacement.
             if move.permitsAutomaticModeChanges {
@@ -770,13 +908,17 @@ final class DefaultTimelineAssembler: TimelineAssembler {
             }
             // Ask only about what the rules left unsure, and never ask twice. A ride read
             // as a walk is one of those: the steps rule it out, but not which vehicle.
+            // A ride with few steps that motion left unresolved is read as a ride, which is
+            // the answer, not a question; only a relabeled walk or an unresolved result asks.
+            let relabeledByRules = transportMode != afterLastBlock
+                && (transportMode == .unknown || afterLastBlock == .walking || afterLastBlock == .running)
             let unsureOfMode = transportMode == classification.mode
                 ? classification.confidence < TimelineReviewHeuristics.uncertainModeConfidence
-                : transportMode != afterLastBlock
+                : relabeledByRules
             // Only recent, recorded trips are worth a question: nobody should be asked
             // about imported history or last month.
             if asksForReview, move.reviewState == .none, move.transportModeSource == .auto, unsureOfMode,
-               Date.now.timeIntervalSince(move.startDate) <= TimelineReviewHeuristics.newQuestionWindow,
+               self.now().timeIntervalSince(move.startDate) <= TimelineReviewHeuristics.newQuestionWindow,
                !TimelineReviewHeuristics.isImportedHistory(move) {
                 move.reviewState = .pending
             }
@@ -800,6 +942,22 @@ final class DefaultTimelineAssembler: TimelineAssembler {
                 "Rebuilt \(result.newPlaces.count) stops and \(changedTrips) trips from stored fixes"
             )
         }
+    }
+
+    private static func isLive(_ place: VisitPlace) -> Bool {
+        !place.isDeleted && !TimelineRetirement.isRetired(place)
+    }
+
+    /// Metres a step, for walks the fixes cannot draw. Health's learned k scales its own
+    /// distance to the GPS ruler; applied to the nominal stride it does the same here.
+    static func onFootStride(
+        healthIsActive: Bool = HealthActivitySettings.isActive,
+        calibration: () -> HealthStrideCalibration = { HealthStrideCalibrationStore.load() }
+    ) -> CLLocationDistance {
+        guard healthIsActive else { return OnFootDistanceEstimate.defaultStride }
+        let learned = calibration()
+        guard learned.isCalibrated else { return OnFootDistanceEstimate.defaultStride }
+        return OnFootDistanceEstimate.defaultStride * learned.k
     }
 
     private func fillAutomaticPlaceLabelIfNeeded(for place: VisitPlace) async {

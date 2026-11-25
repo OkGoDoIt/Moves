@@ -168,6 +168,26 @@ final class RouteMatchPolicyTests: XCTestCase {
         XCTAssertGreaterThan(move.distanceMeters, 0)
     }
 
+    /// A confident match is the trip's distance, written once per match. A later
+    /// refinement (Health's walk estimate) is not overwritten by showing the trip again.
+    func testConfidentMatchSetsTheDistanceOnceAndKeepsLaterRefinements() async throws {
+        let fixture = try loadFixture("dense-walk")
+        let move = makeMove(from: fixture, includePlaces: true)
+        move.distanceMeters = 100
+        RoadRouteMatcher.directionsProvider = FakeDirectionsProvider(style: .close)
+
+        let coordinates = await RoadRouteMatcher.matchedCoordinates(for: move)
+
+        XCTAssertEqual(move.routeMatchConfidence, .high)
+        XCTAssertEqual(move.distanceMeters, routeDistance(for: coordinates).rounded(), accuracy: 0.5)
+        let signature = move.routeCacheSignature
+
+        move.distanceMeters = 4_321
+        _ = await RoadRouteMatcher.matchedCoordinates(for: move)
+        XCTAssertEqual(move.routeCacheSignature, signature, "Writing the distance must not ask for a new match")
+        XCTAssertEqual(move.distanceMeters, 4_321, accuracy: 0.01)
+    }
+
     func testMatchingAMoveStaysOffTheUndoStack() async throws {
         let fixture = try loadFixture("dense-walk")
         let move = makeMove(from: fixture, includePlaces: true, policy: .recorded)
