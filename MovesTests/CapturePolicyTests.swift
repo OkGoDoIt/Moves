@@ -83,6 +83,40 @@ final class CapturePolicyTests: XCTestCase {
         XCTAssertEqual(configuration(.balanced, motion: .walking, energy: charging).distanceFilter, 10)
     }
 
+    /// Past incident: with a distance filter on the session, iOS suspended the app during
+    /// trips and it recorded three fixes every five to eight minutes.
+    func testSessionsThatMustKeepRunningAskForEveryFixAndFilterDistanceThemselves() {
+        for level in [CaptureDetailLevel.balanced, .detailed] {
+            let trip = configuration(level, motion: .walking)
+            let waiting = configuration(level, phase: .settled)
+            for session in [trip, waiting] {
+                XCTAssertTrue(session.asksForEveryFix)
+                XCTAssertEqual(session.systemDistanceFilter, kCLDistanceFilterNone)
+                XCTAssertLessThanOrEqual(session.desiredAccuracy, kCLLocationAccuracyHundredMeters)
+                XCTAssertFalse(session.pausesLocationUpdatesAutomatically)
+            }
+        }
+        XCTAssertEqual(CapturePolicy.routeTracking.systemDistanceFilter, CapturePolicy.routeTracking.distanceFilter)
+        XCTAssertEqual(CapturePolicy.lowPower.systemDistanceFilter, CapturePolicy.lowPower.distanceFilter)
+
+        // The gate passes what the system filter would have: one fix every five meters.
+        var gate = CaptureDistanceGate()
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let everySecond = (0..<60).map { second in
+            // Walking north at about 1.1 m a second.
+            CLLocation(
+                coordinate: CLLocationCoordinate2D(latitude: 37.0 + Double(second) * 0.00001, longitude: -122.0),
+                altitude: 0, horizontalAccuracy: 5, verticalAccuracy: 5,
+                timestamp: start.addingTimeInterval(Double(second))
+            )
+        }
+        let passed = gate.pass(everySecond, minimumDistance: 5)
+        XCTAssertEqual(passed.first?.timestamp, start)
+        XCTAssertTrue((11...13).contains(passed.count), "\(passed.count) passed")
+        // Standing still passes nothing more.
+        XCTAssertTrue(gate.pass(Array(repeating: everySecond[59], count: 30), minimumDistance: 5).isEmpty)
+    }
+
     func testSettledKeepsACoarseSessionAndBatterySaverKeepsTheOriginalBehaviour() {
         let watch = configuration(.balanced, phase: .settled)
         XCTAssertEqual(watch.mode, .departureWatch)

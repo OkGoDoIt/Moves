@@ -162,6 +162,23 @@ struct CaptureConfiguration: Equatable, Sendable {
 
     var usesStandardLocationUpdates: Bool { mode != .lowPower }
 
+    /// Whether Core Location is asked for every fix, with `distanceFilter` applied by the
+    /// capture manager (`CaptureDistanceGate`) instead.
+    ///
+    /// Since iOS 16.4 an app that monitors significant changes and also sets a distance
+    /// filter on its standard session is suspended in the background, and then only runs
+    /// for a few seconds at each significant change. Apple's stated way to keep running is
+    /// no distance filter and an accuracy of a hundred meters or better. The two sessions
+    /// that must keep the app running are the one that follows a trip and the one that
+    /// waits for the next. Route tracking and the last-mile burst show the location
+    /// indicator, which keeps them running without this.
+    var asksForEveryFix: Bool { mode == .continuous || mode == .departureWatch }
+
+    /// The distance filter Core Location is given.
+    var systemDistanceFilter: CLLocationDistance {
+        asksForEveryFix ? kCLDistanceFilterNone : distanceFilter
+    }
+
     /// For logs. No coordinates.
     var logDescription: String {
         let accuracy: String
@@ -174,7 +191,33 @@ struct CaptureConfiguration: Equatable, Sendable {
         default: accuracy = "\(Int(desiredAccuracy))m"
         }
         let straight = straightSegmentInterval.map { " straight=\(Int($0))s" } ?? ""
-        return "\(mode.rawValue) profile=\(profile?.rawValue ?? "-") accuracy=\(accuracy) filter=\(Int(distanceFilter))m interval=\(Int(minimumInterval))s\(straight) pauses=\(pausesLocationUpdatesAutomatically)"
+        let filter = asksForEveryFix ? "\(Int(distanceFilter))m in app" : "\(Int(distanceFilter))m"
+        return "\(mode.rawValue) profile=\(profile?.rawValue ?? "-") accuracy=\(accuracy) filter=\(filter) interval=\(Int(minimumInterval))s\(straight) pauses=\(pausesLocationUpdatesAutomatically)"
+    }
+}
+
+/// The capture manager's own distance filter, for sessions that ask Core Location for
+/// every fix (`CaptureConfiguration.asksForEveryFix`). It passes what Core Location's
+/// filter would have delivered: a fix at least `minimumDistance` from the last one passed.
+struct CaptureDistanceGate {
+    private(set) var lastPassed: CLLocation?
+
+    mutating func reset() {
+        lastPassed = nil
+    }
+
+    mutating func pass(_ locations: [CLLocation], minimumDistance: CLLocationDistance) -> [CLLocation] {
+        guard minimumDistance > 0 else {
+            lastPassed = locations.last ?? lastPassed
+            return locations
+        }
+        var passed: [CLLocation] = []
+        for location in locations {
+            if let lastPassed, location.distance(from: lastPassed) < minimumDistance { continue }
+            lastPassed = location
+            passed.append(location)
+        }
+        return passed
     }
 }
 

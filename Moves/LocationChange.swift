@@ -1075,6 +1075,8 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
     private var lastDefiniteMotion: (state: CaptureMotionState, at: Date)?
     private var lastStoredSettledFixAt: Date?
     private var appliedConfiguration: CaptureConfiguration?
+    /// The distance filter for sessions that ask Core Location for every fix.
+    private var distanceGate = CaptureDistanceGate()
     private var appliedShowsIndicator = false
     private let motionActivityManager = CMMotionActivityManager()
     private var isReceivingMotionUpdates = false
@@ -1278,6 +1280,7 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         isMonitoring = false
         isStandardLocationRunning = false
         appliedConfiguration = nil
+        distanceGate.reset()
         stopMotionUpdates()
         removeDepartureRegion()
         updateSettleChecks()
@@ -1626,7 +1629,9 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         }
         manager.activityType = configuration.activityType
         manager.desiredAccuracy = configuration.desiredAccuracy
-        manager.distanceFilter = configuration.distanceFilter
+        // Following a trip and waiting for one ask for every fix, or iOS suspends the app
+        // in the background; `distanceGate` then applies the configuration's filter.
+        manager.distanceFilter = configuration.systemDistanceFilter
         manager.pausesLocationUpdatesAutomatically = configuration.pausesLocationUpdatesAutomatically
         manager.showsBackgroundLocationIndicator = showsIndicator
         if configuration.usesStandardLocationUpdates, !isStandardLocationRunning {
@@ -2572,9 +2577,14 @@ extension MovesLocationCaptureManager: @preconcurrency CLLocationManagerDelegate
         else { return }
 
         if pendingOneShotLocationSource == nil, !isTemporaryRouteTrackingActive, isFollowingTrips {
-            lastCaptureAt = .now
             oneShotRequestGate.cancel()
-            handleFollowedFixes(locations)
+            var followed = locations
+            if let configuration = appliedConfiguration, configuration.asksForEveryFix, isStandardLocationRunning {
+                followed = distanceGate.pass(locations, minimumDistance: configuration.distanceFilter)
+                guard !followed.isEmpty else { return }
+            }
+            lastCaptureAt = .now
+            handleFollowedFixes(followed)
             return
         }
 
