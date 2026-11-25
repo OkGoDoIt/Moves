@@ -115,13 +115,30 @@ final class StoreResilienceTests: XCTestCase {
         XCTAssertEqual(try context.fetchCount(FetchDescriptor<MoveSegment>()), before.moves)
         XCTAssertEqual(try context.fetchCount(FetchDescriptor<LocationSample>()), before.samples)
 
-        let flightsBefore = try Self.flightStarts(in: ModelContext(container))
+        let flightsBefore = try Self.flights(in: ModelContext(container))
         let pendingBefore = try ModelContext(container).fetch(FetchDescriptor<MoveSegment>())
             .filter { $0.reviewState == .pending }
             .count
         try TimelineSchemaUpgrader.upgrade(in: ModelContext(container))
         await TimelineSchemaUpgrader.repairLongTrips(in: container)
-        XCTAssertEqual(try Self.flightStarts(in: ModelContext(container)), flightsBefore, "A flight changed")
+        let flightsAfter = try Self.flights(in: ModelContext(container))
+        // Step 4 may call a flight that came from a file imported; nothing else may change.
+        XCTAssertEqual(
+            flightsAfter.filter { !$0.value.isFromPhotos }.mapValues(\.withoutImportLabel),
+            flightsBefore.filter { !$0.value.isFromPhotos }.mapValues(\.withoutImportLabel),
+            "A recorded or imported flight changed"
+        )
+        for (id, flight) in flightsBefore where flight.isFromPhotos {
+            if let after = flightsAfter[id] {
+                XCTAssertEqual(after, flight, "A flight between photos changed")
+                XCTAssertTrue(flight.isPossible || flight.isTouched, "An impossible flight stayed: \(flight)")
+            } else {
+                XCTAssertFalse(flight.isPossible, "A possible flight was removed: \(flight)")
+                XCTAssertFalse(flight.isTouched, "A flight the person touched was removed: \(flight)")
+            }
+        }
+        XCTAssertTrue(Set(flightsAfter.keys).isSubset(of: flightsBefore.keys), "A flight was made up")
+        print("Flights: \(flightsBefore.count) before, \(flightsBefore.count - flightsAfter.count) impossible ones removed")
         let repaired = try ModelContext(container).fetch(FetchDescriptor<MoveSegment>())
         XCTAssertEqual(
             repaired.filter { $0.transportMode != .plane && $0.endDate.timeIntervalSince($0.startDate) > 6 * 60 * 60 }.count,
@@ -374,8 +391,64 @@ final class StoreResilienceTests: XCTestCase {
         return Int(sqlite3_column_int64(statement, 0))
     }
 
-    private static func flightStarts(in context: ModelContext) throws -> Set<Date> {
-        Set(try context.fetch(FetchDescriptor<MoveSegment>()).filter { $0.transportMode == .plane }.map(\.startDate))
+    private struct Flight: Equatable {
+        var start: Date
+        var end: Date
+        var recordedDistance: Double
+        /// Between the two stops, which is what the rule for photo trips looks at.
+        var distance: Double
+        var origin: String
+        var source: String
+        var review: String
+        var comment: String
+        var route: Data?
+
+        var isFromPhotos: Bool { origin == TimelineItemOrigin.photoInferred.rawValue }
+
+        var withoutImportLabel: Flight {
+            var flight = self
+            if origin == TimelineItemOrigin.imported.rawValue {
+                flight.origin = TimelineItemOrigin.sensor.rawValue
+            }
+            return flight
+        }
+
+        var isTouched: Bool {
+            source == TransportModeSource.user.rawValue || review == ReviewState.confirmed.rawValue
+                || !comment.isEmpty || route != nil
+        }
+
+        /// Written out here rather than asked of the importer, so a mistake there shows.
+        var isPossible: Bool {
+            let hours = end.timeIntervalSince(start) / 3_600
+            guard hours > 0, hours <= 24, distance >= 150_000 else { return false }
+            let speed = distance / 1_000 / hours
+            return speed > 200 && speed <= 1_000
+        }
+    }
+
+    private static func flights(in context: ModelContext) throws -> [UUID: Flight] {
+        let moves = try context.fetch(FetchDescriptor<MoveSegment>()).filter { $0.transportMode == .plane }
+        return Dictionary(
+            moves.map { move in
+                let distance: Double
+                if let start = move.startPlace, let end = move.endPlace {
+                    distance = LocationLogGeometry.distance(from: start.coordinate, to: end.coordinate)
+                } else {
+                    distance = move.distanceMeters
+                }
+                return (
+                    move.id,
+                    Flight(
+                        start: move.startDate, end: move.endDate, recordedDistance: move.distanceMeters,
+                        distance: distance, origin: move.originRaw, source: move.transportModeSource.rawValue,
+                        review: move.reviewState.rawValue, comment: move.comment ?? "",
+                        route: move.manualRouteCoordinatesData
+                    )
+                )
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
     }
 
     private struct Quality {

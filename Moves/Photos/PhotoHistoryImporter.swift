@@ -104,6 +104,8 @@ struct PhotoHistoryImporter {
         /// A flight is the exception: two photos far apart can only have one between them.
         var maximumFlightGap: TimeInterval = 24 * 60 * 60
         var minimumFlightDistance: CLLocationDistance = 150_000
+        /// Faster than any airliner door to door: one of the two photos is wrong.
+        var maximumFlightKilometersPerHour: Double = 1_000
         /// A stop the person removed is not rebuilt from photos taken this close to it.
         var removedStopMatchDistance: CLLocationDistance = 200
 
@@ -417,8 +419,13 @@ struct PhotoHistoryImporter {
         configuration: Configuration = Configuration()
     ) -> TransportMode? {
         guard gap >= 0, distance >= configuration.minimumMoveDistance else { return nil }
-        let isFast = gap <= 0 || distance / gap * 3.6 > configuration.planeSpeedKilometersPerHour
-        if isFast, distance < configuration.minimumFlightDistance { return nil }
+        guard gap > 0 else { return nil }
+        let kilometersPerHour = distance / gap * 3.6
+        guard kilometersPerHour <= configuration.maximumFlightKilometersPerHour else { return nil }
+        if kilometersPerHour > configuration.planeSpeedKilometersPerHour,
+           distance < configuration.minimumFlightDistance {
+            return nil
+        }
         let mode = transportMode(distance: distance, duration: gap, configuration: configuration)
         if gap <= configuration.maximumMoveGap { return mode }
         return mode == .plane && gap <= configuration.maximumFlightGap ? mode : nil

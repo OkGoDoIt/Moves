@@ -206,6 +206,7 @@ final class PhotoHistoryImporterTests: XCTestCase {
         XCTAssertNil(PhotoHistoryImporter.tripMode(distance: 400_000, gap: 12 * hour), "It could have been anything")
         XCTAssertEqual(PhotoHistoryImporter.tripMode(distance: 9_000_000, gap: 20 * hour), .plane)
         XCTAssertNil(PhotoHistoryImporter.tripMode(distance: 20_000, gap: 60), "Nobody does that")
+        XCTAssertNil(PhotoHistoryImporter.tripMode(distance: 12_585_000, gap: 56 * 60), "Nor that")
 
         // What an earlier version left behind is taken out, unless the person has touched it.
         let (context, _) = try makeContext()
