@@ -29,11 +29,14 @@ final class MapCoverageRendererTests: XCTestCase {
 
         let raster = try XCTUnwrap(MapCoverageRenderer.render(subset, request: request))
         let image = PixelReader(raster.image)
-        let screen = PixelReader.Point(x: (from + to) / 2, y: y)
+        let column = (from + to) / 2
+        // The line's centre can fall between two rows; start the profile at the brighter one.
+        let peakRow = (y - 2...y + 2).max { image.alpha(.init(x: column, y: $0)) < image.alpha(.init(x: column, y: $1)) } ?? y
+        let screen = PixelReader.Point(x: column, y: peakRow)
         XCTAssertGreaterThan(image.alpha(screen), 60)
-        XCTAssertEqual(image.alpha(.init(x: screen.x, y: y + 80)), 0)
+        XCTAssertEqual(image.alpha(.init(x: screen.x, y: peakRow + 80)), 0)
         // Soft falloff, no hard edge.
-        let profile = (0..<30).map { image.alpha(.init(x: screen.x, y: y + $0)) }
+        let profile = (0..<30).map { image.alpha(.init(x: screen.x, y: peakRow + $0)) }
         XCTAssertTrue(zip(profile, profile.dropFirst()).allSatisfy { $0 >= $1 })
         XCTAssertTrue(profile.contains { $0 > 5 && $0 < 40 })
     }
@@ -54,7 +57,7 @@ final class MapCoverageRendererTests: XCTestCase {
         let street = try halfWidthPoints(metersPerPoint: 1)
         let region = try halfWidthPoints(metersPerPoint: 500)
         XCTAssertEqual(street, region, accuracy: 3)
-        XCTAssertEqual(street, MapCoverageRenderer.heatSigmaPoints * 1.18, accuracy: 2)
+        XCTAssertEqual(street, MapCoverageRenderer.heatSigmaPoints * 1.18, accuracy: 3)
     }
 
     func testAFlightAcrossTheAntimeridianDoesNotCrossTheWholeMap() throws {
@@ -113,9 +116,9 @@ final class MapCoverageRendererTests: XCTestCase {
         XCTAssertLessThan(image.alpha(centerPixel), 8)
         XCTAssertEqual(image.alpha(.init(x: 4, y: 4)), veilAlpha)
 
-        // 180 m at 10 m a point is 18 points; the edge fades rather than stepping.
+        // The edge fades over the reveal radius rather than stepping.
         let pixelsPerPoint = scale * request.viewport.width / Double(request.viewSize.width)
-        let radiusPixels = Int(18 * pixelsPerPoint)
+        let radiusPixels = Int(MapCoverageRenderer.fogRadiusPoints(metersPerPoint: 10) * 1.2 * pixelsPerPoint)
         XCTAssertGreaterThan(radiusPixels, 5)
         let profile = (0..<(radiusPixels * 2)).map { image.alpha(.init(x: centerPixel.x + $0, y: centerPixel.y)) }
         XCTAssertTrue(zip(profile, profile.dropFirst()).allSatisfy { $0 <= $1 }, "\(profile)")
@@ -123,9 +126,74 @@ final class MapCoverageRendererTests: XCTestCase {
         XCTAssertGreaterThan(profile.last ?? 0, veilAlpha - 12, "Fogged again within two radii: \(profile)")
     }
 
+    func testDetailLevelsStepOncePerDoublingOfScale() {
+        XCTAssertEqual(MapCoverageRenderer.detailLevel(metersPerPoint: 1), 0)
+        XCTAssertEqual(MapCoverageRenderer.detailLevel(metersPerPoint: 16), 4)
+        // A level spans a factor of two, centred on its power of two.
+        XCTAssertEqual(MapCoverageRenderer.detailLevel(metersPerPoint: 16 * 1.4), 4)
+        XCTAssertEqual(MapCoverageRenderer.detailLevel(metersPerPoint: 16 / 1.4), 4)
+        XCTAssertEqual(MapCoverageRenderer.detailLevel(metersPerPoint: 16 * 1.45), 5)
+        XCTAssertEqual(MapCoverageRenderer.detailLevel(metersPerPoint: 0.5), -1)
+        XCTAssertEqual(MapCoverageRenderer.detailLevel(metersPerPoint: .nan), 0)
+        XCTAssertEqual(MapCoverageRenderer.levelMetersPerPoint(4), 16)
+    }
+
+    func testFogFootprintIsFixedOnTheGroundWithinALevelAndDoublesPerLevel() {
+        let r = MapCoverageRenderer.self
+        // Pinching within a level keeps the same ground footprint, so the picture only scales.
+        XCTAssertEqual(r.fogRadiusMeters(metersPerPoint: 50), r.fogRadiusMeters(metersPerPoint: 80))
+        XCTAssertEqual(r.fogRadiusMeters(metersPerPoint: 64), r.fogRevealPoints * 64)
+        // Zooming out a level merges detail: twice the ground.
+        XCTAssertEqual(r.fogRadiusMeters(metersPerPoint: 128), 2 * r.fogRadiusMeters(metersPerPoint: 64))
+        // Street zoom: tens of metres around the path, not a swath.
+        XCTAssertEqual(r.fogRadiusMeters(metersPerPoint: 0.75), r.fogMinimumRadiusMeters)
+        XCTAssertEqual(r.undatedRadiusMeters(metersPerPoint: 0.25), r.undatedMinimumRadiusMeters)
+        // On screen it stays near the target size at every zoom above the floor.
+        for scale in stride(from: 3.0, through: 200_000, by: 997) {
+            let points = r.fogRadiusPoints(metersPerPoint: scale)
+            XCTAssertGreaterThanOrEqual(points, r.fogRevealPoints / 2.squareRoot() - 0.01, "\(scale) m/pt")
+            XCTAssertLessThanOrEqual(points, r.fogRevealPoints * 2.squareRoot() + 0.01, "\(scale) m/pt")
+        }
+        // Neighbourhood, city, region, and world zooms are increasingly coarse on the ground.
+        let footprints = [5.0, 50, 750, 20_000].map { r.fogRadiusMeters(metersPerPoint: $0) }
+        XCTAssertEqual(footprints, footprints.sorted())
+        XCTAssertGreaterThan(footprints[2], 5_000, "A visited city is a clear blob at region zoom")
+    }
+
+    func testHeatKernelFollowsTheZoomLevelWithAStreetFloor() {
+        let r = MapCoverageRenderer.self
+        XCTAssertEqual(r.heatSigmaMeters(metersPerPoint: 0.3), r.heatMinimumSigmaMeters)
+        XCTAssertEqual(r.heatSigmaMeters(metersPerPoint: 600), r.heatSigmaPoints * 512)
+        XCTAssertEqual(r.heatSigmaMeters(metersPerPoint: 1_200), 2 * r.heatSigmaMeters(metersPerPoint: 600))
+        XCTAssertEqual(r.heatSigmaMeters(metersPerPoint: 450), r.heatSigmaMeters(metersPerPoint: 700))
+    }
+
+    func testImportedCellsKeepFineDetailZoomedInAndMergeZoomedOut() throws {
+        // Two imported cells 40 m apart: separate at street zoom, one area at city zoom.
+        let middle = MercatorPoint(center)
+        let gap = 40 / MKMetersPerMapPointAtLatitude(center.latitude)
+        let a = MercatorPoint(x: middle.x - gap / 2, y: middle.y), b = MercatorPoint(x: middle.x + gap / 2, y: middle.y)
+        let coverage = MapActivitySubset(tracks: [], stays: [], undatedCoverage: [MapActivityChunk(points: [a, b])])
+        func alphaBetween(metersPerPoint: Double) throws -> (between: UInt8, onCell: UInt8) {
+            let request = request(.fog, metersPerPoint: metersPerPoint)
+            let raster = try XCTUnwrap(MapCoverageRenderer.render(coverage, request: request))
+            let image = PixelReader(raster.image)
+            let scale = Double(raster.image.width) / raster.bounds.width
+            func pixel(_ p: MercatorPoint) -> PixelReader.Point {
+                .init(x: Int((p.x - raster.bounds.minX) * scale), y: Int((p.y - raster.bounds.minY) * scale))
+            }
+            return (image.alpha(pixel(middle)), image.alpha(pixel(a)))
+        }
+        let street = try alphaBetween(metersPerPoint: 0.25)
+        XCTAssertLessThan(street.onCell, 20)
+        XCTAssertGreaterThan(street.between, 100, "Cells stay distinct zoomed in")
+        let city = try alphaBetween(metersPerPoint: 30)
+        XCTAssertLessThan(city.between, 10, "Cells merge zoomed out")
+    }
+
     func testFogRevealHasAMinimumSizeOnScreenAndIgnoresFlights() throws {
         let request = request(.fog, metersPerPoint: 2_000)
-        XCTAssertEqual(MapCoverageRenderer.fogRadiusPoints(metersPerPoint: 2_000), MapCoverageRenderer.fogMinimumRadiusPoints)
+        XCTAssertGreaterThan(MapCoverageRenderer.fogRadiusPoints(metersPerPoint: 2_000), 12)
         let walk = horizontalTrack(across: request.viewport, at: 0.3)
         let flight = horizontalTrack(across: request.viewport, at: 0.7, mode: .plane)
         let raster = try XCTUnwrap(MapCoverageRenderer.render(
@@ -308,6 +376,165 @@ final class MapCoverageRendererTests: XCTestCase {
         let y = viewport.minY + viewport.height * fraction
         let points = stride(from: -1.0, through: 2.0, by: 1.0 / 3).map { MercatorPoint(x: viewport.minX + viewport.width * $0, y: y) }
         return MapActivityTrack(start: .distantPast, end: .distantFuture, mode: mode, chunks: MapActivityIndex.chunks(for: points))
+    }
+
+    // MARK: Routes at scale
+
+    func testSimplificationDropsWhatIsWithinHalfAPixelAndKeepsCorners() {
+        // A straight line with sub-pixel wobble, then a right-angle turn.
+        var points = (0...100).map { CGPoint(x: Double($0), y: $0 % 2 == 0 ? 0 : 0.3) }
+        points += (1...50).map { CGPoint(x: 100, y: Double($0)) }
+        let kept = MapCoverageRenderer.simplified(points, tolerance: 0.5)
+        XCTAssertLessThanOrEqual(kept.count, 4, "\(kept)")
+        XCTAssertEqual(kept.first, points.first)
+        XCTAssertEqual(kept.last, points.last)
+        XCTAssertTrue(kept.contains { abs($0.x - 100) < 0.01 && abs($0.y) < 0.5 }, "The corner survives")
+        // Every dropped point lies within tolerance of the simplified line.
+        let wobbly = (0...40).map { CGPoint(x: Double($0) * 3, y: sin(Double($0)) * 4) }
+        let reduced = MapCoverageRenderer.simplified(wobbly, tolerance: 0.5)
+        for point in wobbly {
+            let nearest = zip(reduced, reduced.dropFirst()).map { a, b in
+                MapActivitySubset.distance(from: MercatorPoint(x: point.x, y: point.y),
+                                           toSegment: MercatorPoint(x: a.x, y: a.y), MercatorPoint(x: b.x, y: b.y))
+            }.min() ?? .infinity
+            XCTAssertLessThanOrEqual(nearest, 0.5 + 1e-9)
+        }
+    }
+
+    func testRoutesBitmapDrawsTripsAndCullsOnesOffScreen() throws {
+        let request = MapCoverageRenderRequest(layer: .routes, viewport: request(.heat, metersPerPoint: 20).viewport, viewSize: viewSize, isDark: false)
+        let visible = horizontalTrack(across: request.viewport, at: 0.5, mode: .walking)
+        let farAway = MapActivityTrack(
+            start: .distantPast, end: .distantFuture, mode: .cycling,
+            chunks: MapActivityIndex.chunks(for: [MercatorPoint(x: request.viewport.minX - request.viewport.width * 5, y: request.viewport.midY),
+                                                  MercatorPoint(x: request.viewport.minX - request.viewport.width * 4, y: request.viewport.midY)])
+        )
+        let one = try XCTUnwrap(MapCoverageRenderer.render(MapActivitySubset(tracks: [visible], stays: [], undatedCoverage: []), request: request))
+        let both = try XCTUnwrap(MapCoverageRenderer.render(MapActivitySubset(tracks: [visible, farAway], stays: [], undatedCoverage: []), request: request))
+        XCTAssertEqual(one.image.dataProvider?.data as Data?, both.image.dataProvider?.data as Data?, "A trip outside the padded viewport changes nothing")
+        let image = PixelReader(one.image)
+        let scale = Double(one.image.width) / one.bounds.width
+        let row = Int((visible.chunks[0].points[0].y - one.bounds.minY) * scale)
+        XCTAssertGreaterThan(image.alpha(.init(x: one.image.width / 2, y: row)), 200)
+        XCTAssertEqual(image.alpha(.init(x: one.image.width / 2, y: row + 60)), 0)
+    }
+
+    func testTappingFindsTheNearestTripThroughTheIndex() {
+        func track(_ y: Double, _ mode: TransportMode) -> MapActivityTrack {
+            MapActivityTrack(start: .distantPast, end: .distantFuture, mode: mode,
+                             chunks: MapActivityIndex.chunks(for: (0...600).map { MercatorPoint(x: Double($0) * 10, y: y) }))
+        }
+        let near = track(100, .walking), far = track(400, .cycling)
+        let subset = MapActivitySubset(tracks: [far, near], stays: [], undatedCoverage: [])
+        XCTAssertEqual(subset.nearestTrack(to: MercatorPoint(x: 2_555, y: 130), within: 50)?.id, near.id)
+        XCTAssertEqual(subset.nearestTrack(to: MercatorPoint(x: 5_000, y: 380), within: 50)?.id, far.id)
+        XCTAssertNil(subset.nearestTrack(to: MercatorPoint(x: 2_555, y: 250), within: 50))
+        XCTAssertNil(subset.nearestTrack(to: MercatorPoint(x: 9_000, y: 100), within: 50), "Past the end of every trip")
+    }
+
+    func testTripsWithNoFixesAndAnImplausibleDurationAreNotDrawn() {
+        let rule = MapActivityIndexBuilder.isPlausibleTrip
+        // Photos two days apart joined by an invented trip.
+        XCTAssertFalse(rule(2 * 86_400, 300, 0, false))
+        XCTAssertFalse(rule(7 * 3_600, 50_000, 0, false))
+        // A crawl: 5 km in 8 hours with nothing recorded.
+        XCTAssertFalse(rule(5 * 3_600, 5_000, 0, false))
+        // Ordinary trips, with or without fixes.
+        XCTAssertTrue(rule(40 * 60, 12_000, 0, false))
+        XCTAssertTrue(rule(30 * 60, 1_500, 0, false))
+        XCTAssertTrue(rule(9 * 3_600, 600_000, 12, false), "A long trip with fixes is real")
+        XCTAssertTrue(rule(2 * 86_400, 300, 0, true), "Someone drew it by hand")
+    }
+
+    func testPhotoHistoryPointsDoNotShapeRoutes() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let move = MoveSegment(dedupeKey: "m", startDate: start, endDate: start.addingTimeInterval(1_800),
+                               transportMode: .walking, distanceMeters: 1_000, stepCount: nil)
+        context.insert(move)
+        let fixes: [(Double, Double, LocationSampleSource)] = [
+            (11.940, 108.440, .significantChange), (11.950, 108.470, .photoLibrary), (11.944, 108.444, .routeTracking)
+        ]
+        for (offset, fix) in fixes.enumerated() {
+            let sample = LocationSample(
+                location: CLLocation(coordinate: CLLocationCoordinate2D(latitude: fix.0, longitude: fix.1), altitude: 0,
+                                     horizontalAccuracy: 10, verticalAccuracy: -1, course: -1, speed: 1,
+                                     timestamp: start.addingTimeInterval(Double(offset) * 300)),
+                source: fix.2,
+                dedupeKey: "p\(offset)"
+            )
+            sample.moveSegment = move
+            context.insert(sample)
+        }
+        try context.save()
+        let index = try MapActivityIndexBuilder.build(container: container, undatedCoverageURL: missingURL())
+        let points = index.tracks.flatMap { $0.chunks.flatMap(\.points) }.map(\.coordinate)
+        XCTAssertFalse(points.contains { abs($0.latitude - 11.950) < 1e-6 }, "The photo point is not on the route")
+    }
+
+    func testSavedIndexRoundTripsAndKnowsWhichStoreStateItIsFor() throws {
+        var index = MapActivityIndex()
+        index.tracks = [MapActivityTrack(id: UUID(), start: Date(timeIntervalSince1970: 100), end: Date(timeIntervalSince1970: 200),
+                                         mode: .cycling, distanceMeters: 1_234,
+                                         chunks: MapActivityIndex.chunks(for: (0..<600).map { MercatorPoint(x: Double($0), y: Double($0) * 2) }))]
+        index.stays = [MapActivityStay(point: MercatorPoint(x: 5, y: 6), arrival: Date(timeIntervalSince1970: 10), departure: Date(timeIntervalSince1970: 20))]
+        index.excludedTripCount = 7
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("index-\(UUID().uuidString).bin")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try MapActivityIndexCache.save(index, signature: "store-a", to: url)
+        let loaded = try XCTUnwrap(MapActivityIndexCache.load(from: url))
+        XCTAssertEqual(loaded.signature, "store-a")
+        XCTAssertNotEqual(loaded.signature, "store-b", "A changed store reads as stale")
+        XCTAssertEqual(loaded.index.tracks.first?.id, index.tracks.first?.id)
+        XCTAssertEqual(loaded.index.tracks.first?.mode, .cycling)
+        XCTAssertEqual(loaded.index.tracks.first?.chunks.flatMap(\.points), index.tracks.first?.chunks.flatMap(\.points))
+        XCTAssertEqual(loaded.index.stays.first?.point, index.stays.first?.point)
+        XCTAssertEqual(loaded.index.excludedTripCount, 7)
+        // A truncated or foreign file is ignored rather than trusted.
+        try Data([1, 2, 3]).write(to: url)
+        XCTAssertNil(MapActivityIndexCache.load(from: url))
+        // An in-memory store has no file state to key on, so nothing is cached for it.
+        XCTAssertNil(MapActivityIndexCache.signature(for: try makeContainer()))
+    }
+
+    @MainActor
+    func testCachedBitmapsAreReusedOnlyForTheSameLevelAndIndex() throws {
+        let controller = MapCoverageController()
+        controller.adopt(MapActivityIndex())
+        let container = try makeContainer()
+        let base = request(.fog, metersPerPoint: 20)
+        func update(_ request: MapCoverageRenderRequest) -> MapCoverageController.Update {
+            .init(container: container, revision: 0, request: request, interval: DateInterval(start: .distantPast, end: .distantFuture), modes: nil, includeUndated: true)
+        }
+        let raster = try XCTUnwrap(MapCoverageRenderer.render(MapActivitySubset(tracks: [], stays: [], undatedCoverage: []), request: base))
+        controller.remember(raster, for: controller.rasterKey(for: update(base)))
+        XCTAssertNotNil(controller.cachedRaster(for: update(base)))
+        // Panning a little stays inside the padded bitmap.
+        var nudged = base
+        nudged.viewport = base.viewport.insetBy(dx: -0, dy: 0)
+        nudged.viewport.minX += base.viewport.width * 0.2
+        nudged.viewport.maxX += base.viewport.width * 0.2
+        XCTAssertNotNil(controller.cachedRaster(for: update(nudged)))
+        // Panning a screen and a half away does not.
+        var away = base
+        away.viewport.minX += base.viewport.width * 1.5
+        away.viewport.maxX += base.viewport.width * 1.5
+        XCTAssertNil(controller.cachedRaster(for: update(away)))
+        // Another zoom level, appearance, or layer does not.
+        XCTAssertNil(controller.cachedRaster(for: update(request(.fog, metersPerPoint: 80))))
+        var dark = base
+        dark.isDark = true
+        XCTAssertNil(controller.cachedRaster(for: update(dark)))
+        XCTAssertNil(controller.cachedRaster(for: update(request(.heat, metersPerPoint: 20))))
+        // A rebuilt index invalidates every bitmap.
+        controller.adopt(MapActivityIndex())
+        XCTAssertNil(controller.cachedRaster(for: update(base)))
+        // So does a memory warning.
+        controller.remember(raster, for: controller.rasterKey(for: update(base)))
+        XCTAssertNotNil(controller.cachedRaster(for: update(base)))
+        NotificationCenter.default.post(name: UIApplication.didReceiveMemoryWarningNotification, object: nil)
+        XCTAssertNil(controller.cachedRaster(for: update(base)))
     }
 
     private func makeContainer() throws -> ModelContainer {

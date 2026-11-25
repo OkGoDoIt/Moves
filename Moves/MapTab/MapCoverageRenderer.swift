@@ -69,21 +69,72 @@ struct MapRasterGeometry: Equatable, Sendable {
 /// Draws Heat (a blurred density surface) and Fog (a veil with feathered reveals) into bitmaps.
 /// Pure and synchronous; callers run it off the main thread.
 enum MapCoverageRenderer {
-    /// Heat kernel radius on screen, whatever the zoom: where a single trip fades out.
+    // Level of detail. Footprints are set on screen, then fixed on the ground for a whole zoom
+    // level: one level per doubling of metres per point, like map tile zoom levels. Zooming out
+    // a level doubles every footprint on the ground, so detail merges into coarser areas; zooming
+    // in halves it, so detail resolves. Within a level the bitmap only scales with the camera.
+
+    /// Heat kernel radius on screen at the middle of a level: where a single trip fades out.
     static let heatRadiusPoints = 20.0
     /// The Gaussian behind it; at 2.5 sigma a lone line is down to a few percent.
     static var heatSigmaPoints: Double { heatRadiusPoints / 2.5 }
-    /// Fog reveals this much ground around every route and stay…
-    static let fogGroundRadiusMeters = 180.0
-    /// …but never less than this on screen, so a day's outing shows at any zoom.
-    static let fogMinimumRadiusPoints = 12.0
-    static let fogMaximumRadiusPoints = 150.0
+    /// GPS can't place a trip closer than this, so street zoom never sharpens past it.
+    static let heatMinimumSigmaMeters = 6.0
+    /// Fog reveal radius on screen at the middle of a level…
+    static let fogRevealPoints = 18.0
+    /// …but never less than this on the ground around a route or stay.
+    static let fogMinimumRadiusMeters = 30.0
+    /// Imported Fog of World cells are about 10 m; zoomed all the way in they keep that detail.
+    static let undatedMinimumRadiusMeters = 7.0
     /// Feather as a share of the reveal radius.
     static let fogFeather = 0.42
+
+    /// The zoom level for a scale: log2 of metres per point, rounded. Higher is coarser.
+    static func detailLevel(metersPerPoint: Double) -> Int {
+        guard metersPerPoint.isFinite, metersPerPoint > 0 else { return 0 }
+        return min(max(Int(log2(metersPerPoint).rounded()), -8), 24)
+    }
+
+    /// Metres per point that every footprint in `level` is sized for.
+    static func levelMetersPerPoint(_ level: Int) -> Double {
+        exp2(Double(level))
+    }
+
+    static func fogRadiusMeters(metersPerPoint: Double) -> Double {
+        max(fogMinimumRadiusMeters, fogRevealPoints * levelMetersPerPoint(detailLevel(metersPerPoint: metersPerPoint)))
+    }
+
+    static func undatedRadiusMeters(metersPerPoint: Double) -> Double {
+        max(undatedMinimumRadiusMeters, fogRevealPoints * levelMetersPerPoint(detailLevel(metersPerPoint: metersPerPoint)))
+    }
+
+    static func heatSigmaMeters(metersPerPoint: Double) -> Double {
+        max(heatMinimumSigmaMeters, heatSigmaPoints * levelMetersPerPoint(detailLevel(metersPerPoint: metersPerPoint)))
+    }
+
+    /// The fog reveal radius on screen at this exact scale.
+    static func fogRadiusPoints(metersPerPoint: Double) -> Double {
+        guard metersPerPoint > 0, metersPerPoint.isFinite else { return fogRevealPoints }
+        return fogRadiusMeters(metersPerPoint: metersPerPoint) / metersPerPoint
+    }
+
+    static func heatSigmaPoints(metersPerPoint: Double) -> Double {
+        guard metersPerPoint > 0, metersPerPoint.isFinite else { return heatSigmaPoints }
+        return heatSigmaMeters(metersPerPoint: metersPerPoint) / metersPerPoint
+    }
+
+    /// Ground metres per screen point at the viewport's centre.
+    static func metersPerPoint(for request: MapCoverageRenderRequest) -> Double {
+        guard request.viewport.width > 0, request.viewSize.width > 0 else { return .nan }
+        let latitude = MercatorPoint(x: request.viewport.midX, y: request.viewport.midY).coordinate.latitude
+        return MKMetersPerMapPointAtLatitude(latitude) * request.viewport.width / Double(request.viewSize.width)
+    }
     /// Each side of the bitmap reaches this share of the viewport past the screen edge.
     static let paddingFraction = 0.5
-    static let maximumPixelsPerPoint = 0.75
-    static let pixelBudget = 700_000.0
+    /// Heat and Fog are blurred, so two points to a pixel is plenty; smaller bitmaps render and
+    /// reach the screen faster.
+    static let maximumPixelsPerPoint = 0.5
+    static let pixelBudget = 500_000.0
     /// Blur sigma, in pixels, beyond which resolution drops; a softer image doesn't need more.
     static let maximumSigmaPixels = 16.0
     /// One hour at a stay weighs as much as half a pass along a route, up to this many hours.
@@ -91,21 +142,24 @@ enum MapCoverageRenderer {
     static let stayPassesPerHour = 0.5
 
     static func veilColor(isDark: Bool) -> (red: Double, green: Double, blue: Double, alpha: Double) {
-        isDark ? (0.0, 0.01, 0.03, 0.66) : (0.13, 0.15, 0.19, 0.58)
+        // The dark map is already near black, so a dark veil barely shows there. In dark mode
+        // fog is a grey haze over unvisited ground instead, and the visited map stays crisp.
+        isDark ? (0.28, 0.30, 0.35, 0.66) : (0.13, 0.15, 0.19, 0.58)
     }
 
-    static func fogRadiusPoints(metersPerPoint: Double) -> Double {
-        guard metersPerPoint > 0, metersPerPoint.isFinite else { return fogMinimumRadiusPoints }
-        return min(max(fogGroundRadiusMeters / metersPerPoint, fogMinimumRadiusPoints), fogMaximumRadiusPoints)
-    }
-
-    static func geometry(for request: MapCoverageRenderRequest, blurSigmaPoints: Double) -> MapRasterGeometry? {
+    static func geometry(
+        for request: MapCoverageRenderRequest,
+        blurSigmaPoints: Double,
+        padding: Double = paddingFraction,
+        maximumPixelsPerPoint: Double = maximumPixelsPerPoint,
+        pixelBudget: Double = pixelBudget
+    ) -> MapRasterGeometry? {
         let viewport = request.viewport
         guard viewport.width > 0, viewport.height > 0,
               request.viewSize.width > 1, request.viewSize.height > 1 else { return nil }
         let pointsPerMapPoint = Double(request.viewSize.width) / viewport.width
-        let padX = viewport.width * paddingFraction
-        let padY = viewport.height * paddingFraction
+        let padX = viewport.width * padding
+        let padY = viewport.height * padding
         let bounds = viewport.insetBy(dx: -padX, dy: -padY)
         let widthPoints = bounds.width * pointsPerMapPoint
         let heightPoints = bounds.height * pointsPerMapPoint
@@ -136,17 +190,26 @@ enum MapCoverageRenderer {
         let bounds: MercatorRect
         switch request.layer {
         case .routes:
-            return nil
+            guard let geometry = geometry(
+                for: request,
+                blurSigmaPoints: 0.1,
+                padding: routePaddingFraction,
+                maximumPixelsPerPoint: routePixelsPerPoint,
+                pixelBudget: routePixelBudget
+            ) else { return nil }
+            image = try renderRoutes(subset, geometry: geometry, isDark: request.isDark)
+            bounds = geometry.bounds
         case .heat:
-            guard let geometry = geometry(for: request, blurSigmaPoints: heatSigmaPoints) else { return nil }
+            let sigma = heatSigmaPoints(metersPerPoint: metersPerPoint(for: request))
+            guard let geometry = geometry(for: request, blurSigmaPoints: sigma) else { return nil }
             image = try renderHeat(subset, geometry: geometry, isDark: request.isDark)
             bounds = geometry.bounds
         case .fog:
-            let probe = geometry(for: request, blurSigmaPoints: fogMinimumRadiusPoints * fogFeather)
-            guard let probe else { return nil }
-            let radius = fogRadiusPoints(metersPerPoint: probe.metersPerPoint)
-            guard let geometry = geometry(for: request, blurSigmaPoints: radius * fogFeather) else { return nil }
-            image = try renderFog(subset, geometry: geometry, radiusPoints: radius, isDark: request.isDark)
+            let scale = metersPerPoint(for: request)
+            let radius = fogRadiusPoints(metersPerPoint: scale)
+            let undatedRadius = undatedRadiusMeters(metersPerPoint: scale) / scale
+            guard let geometry = geometry(for: request, blurSigmaPoints: min(radius, undatedRadius) * fogFeather) else { return nil }
+            image = try renderFog(subset, geometry: geometry, radiusPoints: radius, undatedRadiusPoints: undatedRadius, isDark: request.isDark)
             bounds = geometry.bounds
         }
         guard let image else { return nil }
@@ -154,12 +217,166 @@ enum MapCoverageRenderer {
         return MapCoverageRaster(image: image, bounds: bounds, layer: request.layer, isDark: request.isDark, renderMilliseconds: elapsed)
     }
 
+    // MARK: Routes
+
+    /// Above this many trips (or stays) in a range, Routes draws them into a bitmap; below it,
+    /// each is a map polyline or annotation.
+    static let routeRasterThreshold = 150
+    static let routeLineWidthPoints = 3.0
+    static let routeCasingWidthPoints = 5.0
+    static let stayDotRadiusPoints = 3.5
+    /// Lines need more pixels than blurred layers to stay crisp, so less padding.
+    static let routePaddingFraction = 0.3
+    static let routePixelsPerPoint = 2.0
+    static let routePixelBudget = 2_400_000.0
+    /// Douglas–Peucker tolerance: about half a pixel.
+    static let routeSimplificationPixels = 0.5
+
+    /// Douglas–Peucker on pixel coordinates. Keeps the first and last point.
+    static func simplified(_ points: [CGPoint], tolerance: Double) -> [CGPoint] {
+        guard points.count > 2 else { return points }
+        var keep = [Bool](repeating: false, count: points.count)
+        keep[0] = true
+        keep[points.count - 1] = true
+        var stack: [(Int, Int)] = [(0, points.count - 1)]
+        let toleranceSquared = tolerance * tolerance
+        while let (first, last) = stack.popLast() {
+            guard last > first + 1 else { continue }
+            let a = points[first], b = points[last]
+            let dx = b.x - a.x, dy = b.y - a.y
+            let lengthSquared = dx * dx + dy * dy
+            var worst = -1.0
+            var worstIndex = first
+            for index in (first + 1)..<last {
+                let p = points[index]
+                let distanceSquared: Double
+                if lengthSquared == 0 {
+                    distanceSquared = (p.x - a.x) * (p.x - a.x) + (p.y - a.y) * (p.y - a.y)
+                } else {
+                    let cross = (p.x - a.x) * dy - (p.y - a.y) * dx
+                    distanceSquared = cross * cross / lengthSquared
+                }
+                if distanceSquared > worst {
+                    worst = distanceSquared
+                    worstIndex = index
+                }
+            }
+            if worst > toleranceSquared {
+                keep[worstIndex] = true
+                stack.append((first, worstIndex))
+                stack.append((worstIndex, last))
+            }
+        }
+        return points.indices.compactMap { keep[$0] ? points[$0] : nil }
+    }
+
+    /// Mode colours from the app's asset catalog, resolved for light or dark.
+    static func routeColor(_ mode: TransportMode, isDark: Bool) -> CGColor {
+        let traits = UITraitCollection(userInterfaceStyle: isDark ? .dark : .light)
+        let color = UIColor(named: MovesPalette.transportColorAssetName(for: mode)) ?? .systemBlue
+        return color.resolvedColor(with: traits).cgColor
+    }
+
+    static func placeColor(isDark: Bool) -> CGColor {
+        let traits = UITraitCollection(userInterfaceStyle: isDark ? .dark : .light)
+        return (UIColor(named: "MovesPlace") ?? .systemGreen).resolvedColor(with: traits).cgColor
+    }
+
+    /// Every trip in the range as a mode-coloured line with a casing, simplified for this zoom
+    /// and culled to the bitmap, then the stays as small dots.
+    static func renderRoutes(_ subset: MapActivitySubset, geometry: MapRasterGeometry, isDark: Bool) throws -> CGImage? {
+        let width = geometry.width, height = geometry.height
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        context.translateBy(x: 0, y: CGFloat(height))
+        context.scaleBy(x: 1, y: -1)
+        context.setLineCap(.round)
+        context.setLineJoin(.round)
+        let ppp = geometry.pixelsPerPoint
+        let cull = geometry.cullRect(marginPixels: routeCasingWidthPoints * ppp)
+        let step = max(routeSimplificationPixels, 0.5)
+
+        // Simplify once, draw twice: casings under every line, then the lines.
+        var paths: [(CGPath, TransportMode)] = []
+        paths.reserveCapacity(subset.tracks.count)
+        for track in subset.tracks {
+            try Task.checkCancellation()
+            for chunk in track.chunks {
+                for shift in MapRasterGeometry.worldOffsets(for: chunk.bounds, in: cull) {
+                    var pixels: [CGPoint] = []
+                    pixels.reserveCapacity(chunk.points.count)
+                    for (index, point) in chunk.points.enumerated() {
+                        let pixel = geometry.pixel(point, offset: shift)
+                        let next = CGPoint(x: pixel.x, y: pixel.y)
+                        if let last = pixels.last, index != chunk.points.count - 1 {
+                            let dx = next.x - last.x, dy = next.y - last.y
+                            if dx * dx + dy * dy < step * step { continue }
+                        }
+                        pixels.append(next)
+                    }
+                    let kept = simplified(pixels, tolerance: routeSimplificationPixels)
+                    guard kept.count > 1 else { continue }
+                    let path = CGMutablePath()
+                    path.addLines(between: kept)
+                    paths.append((path, track.mode))
+                }
+            }
+        }
+
+        context.setLineWidth(CGFloat(routeCasingWidthPoints * ppp))
+        context.setStrokeColor(isDark ? CGColor(gray: 0, alpha: 0.55) : CGColor(gray: 1, alpha: 0.85))
+        for (path, _) in paths {
+            context.addPath(path)
+            context.strokePath()
+        }
+        context.setLineWidth(CGFloat(routeLineWidthPoints * ppp))
+        let colors = Dictionary(uniqueKeysWithValues: TransportMode.allCases.map { ($0, routeColor($0, isDark: isDark)) })
+        for (path, mode) in paths {
+            context.setStrokeColor(colors[mode] ?? routeColor(.unknown, isDark: isDark))
+            context.addPath(path)
+            context.strokePath()
+        }
+
+        // Stays: one dot per few points, with a ring so they read on top of lines.
+        let radius = stayDotRadiusPoints * ppp
+        let grid = max(radius * 1.5, 1)
+        var drawn = Set<Int64>()
+        let ring = CGMutablePath(), dots = CGMutablePath()
+        for stay in subset.stays {
+            for shift in MapRasterGeometry.worldOffsets(for: stay.point, in: cull) {
+                let pixel = geometry.pixel(stay.point, offset: shift)
+                guard pixel.x > -radius, pixel.y > -radius, pixel.x < Double(width) + radius, pixel.y < Double(height) + radius else { continue }
+                let key = (Int64((pixel.x / grid).rounded(.down)) << 32) ^ Int64((pixel.y / grid).rounded(.down))
+                guard drawn.insert(key).inserted else { continue }
+                let outer = radius + 1.5 * ppp
+                ring.addEllipse(in: CGRect(x: pixel.x - outer, y: pixel.y - outer, width: outer * 2, height: outer * 2))
+                dots.addEllipse(in: CGRect(x: pixel.x - radius, y: pixel.y - radius, width: radius * 2, height: radius * 2))
+            }
+        }
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.addPath(ring)
+        context.fillPath()
+        context.setFillColor(placeColor(isDark: isDark))
+        context.addPath(dots)
+        context.fillPath()
+        return context.makeImage()
+    }
+
     // MARK: Heat
 
     /// Density in "passes": one trip along a line reads as about 1 at its centre.
     static func heatDensity(_ subset: MapActivitySubset, geometry: MapRasterGeometry) throws -> [Float] {
         let width = geometry.width, height = geometry.height
-        let sigma = heatSigmaPoints * geometry.pixelsPerPoint
+        // Accumulated and blurred at this bitmap's own resolution, with a kernel sized for the
+        // zoom level: coarser zoomed out, down to street detail zoomed in.
+        let sigma = heatSigmaPoints(metersPerPoint: geometry.metersPerPoint) * geometry.pixelsPerPoint
         var density = [Float](repeating: 0, count: width * height)
         let cull = geometry.cullRect(marginPixels: sigma * 3)
         let maxX = Double(width) - 1.001, maxY = Double(height) - 1.001
@@ -302,10 +519,8 @@ enum MapCoverageRenderer {
 
     // MARK: Fog
 
-    /// Reveal mask, 0 (fogged) to 1 (seen), feathered.
-    static func fogMask(_ subset: MapActivitySubset, geometry: MapRasterGeometry, radiusPoints: Double) throws -> [Float] {
-        let width = geometry.width, height = geometry.height
-        let radius = radiusPoints * geometry.pixelsPerPoint
+    /// A white-on-black 8-bit canvas, y down, for one reveal pass.
+    private static func revealCanvas(width: Int, height: Int, radius: Double) -> CGContext? {
         guard let context = CGContext(
             data: nil,
             width: width,
@@ -314,7 +529,7 @@ enum MapCoverageRenderer {
             bytesPerRow: 0,
             space: CGColorSpaceCreateDeviceGray(),
             bitmapInfo: CGImageAlphaInfo.none.rawValue
-        ) else { return [Float](repeating: 0, count: width * height) }
+        ) else { return nil }
         context.setFillColor(gray: 0, alpha: 1)
         context.fill(CGRect(x: 0, y: 0, width: width, height: height))
         context.translateBy(x: 0, y: CGFloat(height))
@@ -325,6 +540,36 @@ enum MapCoverageRenderer {
         context.setLineWidth(CGFloat(radius * 2))
         context.setLineCap(.round)
         context.setLineJoin(.round)
+        return context
+    }
+
+    /// The canvas as 0…1 floats, feathered by `sigma` pixels.
+    private static func feathered(_ context: CGContext, sigma: Double) -> [Float] {
+        let width = context.width, height = context.height
+        var mask = [Float](repeating: 0, count: width * height)
+        guard let data = context.data else { return mask }
+        var source = vImage_Buffer(data: data, height: vImagePixelCount(height), width: vImagePixelCount(width), rowBytes: context.bytesPerRow)
+        mask.withUnsafeMutableBytes { raw in
+            var destination = vImage_Buffer(data: raw.baseAddress, height: vImagePixelCount(height), width: vImagePixelCount(width), rowBytes: width * 4)
+            vImageConvert_Planar8toPlanarF(&source, &destination, 1, 0, vImage_Flags(kvImageNoFlags))
+        }
+        gaussianBlur(&mask, width: width, height: height, sigma: sigma)
+        return mask
+    }
+
+    /// Reveal mask, 0 (fogged) to 1 (seen), feathered. Routes and stays reveal `radiusPoints`;
+    /// imported coverage reveals `undatedRadiusPoints`, which can be finer when zoomed right in.
+    static func fogMask(
+        _ subset: MapActivitySubset,
+        geometry: MapRasterGeometry,
+        radiusPoints: Double,
+        undatedRadiusPoints: Double? = nil
+    ) throws -> [Float] {
+        let width = geometry.width, height = geometry.height
+        let radius = radiusPoints * geometry.pixelsPerPoint
+        guard let context = revealCanvas(width: width, height: height, radius: radius) else {
+            return [Float](repeating: 0, count: width * height)
+        }
 
         let cull = geometry.cullRect(marginPixels: radius * 2)
         // A wide round stroke hides any bend tighter than a fraction of its radius, and stroking
@@ -391,29 +636,60 @@ enum MapCoverageRenderer {
                 disc(stay.point, radius: radius * 1.1, offset: shift)
             }
         }
-        for chunk in subset.undatedCoverage {
-            try Task.checkCancellation()
-            for shift in MapRasterGeometry.worldOffsets(for: chunk.bounds, in: cull) {
-                for point in chunk.points {
-                    disc(point, radius: radius, offset: shift)
+        let undatedRadius = (undatedRadiusPoints ?? radiusPoints) * geometry.pixelsPerPoint
+        let undatedCull = geometry.cullRect(marginPixels: undatedRadius * 2)
+        let visibleUndated = subset.undatedCoverage.filter { !MapRasterGeometry.worldOffsets(for: $0.bounds, in: undatedCull).isEmpty }
+        let separateUndated = !visibleUndated.isEmpty && abs(undatedRadius - radius) > 0.5
+        if !separateUndated {
+            for chunk in visibleUndated {
+                try Task.checkCancellation()
+                for shift in MapRasterGeometry.worldOffsets(for: chunk.bounds, in: cull) {
+                    for point in chunk.points {
+                        disc(point, radius: radius, offset: shift)
+                    }
                 }
             }
         }
         context.fillPath()
+        var mask = feathered(context, sigma: radius * fogFeather)
+        guard separateUndated, let cells = revealCanvas(width: width, height: height, radius: undatedRadius) else { return mask }
 
-        guard let data = context.data else { return [Float](repeating: 0, count: width * height) }
-        var source = vImage_Buffer(data: data, height: vImagePixelCount(height), width: vImagePixelCount(width), rowBytes: context.bytesPerRow)
-        var mask = [Float](repeating: 0, count: width * height)
-        mask.withUnsafeMutableBytes { raw in
-            var destination = vImage_Buffer(data: raw.baseAddress, height: vImagePixelCount(height), width: vImagePixelCount(width), rowBytes: width * 4)
-            vImageConvert_Planar8toPlanarF(&source, &destination, 1, 0, vImage_Flags(kvImageNoFlags))
+        // Imported cells at their own, finer footprint, merged by the same half-radius grid.
+        let cellGrid = max(undatedRadius / 2, 1)
+        var cellsDrawn = Set<Int64>()
+        var pendingCells = 0
+        for chunk in visibleUndated {
+            try Task.checkCancellation()
+            for shift in MapRasterGeometry.worldOffsets(for: chunk.bounds, in: undatedCull) {
+                for point in chunk.points {
+                    let pixel = geometry.pixel(point, offset: shift)
+                    let r = undatedRadius
+                    guard pixel.x > -r, pixel.y > -r, pixel.x < Double(width) + r, pixel.y < Double(height) + r else { continue }
+                    let key = (Int64((pixel.x / cellGrid).rounded(.down)) << 32) ^ Int64((pixel.y / cellGrid).rounded(.down))
+                    guard cellsDrawn.insert(key).inserted else { continue }
+                    cells.addEllipse(in: CGRect(x: pixel.x - r, y: pixel.y - r, width: r * 2, height: r * 2))
+                    pendingCells += 1
+                    if pendingCells >= 128 {
+                        cells.fillPath()
+                        pendingCells = 0
+                    }
+                }
+            }
         }
-        gaussianBlur(&mask, width: width, height: height, sigma: radius * fogFeather)
+        cells.fillPath()
+        let cellMask = feathered(cells, sigma: undatedRadius * fogFeather)
+        vDSP_vmax(mask, 1, cellMask, 1, &mask, 1, vDSP_Length(mask.count))
         return mask
     }
 
-    static func renderFog(_ subset: MapActivitySubset, geometry: MapRasterGeometry, radiusPoints: Double, isDark: Bool) throws -> CGImage? {
-        let mask = try fogMask(subset, geometry: geometry, radiusPoints: radiusPoints)
+    static func renderFog(
+        _ subset: MapActivitySubset,
+        geometry: MapRasterGeometry,
+        radiusPoints: Double,
+        undatedRadiusPoints: Double? = nil,
+        isDark: Bool
+    ) throws -> CGImage? {
+        let mask = try fogMask(subset, geometry: geometry, radiusPoints: radiusPoints, undatedRadiusPoints: undatedRadiusPoints)
         try Task.checkCancellation()
         let veil = veilColor(isDark: isDark)
         // 256 veil strengths, from full fog to fully revealed.
@@ -517,8 +793,13 @@ enum MapCoverageRenderer {
 @MainActor
 final class MapCoverageController {
     private(set) var raster: MapCoverageRaster?
+    /// Counts finished bitmaps, so views can react to each one.
+    private(set) var rasterGeneration = 0
     private(set) var latestActivity: CLLocationCoordinate2D?
     private(set) var loadFailed = false
+
+    /// Counts index replacements, so views can read counts again.
+    private(set) var indexGeneration = 0
 
     @ObservationIgnored private var index: MapActivityIndex?
     @ObservationIgnored private var builtRevision: Int?
@@ -528,14 +809,35 @@ final class MapCoverageController {
     @ObservationIgnored private var subsetCache: (key: SubsetKey, subset: MapActivitySubset)?
     @ObservationIgnored private var lastUpdate: Update?
     @ObservationIgnored private var hasCheckedVisitedCells = false
+    @ObservationIgnored private var hasTriedSavedIndex = false
+    @ObservationIgnored private var lastBuildFinished: Date?
+    @ObservationIgnored private var deferredBuild: Task<Void, Never>?
+    @ObservationIgnored private var countsCache: (key: SubsetKey, counts: (tracks: Int, stays: Int))?
+    @ObservationIgnored private var rasterCache: [(key: RasterKey, raster: MapCoverageRaster)] = []
+    @ObservationIgnored private var memoryWarning: NSObjectProtocol?
     nonisolated private static let log = Logger(subsystem: MovesAppIdentity.bundleIdentifier, category: "MapCoverage")
+    /// Finished bitmaps kept for panning back or switching layers back, by total size.
+    static let rasterCacheBytes = 48 * 1_048_576
 
     private struct SubsetKey: Equatable {
-        let revision: Int
+        let generation: Int
         let interval: DateInterval
         let modes: Set<TransportMode>?
         let includeUndated: Bool
+    }
+
+    /// What makes two bitmaps interchangeable: everything but the exact viewport, which only
+    /// has to fall inside a cached bitmap's padded bounds.
+    struct RasterKey: Hashable {
         let layer: MapCoverageLayer
+        let interval: DateInterval
+        let modes: Set<TransportMode>?
+        let includeUndated: Bool
+        let level: Int
+        let isDark: Bool
+        let indexGeneration: Int
+        let viewWidth: Double
+        let viewHeight: Double
     }
 
     struct Update {
@@ -547,13 +849,75 @@ final class MapCoverageController {
         var includeUndated: Bool
     }
 
-    /// Starts a render for the current camera and range after `delay`, reusing the index unless
-    /// the store changed. A stale index draws while a fresh one builds.
-    func update(_ update: Update, delay: Duration = .milliseconds(80)) {
+    init() {
+        memoryWarning = NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.rasterCache.removeAll() }
+        }
+    }
+
+    func rasterKey(for update: Update) -> RasterKey {
+        RasterKey(
+            layer: update.request.layer,
+            interval: update.interval,
+            modes: update.modes,
+            includeUndated: update.includeUndated,
+            level: MapCoverageRenderer.detailLevel(metersPerPoint: MapCoverageRenderer.metersPerPoint(for: update.request)),
+            isDark: update.request.isDark,
+            indexGeneration: indexGeneration,
+            viewWidth: Double(update.request.viewSize.width),
+            viewHeight: Double(update.request.viewSize.height)
+        )
+    }
+
+    /// A finished bitmap for this layer, range, modes, zoom level, and appearance that already
+    /// covers the viewport, if one is cached.
+    func cachedRaster(for update: Update) -> MapCoverageRaster? {
+        guard index != nil else { return nil }
+        let key = rasterKey(for: update)
+        let viewport = update.request.viewport
+        guard let position = rasterCache.lastIndex(where: { entry in
+            entry.key == key
+                && entry.raster.bounds.minX <= viewport.minX && entry.raster.bounds.maxX >= viewport.maxX
+                && entry.raster.bounds.minY <= viewport.minY && entry.raster.bounds.maxY >= viewport.maxY
+        }) else { return nil }
+        let entry = rasterCache.remove(at: position)
+        rasterCache.append(entry)
+        return entry.raster
+    }
+
+    func remember(_ raster: MapCoverageRaster, for key: RasterKey) {
+        rasterCache.append((key, raster))
+        var bytes = rasterCache.reduce(0) { $0 + $1.raster.image.bytesPerRow * $1.raster.image.height }
+        while bytes > Self.rasterCacheBytes, rasterCache.count > 1 {
+            let dropped = rasterCache.removeFirst()
+            bytes -= dropped.raster.image.bytesPerRow * dropped.raster.image.height
+        }
+    }
+
+    /// Shows a cached bitmap at once when one covers the camera; otherwise starts a render after
+    /// `delay`, reusing the index unless the store changed. A stale index draws while a fresh one
+    /// builds.
+    func update(_ update: Update, delay: Duration = .milliseconds(40)) {
         lastUpdate = update
         wantedRevision = update.revision
         renderTask?.cancel()
-        guard update.request.layer != .routes else { return }
+        if let cached = cachedRaster(for: update) {
+            if raster?.image !== cached.image {
+                raster = cached
+                rasterGeneration += 1
+                MapPerformanceProbe.shared.layerDrawn(update.request.layer)
+            }
+            // A store change alone doesn't redraw: if the rebuilt index differs, adopting it
+            // clears this cache and asks for a fresh bitmap.
+            if builtRevision != wantedRevision, indexTask == nil, deferredBuild == nil {
+                Task { [weak self] in _ = await self?.currentIndex(container: update.container) }
+            }
+            return
+        }
         renderTask = Task { [weak self] in
             try? await Task.sleep(for: delay)
             guard !Task.isCancelled, let self else { return }
@@ -561,23 +925,58 @@ final class MapCoverageController {
         }
     }
 
+    /// The trips and stays for a range and mode set, filtered once and kept while it repeats.
+    private func subset(for update: Update, in index: MapActivityIndex) -> MapActivitySubset {
+        let key = SubsetKey(generation: indexGeneration, interval: update.interval, modes: update.modes, includeUndated: update.includeUndated)
+        if let subsetCache, subsetCache.key == key { return subsetCache.subset }
+        let subset = index.subset(interval: update.interval, modes: update.modes, includeUndated: update.includeUndated)
+        subsetCache = (key, subset)
+        return subset
+    }
+
+    /// How many trips and stays a range draws, once the index is ready.
+    func counts(interval: DateInterval, modes: Set<TransportMode>?) -> (tracks: Int, stays: Int)? {
+        guard let index else { return nil }
+        let key = SubsetKey(generation: indexGeneration, interval: interval, modes: modes, includeUndated: false)
+        if let countsCache, countsCache.key == key { return countsCache.counts }
+        var tracks = 0, stays = 0
+        for track in index.tracks where track.start < interval.end && track.end > interval.start && (modes?.contains(track.mode) ?? true) {
+            tracks += 1
+        }
+        for stay in index.stays where stay.arrival < interval.end && stay.departure > interval.start {
+            stays += 1
+        }
+        countsCache = (key, (tracks, stays))
+        return (tracks, stays)
+    }
+
+    /// A region framing everything a range draws, from the index's chunk bounds.
+    func region(interval: DateInterval, modes: Set<TransportMode>?) -> MKCoordinateRegion? {
+        guard let index else { return nil }
+        let subset = index.subset(interval: interval, modes: modes, includeUndated: false)
+        var coordinates: [CLLocationCoordinate2D] = []
+        for track in subset.tracks {
+            for chunk in track.chunks where !chunk.bounds.isEmpty {
+                coordinates.append(MercatorPoint(x: chunk.bounds.minX, y: chunk.bounds.minY).coordinate)
+                coordinates.append(MercatorPoint(x: chunk.bounds.maxX, y: chunk.bounds.maxY).coordinate)
+            }
+        }
+        coordinates += subset.stays.map(\.point.coordinate)
+        guard !coordinates.isEmpty else { return nil }
+        return MapRegionFactory.region(for: coordinates)
+    }
+
+    /// The trip drawn closest to `point` in the current range, within `tolerance` map points.
+    func track(near point: MercatorPoint, tolerance: Double) -> MapActivityTrack? {
+        guard let index, let update = lastUpdate else { return nil }
+        return subset(for: update, in: index).nearestTrack(to: point, within: tolerance)
+    }
+
     private func render(_ update: Update) async {
         guard let index = await currentIndex(container: update.container) else { return }
         guard !Task.isCancelled else { return }
-        let key = SubsetKey(
-            revision: builtRevision ?? -1,
-            interval: update.interval,
-            modes: update.modes,
-            includeUndated: update.includeUndated,
-            layer: update.request.layer
-        )
-        let subset: MapActivitySubset
-        if let subsetCache, subsetCache.key == key {
-            subset = subsetCache.subset
-        } else {
-            subset = index.subset(interval: update.interval, modes: update.modes, includeUndated: update.includeUndated)
-            subsetCache = (key, subset)
-        }
+        let subset = subset(for: update, in: index)
+        let key = rasterKey(for: update)
         let request = update.request
         let work = Task.detached(priority: .userInitiated) {
             try MapCoverageRenderer.render(subset, request: request)
@@ -589,19 +988,77 @@ final class MapCoverageController {
         }
         guard !Task.isCancelled, let result else { return }
         raster = result
+        rasterGeneration += 1
+        MapPerformanceProbe.shared.layerDrawn(request.layer)
+        if key.indexGeneration == indexGeneration { remember(result, for: key) }
         Self.log.notice("\(request.layer.rawValue, privacy: .public) render \(result.renderMilliseconds, format: .fixed(precision: 1), privacy: .public) ms, \(subset.tracks.count, privacy: .public) tracks, \(subset.stays.count, privacy: .public) stays")
     }
 
-    /// The index for the newest revision if it is ready; otherwise the last one while a rebuild
-    /// runs, which re-renders when it lands. Waits only when there is none at all.
+    /// Makes sure an index is available before the tab decides how to draw a range: the saved
+    /// copy if there is one, otherwise the first build. Off the main thread either way.
+    func prepare(container: ModelContainer) async {
+        _ = await currentIndex(container: container)
+    }
+
+    /// The index for the newest revision if it is ready; otherwise the saved copy from the last
+    /// launch, or the last one built, while a rebuild runs and re-renders when it lands.
     private func currentIndex(container: ModelContainer) async -> MapActivityIndex? {
+        if index == nil, !hasTriedSavedIndex {
+            hasTriedSavedIndex = true
+            await loadSavedIndex(container: container)
+        }
         if builtRevision != wantedRevision, indexTask == nil {
-            startIndexBuild(container: container)
+            if index != nil, let finished = lastBuildFinished, Date().timeIntervalSince(finished) < Self.minimumRebuildInterval {
+                scheduleDeferredBuild(container: container, after: Self.minimumRebuildInterval - Date().timeIntervalSince(finished))
+            } else {
+                startIndexBuild(container: container)
+            }
         }
         if let index { return index }
         guard let indexTask else { return nil }
         _ = try? await indexTask.value
         return index
+    }
+
+    private func loadSavedIndex(container: ModelContainer) async {
+        let started = DispatchTime.now().uptimeNanoseconds
+        guard let signature = MapActivityIndexCache.signature(for: container) else { return }
+        let loaded = await Task.detached(priority: .userInitiated) { () -> (index: MapActivityIndex, isFresh: Bool)? in
+            guard var saved = MapActivityIndexCache.load() else { return nil }
+            saved.index.undatedCoverage = (try? MapActivityIndexBuilder.undatedCoverageChunks(from: FogCoverageArchive.load())) ?? []
+            saved.index.fingerprint = saved.index.computedFingerprint()
+            return (saved.index, saved.signature == signature)
+        }.value
+        guard let loaded, index == nil else { return }
+        adopt(loaded.index)
+        if loaded.isFresh { builtRevision = wantedRevision }
+        let elapsed = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
+        Self.log.notice("saved index loaded in \(elapsed, format: .fixed(precision: 1), privacy: .public) ms, \(loaded.isFresh ? "fresh" : "stale", privacy: .public): \(loaded.index.tracks.count, privacy: .public) tracks, \(loaded.index.stays.count, privacy: .public) stays")
+    }
+
+    func adopt(_ built: MapActivityIndex) {
+        index = built
+        indexGeneration += 1
+        latestActivity = built.latestActivity
+        loadFailed = false
+        subsetCache = nil
+        rasterCache.removeAll()
+    }
+
+    /// Saves to trips arrive in bursts while background work runs; rebuild at most this often
+    /// while an index is already showing.
+    static let minimumRebuildInterval: TimeInterval = 30
+
+    private func scheduleDeferredBuild(container: ModelContainer, after delay: TimeInterval) {
+        guard deferredBuild == nil else { return }
+        deferredBuild = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(max(delay, 0.1)))
+            guard let self, !Task.isCancelled else { return }
+            self.deferredBuild = nil
+            if self.builtRevision != self.wantedRevision, self.indexTask == nil {
+                self.startIndexBuild(container: container)
+            }
+        }
     }
 
     private func startIndexBuild(container: ModelContainer) {
@@ -612,12 +1069,16 @@ final class MapCoverageController {
             hasCheckedVisitedCells = true
             Task { try? await VisitedCellStore.ensureBuilt(container: container) }
         }
+        let signature = MapActivityIndexCache.signature(for: container)
         let task = Task.detached(priority: .userInitiated) { () throws -> MapActivityIndex in
             await TimelineSchemaUpgrader.waitUntilFinished()
             let started = DispatchTime.now().uptimeNanoseconds
             let built = try MapActivityIndexBuilder.build(container: container)
             let elapsed = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
-            Self.log.notice("index built in \(elapsed, format: .fixed(precision: 1), privacy: .public) ms: \(built.tracks.count, privacy: .public) tracks, \(built.stays.count, privacy: .public) stays, \(built.pointCount, privacy: .public) points")
+            Self.log.notice("index built in \(elapsed, format: .fixed(precision: 1), privacy: .public) ms: \(built.tracks.count, privacy: .public) tracks, \(built.stays.count, privacy: .public) stays, \(built.pointCount, privacy: .public) points, \(built.excludedTripCount, privacy: .public) implausible trips left out")
+            if let signature {
+                try? MapActivityIndexCache.save(built, signature: signature)
+            }
             return built
         }
         indexTask = task
@@ -627,20 +1088,24 @@ final class MapCoverageController {
             self.indexTask = nil
             switch result {
             case .success(let built):
+                self.lastBuildFinished = Date()
                 let hadIndex = self.index != nil
-                self.index = built
+                let unchanged = hadIndex && self.index?.fingerprint == built.fingerprint
+                if !unchanged {
+                    // A rebuild with the same trips, stays, and geometry keeps the current
+                    // index, bitmaps, and caches; nothing on screen would change.
+                    self.adopt(built)
+                }
                 self.builtRevision = revision
-                self.latestActivity = built.latestActivity
-                self.loadFailed = false
-                self.subsetCache = nil
+                if hadIndex, !unchanged, let last = self.lastUpdate {
+                    self.update(last, delay: .zero)
+                }
                 if revision != self.wantedRevision {
                     // The store moved on while this built. Catch up after a breather.
                     try? await Task.sleep(for: .seconds(2))
                     if self.indexTask == nil, let last = self.lastUpdate {
                         self.startIndexBuild(container: last.container)
                     }
-                } else if hadIndex, let last = self.lastUpdate {
-                    self.update(last, delay: .zero)
                 }
             case .failure(let error):
                 Self.log.error("index build failed: \(String(describing: error), privacy: .public)")
@@ -650,16 +1115,62 @@ final class MapCoverageController {
     }
 }
 
+/// The camera as it moves. Only the bitmap overlay reads it, so a pan redraws the overlay's
+/// position and nothing else on the Map tab.
+@Observable
+@MainActor
+final class MapCameraState {
+    var rect: MercatorRect?
+}
+
 /// Places the current bitmap over the map so it pans and zooms with the camera. Fog keeps its
 /// veil past the bitmap's edges, and a soft clearing keeps the location dot readable.
 struct MapCoverageOverlay: View {
+    /// Read here rather than by the tab, so a new bitmap redraws only this overlay.
+    let controller: MapCoverageController
+    let layer: MapCoverageLayer
+    let cameraState: MapCameraState
+    let userLocation: CLLocationCoordinate2D?
+    let isDark: Bool
+    /// A trip drawn above the Routes bitmap, as selected.
+    var highlight: MapActivityTrack?
+
+    var body: some View {
+        MapCoverageOverlayContent(
+            raster: controller.raster,
+            layer: layer,
+            camera: cameraState.rect,
+            userLocation: userLocation,
+            isDark: isDark,
+            highlight: highlight
+        )
+    }
+}
+
+private struct MapCoverageOverlayContent: View {
     let raster: MapCoverageRaster?
     let layer: MapCoverageLayer
     let camera: MercatorRect?
     let userLocation: CLLocationCoordinate2D?
     let isDark: Bool
+    let highlight: MapActivityTrack?
 
     private static let clearingRadius: CGFloat = 15
+
+    private func highlightPath(in size: CGSize) -> Path? {
+        guard let highlight, let camera, camera.width > 0, camera.height > 0 else { return nil }
+        let sx = size.width / camera.width, sy = size.height / camera.height
+        let shift = 0.0
+        var path = Path()
+        for chunk in highlight.chunks {
+            guard let first = chunk.points.first else { continue }
+            path.move(to: CGPoint(x: (first.x + shift - camera.minX) * sx, y: (first.y - camera.minY) * sy))
+            for point in chunk.points.dropFirst() {
+                path.addLine(to: CGPoint(x: (point.x + shift - camera.minX) * sx, y: (point.y - camera.minY) * sy))
+            }
+        }
+        return path
+    }
 
     var body: some View {
         GeometryReader { proxy in
@@ -683,6 +1194,10 @@ struct MapCoverageOverlay: View {
                         .interpolation(.medium)
                         .frame(width: frame.width, height: frame.height)
                         .offset(x: frame.minX, y: frame.minY)
+                }
+                if let highlight, let path = highlightPath(in: size) {
+                    path.stroke(Color.white, style: StrokeStyle(lineWidth: 9, lineCap: .round, lineJoin: .round))
+                    path.stroke(MovesPalette.transport(highlight.mode), style: StrokeStyle(lineWidth: 5.5, lineCap: .round, lineJoin: .round))
                 }
                 if let dot = userPoint(in: size) {
                     // Just the dot's own footprint, so it reads above the layer without a ring.

@@ -19,9 +19,12 @@ struct MapTabView: View {
     @State private var layer: MapCoverageLayer = MapTabView.initialLayer()
     @State private var enabledModes: Set<TransportMode> = []
     @State private var camera: MapCameraPosition = .region(MapCameraDefaults.launchRegion)
+    /// The camera once it settles. Nothing in `body` reads the camera while it moves.
     @State private var visibleRegion = MapCameraDefaults.launchRegion
-    /// The camera as it moves, for keeping Heat and Fog pinned to the map.
-    @State private var cameraRect: MercatorRect?
+    /// The camera as it moves, read only by the bitmap overlay.
+    @State private var cameraState = MapCameraState()
+    /// The trip picked on the Routes bitmap, found through the activity index.
+    @State private var selectedTrack: MapActivityTrack?
     /// The camera once it settles, which is when Heat and Fog redraw.
     @State private var restingCameraRect: MercatorRect?
     @State private var mapSize: CGSize = .zero
@@ -44,9 +47,44 @@ struct MapTabView: View {
         Publishers.Merge3(NotificationCenter.default.publisher(for: .movesLocationSamplesDidChange),
                           NotificationCenter.default.publisher(for: ModelContext.didSave),
                           NotificationCenter.default.publisher(for: .NSPersistentStoreRemoteChange))
+            .filter(MapTabView.changesWhatTheMapDraws)
             .debounce(for: .milliseconds(500), scheduler: RunLoop.main)
             .share()
             .eraseToAnyPublisher()
+
+    /// Entities the activity index is built from.
+    nonisolated static let drawnEntityNames: Set<String> = ["MoveSegment", "VisitPlace", "LocationSample"]
+
+    /// Whether a save or remote change touches trips, stays, or fixes. Other saves (share-card
+    /// caches, visited cells, settings) would otherwise rebuild the index every few seconds.
+    nonisolated static func changesWhatTheMapDraws(_ notification: Notification) -> Bool {
+        if notification.name == ModelContext.didSave {
+            guard let info = notification.userInfo else { return true }
+            let keys = [
+                ModelContext.NotificationKey.insertedIdentifiers.rawValue,
+                ModelContext.NotificationKey.updatedIdentifiers.rawValue,
+                ModelContext.NotificationKey.deletedIdentifiers.rawValue
+            ]
+            var sawIdentifiers = false
+            for key in keys {
+                guard let identifiers = info[key] as? [PersistentIdentifier] else { continue }
+                sawIdentifiers = true
+                if identifiers.contains(where: { drawnEntityNames.contains($0.entityName) }) {
+                    #if DEBUG
+                    let names = Dictionary(grouping: identifiers, by: \.entityName).mapValues(\.count)
+                    MapPerformanceProbe.log.notice("store change \(key, privacy: .public): \(names.description, privacy: .public)")
+                    #endif
+                    return true
+                }
+            }
+            return !sawIdentifiers
+        }
+        if notification.name == .NSPersistentStoreRemoteChange,
+           let url = notification.userInfo?[NSPersistentStoreURLKey] as? URL {
+            return !url.lastPathComponent.hasPrefix("ShareMapCache")
+        }
+        return true
+    }
 
     /// Where All Time starts.
     private var firstRecordedDate: Date? {
@@ -69,10 +107,59 @@ struct MapTabView: View {
     }
 
     private var selectedRoute: MapDisplayedRoute? {
-        displayedRoutes.first { $0.id == selectedRouteID }
+        if routesAsBitmap {
+            return selectedTrack.map(Self.displayedRoute(from:))
+        }
+        return displayedRoutes.first { $0.id == selectedRouteID }
+    }
+
+    /// With hundreds of trips or stays in the range, Routes draws them into one bitmap instead of
+    /// a polyline or annotation each; only the selected trip is drawn on its own.
+    private var routesAsBitmap: Bool {
+        layer == .routes && rangeIsLarge
+    }
+
+    /// The mode filter Heat, Fog, and the Routes bitmap draw with; nil is every mode.
+    private var modeFilter: Set<TransportMode>? {
+        let present = Set(loader.presentModes)
+        return enabledModes.isEmpty || present.isSubset(of: enabledModes) ? nil : enabledModes
+    }
+
+    /// More trips or stays in the range than polylines and annotations can carry smoothly.
+    /// Counted from the activity index once it is ready, from the last load before that.
+    private var rangeIsLarge: Bool {
+        let threshold = MapCoverageRenderer.routeRasterThreshold
+        _ = coverage.indexGeneration
+        if let counts = coverage.counts(interval: selection.focus, modes: modeFilter) {
+            return counts.tracks > threshold || counts.stays > threshold
+        }
+        return displayedRoutes.count > threshold || loader.visits.count > threshold
+    }
+
+    private static func displayedRoute(from track: MapActivityTrack) -> MapDisplayedRoute {
+        let coordinates = track.chunks.enumerated().flatMap { offset, chunk in
+            (offset == 0 ? chunk.points : Array(chunk.points.dropFirst())).map(\.coordinate)
+        }
+        return MapDisplayedRoute(
+            id: track.id,
+            startDate: track.start,
+            endDate: track.end,
+            distanceMeters: track.distanceMeters,
+            rendered: RenderedRoute(
+                id: track.id.uuidString,
+                coordinates: coordinates,
+                usesHighAccuracyRouteTracking: false,
+                usesHealthWorkoutRoute: false,
+                transportMode: track.mode,
+                speedFractions: nil,
+                confidence: .medium,
+                origin: .sensor
+            )
+        )
     }
 
     var body: some View {
+        let _ = MapPerformanceProbe.shared.bodyEvaluated()
         ZStack(alignment: .top) {
             map
                 .ignoresSafeArea()
@@ -109,24 +196,37 @@ struct MapTabView: View {
             // so a drag only loads once it pauses.
             try? await Task.sleep(for: .milliseconds(120))
             guard !Task.isCancelled else { return }
+            // Know the range's size before choosing between polylines and the bitmap.
+            await coverage.prepare(container: modelContext.container)
+            guard !Task.isCancelled else { return }
+            let started = CACurrentMediaTime()
             await loader.load(
                 selection: selection,
                 modelContext: modelContext,
                 cameraRegion: visibleRegion,
+                includeRoutes: !rangeIsLarge,
                 calendar: calendar
             )
+            MapPerformanceProbe.shared.mark("routes load (\(loader.routes.count) routes, \(loader.visits.count) stays)", since: started)
             syncEnabledModes()
         }
         .onChange(of: coverageKey, initial: true) { _, _ in
             requestCoverage()
         }
-        .task(id: layer == .routes) {
+        .task {
             await followUserLocation()
         }
         .onReceive(Self.coverageChanges) { _ in coverageRevision += 1 }
         .onAppear { coverageRevision += 1 }
         .onChange(of: loader.cameraFitKey) { _, _ in
             fitCamera()
+            if layer == .routes, !routesAsBitmap, let opened = MapPerformanceProbe.shared.openedAt {
+                MapPerformanceProbe.shared.mark("open to routes ready", since: opened)
+                MapPerformanceProbe.shared.openedAt = nil
+            }
+        }
+        .onChange(of: selection) { _, _ in
+            MapPerformanceProbe.shared.activity("range")
         }
         .onChange(of: coverage.latestActivity?.latitude) { _, _ in
             fitCamera()
@@ -142,6 +242,7 @@ struct MapTabView: View {
             selection = .preset(.allTime, now: .now, calendar: calendar, firstRecorded: newValue)
         }
         .onAppear {
+            MapPerformanceProbe.shared.openedAt = CACurrentMediaTime()
             loader.invalidateHistogram()
             applyRequestedInterval(controller.requestedMapInterval)
         }
@@ -206,6 +307,7 @@ struct MapTabView: View {
             String(selection.focus.end.timeIntervalSinceReferenceDate),
             selection.granularity.rawValue,
             zoomBucket,
+            rangeIsLarge ? "large" : "small",
             String(dayTimelines.count)
         ]
         .joined(separator: "|")
@@ -234,6 +336,7 @@ struct MapTabView: View {
                 calendar: calendar,
                 onStep: { delta in
                     selectedRouteID = nil
+                    selectedTrack = nil
                     selection = selection.stepped(by: delta, now: .now, calendar: calendar)
                 },
                 onOpenSheet: { isShowingRangeSheet = true },
@@ -261,6 +364,7 @@ struct MapTabView: View {
     private var coverageKey: String {
         [
             layer.rawValue,
+            routesAsBitmap ? "bitmap" : "-",
             String(selection.focus.start.timeIntervalSinceReferenceDate),
             String(selection.focus.end.timeIntervalSinceReferenceDate),
             enabledModes.map(\.rawValue).sorted().joined(separator: ","),
@@ -273,9 +377,8 @@ struct MapTabView: View {
     }
 
     private func requestCoverage() {
-        guard layer != .routes, let viewport = restingCameraRect ?? cameraRect, mapSize.width > 1 else { return }
-        let present = Set(loader.presentModes)
-        let modes: Set<TransportMode>? = enabledModes.isEmpty || present.isSubset(of: enabledModes) ? nil : enabledModes
+        guard layer != .routes || routesAsBitmap, let viewport = restingCameraRect ?? cameraState.rect, mapSize.width > 1 else { return }
+        let modes = modeFilter
         coverage.update(MapCoverageController.Update(
             container: modelContext.container,
             revision: coverageRevision,
@@ -294,7 +397,6 @@ struct MapTabView: View {
     /// Feeds the clearing around the location dot. Only runs while Heat or Fog is up, and never
     /// asks for permission.
     private func followUserLocation() async {
-        guard layer != .routes else { return }
         let status = CLLocationManager().authorizationStatus
         guard status == .authorizedAlways || status == .authorizedWhenInUse else { return }
         do {
@@ -309,7 +411,7 @@ struct MapTabView: View {
     private var map: some View {
         MapReader { proxy in
             Map(position: $camera, interactionModes: [.pan, .zoom]) {
-                if layer == .routes {
+                if layer == .routes, !routesAsBitmap {
                     routeContent
                     visitContent
                 }
@@ -317,13 +419,14 @@ struct MapTabView: View {
             }
             .mapStyle(.standard(elevation: .flat, emphasis: .muted))
             .overlay {
-                if layer != .routes {
+                if layer != .routes || routesAsBitmap {
                     MapCoverageOverlay(
-                        raster: coverage.raster,
+                        controller: coverage,
                         layer: layer,
-                        camera: cameraRect,
+                        cameraState: cameraState,
                         userLocation: userLocation,
-                        isDark: colorScheme == .dark
+                        isDark: colorScheme == .dark,
+                        highlight: routesAsBitmap ? selectedTrack : nil
                     )
                 }
             }
@@ -332,22 +435,31 @@ struct MapTabView: View {
                 if let selectedRoute, layer == .routes {
                     routeCallout(selectedRoute)
                         .padding(14)
-                        .padding(.top, 58)
+                        .padding(.top, 104)
                 }
             }
             .onMapCameraChange(frequency: .continuous) { context in
-                visibleRegion = context.region
-                cameraRect = MercatorRect(context.rect)
+                let started = CACurrentMediaTime()
+                MapPerformanceProbe.shared.activity("camera")
+                cameraState.rect = MercatorRect(context.rect)
+                MapPerformanceProbe.shared.cameraCallback(took: CACurrentMediaTime() - started)
             }
             .onMapCameraChange(frequency: .onEnd) { context in
-                cameraRect = MercatorRect(context.rect)
-                restingCameraRect = cameraRect
+                MapPerformanceProbe.shared.settledAt = CACurrentMediaTime()
+                let rect = MercatorRect(context.rect)
+                cameraState.rect = rect
+                restingCameraRect = rect
+                visibleRegion = context.region
             }
             .simultaneousGesture(
                 SpatialTapGesture().onEnded { event in
                     guard layer == .routes,
                           let coordinate = proxy.convert(event.location, from: .local) else { return }
-                    selectRoute(near: coordinate)
+                    if routesAsBitmap {
+                        selectTrack(near: coordinate)
+                    } else {
+                        selectRoute(near: coordinate)
+                    }
                 }
             )
         }
@@ -459,6 +571,16 @@ struct MapTabView: View {
         }
     }
 
+    /// Bitmap mode: hit-test the tap against the activity index, within about 22 points.
+    private func selectTrack(near coordinate: CLLocationCoordinate2D) {
+        guard let rect = cameraState.rect, mapSize.width > 0 else { return }
+        let tolerance = 22 * rect.width / Double(mapSize.width)
+        let found = coverage.track(near: MercatorPoint(coordinate), tolerance: tolerance)
+        withAnimation(.easeInOut(duration: 0.18)) {
+            selectedTrack = found
+        }
+    }
+
     private func openInTimeline(_ date: Date) {
         if let url = MapDeepLink.timelineURL(at: date) {
             openURL(url)
@@ -481,6 +603,10 @@ struct MapTabView: View {
                 latestActivity: latest
             ) else { return }
             hasFramedAllTime = true
+            camera = .region(region)
+            return
+        }
+        if loader.routes.isEmpty, loader.visits.isEmpty, let region = coverage.region(interval: selection.focus, modes: modeFilter) {
             camera = .region(region)
             return
         }
@@ -543,8 +669,15 @@ struct MapTabView: View {
 /// Where the Map opens: city scale, centred on you if the system knows where you are,
 /// otherwise on the most recent activity.
 enum MapCameraDefaults {
-    /// About 13 km tall: a city, not a country.
-    static let citySpan = MKCoordinateSpan(latitudeDelta: 0.12, longitudeDelta: 0.12)
+    /// About 13 km tall: a city, not a country. `MOVES_MAP_SPAN_KM` overrides it so agents can
+    /// screenshot Heat and Fog at a set zoom.
+    static let citySpan: MKCoordinateSpan = {
+        if let raw = ProcessInfo.processInfo.environment["MOVES_MAP_SPAN_KM"], let km = Double(raw), km > 0 {
+            let degrees = min(km / 111, 170)
+            return MKCoordinateSpan(latitudeDelta: degrees, longitudeDelta: degrees)
+        }
+        return MKCoordinateSpan(latitudeDelta: 0.12, longitudeDelta: 0.12)
+    }()
 
     /// Shown for the instant before data loads.
     static var launchRegion: MKCoordinateRegion {

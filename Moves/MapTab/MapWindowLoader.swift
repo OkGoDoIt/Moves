@@ -81,6 +81,7 @@ final class MapWindowLoader {
         selection: MapRangeSelection,
         modelContext: ModelContext,
         cameraRegion: MKCoordinateRegion,
+        includeRoutes: Bool = true,
         calendar: Calendar = .autoupdatingCurrent
     ) async {
         loadGeneration += 1
@@ -93,6 +94,19 @@ final class MapWindowLoader {
         }
 
         refreshHistogram(selection: selection, modelContext: modelContext, calendar: calendar)
+
+        guard includeRoutes else {
+            // A large range is drawn from the activity index as a bitmap; building a polyline
+            // and annotation for each trip and stay on the main thread would only be thrown away.
+            let focus = selection.focus
+            routes = []
+            visits = []
+            presentModes = TransportMode.allCases.filter { mode in
+                mode != .stationary && histogramSpans.contains { $0.mode == mode && $0.end > focus.start && $0.start < focus.end }
+            }
+            cameraFitKey = "\(focus.start.timeIntervalSinceReferenceDate)|\(focus.end.timeIntervalSinceReferenceDate)|index"
+            return
+        }
 
         let repository = SwiftDataTimelineRepository(modelContext: modelContext)
         let dayCount = max(
