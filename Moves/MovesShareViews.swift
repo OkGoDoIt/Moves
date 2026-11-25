@@ -1041,7 +1041,7 @@ struct MovesShareGalleryView: View {
         }
         .sheet(isPresented: $isShowingDatePicker) {
             MovesJumpToDateView(
-                dayTimelines: dayTimelines,
+                earliestDayStart: dayTimelines.first?.dayStart,
                 selectedDate: selectedDate,
                 onSelectDate: { selectedDate = $0 },
                 onDismiss: { isShowingDatePicker = false }

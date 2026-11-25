@@ -233,11 +233,15 @@ struct ReviewEntryButton: View {
                         .fill(MovesPalette.place)
                         .frame(width: 7, height: 7)
                         .accessibilityHidden(true)
-                    Text(String(localized: "\(count) to review"))
-                        .font(.system(size: 13, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.primary)
-                        .monospacedDigit()
-                        .lineLimit(1)
+                    // Beside Today and a Route Tracking countdown there is only room for the number.
+                    ViewThatFits(in: .horizontal) {
+                        Text(String(localized: "\(count) to review"))
+                        Text(count, format: .number)
+                    }
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.primary)
+                    .monospacedDigit()
+                    .lineLimit(1)
                 }
                 .padding(.horizontal, 12)
                 .frame(minHeight: 32)

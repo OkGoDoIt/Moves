@@ -346,6 +346,8 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var dayTimelines: [TimelineBrowsingDay] = []
+    /// The time zone `dayTimelines` was laid out in.
+    @State private var dayIndexTimeZone: TimeZone?
     @State private var spotlightRefreshTask: Task<Void, Never>?
     @State private var lastSpotlightSignature: [String] = []
     @State private var didOpenScreenshotMove = false
@@ -369,6 +371,8 @@ struct ContentView: View {
     /// activates (or swaps in its live map) halfway through a swipe.
     @State private var pagerDayKey: String?
     @State private var isPagerMoving = false
+    /// Today was tapped while a swipe was still moving.
+    @State private var returnsToTodayOnceSettled = false
     /// Set once the pager has been placed on the selected day, so the scroll view's first
     /// report (its leading page) is not mistaken for a swipe.
     @State private var isPagerPositioned = false
@@ -406,7 +410,10 @@ struct ContentView: View {
         .scrollIndicators(.hidden)
         .onScrollPhaseChange { _, phase in
             isPagerMoving = phase != .idle
-            if phase == .idle { commitPagerPosition() }
+            if phase == .idle {
+                commitPagerPosition()
+                returnToTodayIfRequested()
+            }
         }
         .onChange(of: pagerDayKey) { _, _ in
             // The position can arrive just after the pager reports that it is idle.
@@ -481,7 +488,17 @@ struct ContentView: View {
         lastQuery.fetchLimit = 1
         guard let first = try? modelContext.fetch(firstQuery).first else { dayTimelines = []; return }
         let last = (try? modelContext.fetch(lastQuery).first)?.dayStart ?? first.dayStart
-        dayTimelines = TimelineBrowsingDay.days(from: first.dayStart, through: max(last, .now))
+        // This runs after every save, and the calendar only changes with its first day, its
+        // last day, or the time zone.
+        let calendar = Calendar.current
+        let firstStart = calendar.startOfDay(for: first.dayStart)
+        let lastStart = calendar.startOfDay(for: max(last, .now))
+        if dayTimelines.first?.dayStart != firstStart
+            || dayTimelines.last?.dayStart != lastStart
+            || dayIndexTimeZone != calendar.timeZone {
+            dayTimelines = TimelineBrowsingDay.days(from: firstStart, through: lastStart)
+            dayIndexTimeZone = calendar.timeZone
+        }
         syncSelectedDayIfNeeded()
         refreshVisibleDays()
     }
@@ -544,6 +561,14 @@ struct ContentView: View {
                         Image(systemName: "gearshape")
                     }
                     .help("Settings")
+                }
+
+                if showsTodayButton {
+                    ToolbarSpacer(.fixed, placement: .topBarLeading)
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button(String(localized: "Today"), action: returnToToday)
+                            .accessibilityHint(String(localized: "Goes back to the current day"))
+                    }
                 }
 
                 // Shows itself only when something is waiting for a look.
@@ -624,7 +649,7 @@ struct ContentView: View {
             cloudDataPresencePublisher.publishSoon()
             rootController.selectedDayKey = selectedDayKey
         }
-        .onChange(of: dayTimelines.map(\.dayKey)) { _, _ in
+        .onChange(of: dayTimelines) { _, _ in
             syncSelectedDayIfNeeded()
             syncPagerToSelection(animated: false)
             publishWidgetSnapshot()
@@ -840,9 +865,30 @@ struct ContentView: View {
 
         refreshDayIndex()
 
-        selectedDayKey = todayKey
         if let todayIndex = dayTimelines.firstIndex(where: { $0.dayKey == todayKey }) {
-            selectedPageIndex = todayIndex
+            select(dayAt: todayIndex)
+        } else {
+            selectedDayKey = todayKey
+        }
+    }
+
+    private var showsTodayButton: Bool {
+        !dayTimelines.isEmpty && selectedDayKey != DayTimeline.makeDayKey(for: .now)
+    }
+
+    /// A swipe still moving settles first; its day would otherwise take the selection back.
+    private func returnToToday() {
+        guard isPagerMoving else { return openCurrentDay() }
+        returnsToTodayOnceSettled = true
+    }
+
+    private func returnToTodayIfRequested() {
+        guard returnsToTodayOnceSettled else { return }
+        returnsToTodayOnceSettled = false
+        Task { @MainActor in
+            // The pager can report its last position just after it reports that it is idle.
+            try? await Task.sleep(for: .milliseconds(60))
+            returnToToday()
         }
     }
 
@@ -948,18 +994,20 @@ struct ContentView: View {
     private func jumpToDate(_ date: Date) {
         guard !dayTimelines.isEmpty else { return }
 
-        let calendar = Calendar.autoupdatingCurrent
-        let targetStart = calendar.startOfDay(for: date)
+        // Every calendar day is in the list, in order: the day itself, else the nearest end.
+        let targetStart = Calendar.autoupdatingCurrent.startOfDay(for: date)
+        let index = dayTimelines.firstIndex { $0.dayStart >= targetStart } ?? dayTimelines.count - 1
+        select(dayAt: index)
+    }
 
-        let closest = dayTimelines.enumerated().min { lhs, rhs in
-            let lhsStart = calendar.startOfDay(for: lhs.element.dayStart)
-            let rhsStart = calendar.startOfDay(for: rhs.element.dayStart)
-            return abs(lhsStart.timeIntervalSince(targetStart)) < abs(rhsStart.timeIntervalSince(targetStart))
-        }
-
-        guard let closest else { return }
-        selectedPageIndex = closest.offset
-        selectedDayKey = closest.element.dayKey
+    /// Shows a day chosen by something other than a swipe. It does not rely on the page number
+    /// changing: days added before the first one move every page, so the chosen day can land
+    /// on the number the previous day had.
+    private func select(dayAt index: Int) {
+        selectedPageIndex = index
+        selectedDayKey = dayTimelines[index].dayKey
+        refreshVisibleDays()
+        syncPagerToSelection(animated: false)
     }
 }
 
