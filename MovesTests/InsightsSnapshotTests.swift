@@ -78,10 +78,11 @@ final class InsightsSnapshotTests: XCTestCase {
             day(2025, 12, 31, distance: 4_000, mode: .cycling),
             day(2026, 1, 1, distance: 500, mode: .cycling)
         ]
+        // A finished year compares with the whole year before it.
         let snapshot = InsightsSnapshotBuilder.build(
             days: days,
             period: .year(2026),
-            now: date(2026, 1, 2, 8, 0),
+            now: date(2027, 1, 2, 8, 0),
             calendar: calendar
         )
         let cycling = try! XCTUnwrap(snapshot.modes.first { $0.mode == .cycling })
@@ -389,7 +390,184 @@ final class InsightsSnapshotTests: XCTestCase {
         XCTAssertEqual(snapshot.longestStreakDays, 1)
     }
 
+    // MARK: - Ground, air, and the rows adding up
+
+    func testFlightsAreStatedApartAndEveryTripLandsInARow() throws {
+        let start = date(2026, 5, 10, 0, 0)
+        let days = [
+            InsightsDayRecord(dayStart: start, moves: [
+                move(2026, 5, 10, 8, distance: 2_000, mode: .walking, duration: 1_800),
+                move(2026, 5, 10, 10, distance: 1_000_000, mode: .plane, duration: 7_200),
+                move(2026, 5, 10, 14, distance: 500, mode: .unknown, duration: 600),
+                move(2026, 5, 10, 15, distance: 100, mode: .stationary, duration: 300)
+            ]),
+            day(2026, 6, 2, distance: 8_000, mode: .automotive, duration: 900)
+        ]
+        let snapshot = InsightsSnapshotBuilder.build(days: days, period: .year(2026), now: date(2026, 9, 1, 12, 0), calendar: calendar)
+
+        XCTAssertEqual(snapshot.airDistanceMeters, 1_000_000, accuracy: 0.1)
+        XCTAssertEqual(snapshot.airMovingDuration, 7_200, accuracy: 0.1)
+        XCTAssertEqual(snapshot.groundDistanceMeters, 2_000 + 500 + 100 + 8_000, accuracy: 0.1)
+        XCTAssertEqual(snapshot.groundMovingDuration, 1_800 + 600 + 300 + 900, accuracy: 0.1)
+        XCTAssertEqual(snapshot.groundDistanceMeters + snapshot.airDistanceMeters, snapshot.totalDistanceMeters, accuracy: 0.1)
+
+        // Rows add up to the totals; trips with no mode (and stationary ones) become Other.
+        XCTAssertEqual(snapshot.modes.map(\.mode), [.walking, .automotive, .unknown, .plane])
+        XCTAssertEqual(snapshot.modes.reduce(0) { $0 + $1.distanceMeters }, snapshot.totalDistanceMeters, accuracy: 0.1)
+        XCTAssertEqual(snapshot.modes.first { $0.mode == .unknown }?.distanceMeters ?? 0, 600, accuracy: 0.1)
+
+        // The monthly chart, the hour chart, and the calendar shading leave the flight out.
+        let may = try XCTUnwrap(snapshot.monthlyDistance.first { $0.id == "2026-05" })
+        XCTAssertEqual(may.distanceMeters, 2_600, accuracy: 0.1)
+        XCTAssertEqual(snapshot.hourDurations.reduce(0, +), snapshot.groundMovingDuration, accuracy: 1)
+        XCTAssertEqual(snapshot.hourDurations[10], 0, accuracy: 1)
+        let calendarDay = try XCTUnwrap(snapshot.calendarDays.first { $0.dayKey == "2026-05-10" })
+        XCTAssertEqual(calendarDay.distanceMeters, 2_600, accuracy: 0.1)
+    }
+
+    func testADayWithOnlyAFlightStillCountsAsActive() {
+        let days = [
+            InsightsDayRecord(dayStart: date(2026, 3, 1, 0, 0), moves: [
+                move(2026, 3, 1, 9, distance: 900_000, mode: .plane, duration: 6_000)
+            ])
+        ]
+        let snapshot = InsightsSnapshotBuilder.build(days: days, period: .year(2026), now: date(2026, 9, 1, 12, 0), calendar: calendar)
+        XCTAssertEqual(snapshot.activeDayCount, 1)
+        XCTAssertEqual(snapshot.groundDistanceMeters, 0, accuracy: 0.1)
+        XCTAssertTrue(snapshot.calendarDays.first { $0.dayKey == "2026-03-01" }?.isActive ?? false)
+    }
+
+    // MARK: - Comparisons
+
+    func testNoEarlierYearMeansNoComparison() {
+        let days = [day(2026, 4, 1, distance: 3_000, mode: .walking)]
+        let snapshot = InsightsSnapshotBuilder.build(days: days, period: .year(2026), now: date(2026, 9, 1, 12, 0), calendar: calendar)
+        XCTAssertNil(snapshot.comparison)
+        XCTAssertNil(snapshot.modes.first?.distanceDeltaFraction)
+    }
+
+    func testAModeNewThisYearHasNoDeltaWhileOthersCompare() throws {
+        let days = [
+            day(2025, 4, 1, distance: 2_000, mode: .walking),
+            day(2026, 4, 1, distance: 3_000, mode: .walking),
+            day(2026, 4, 2, distance: 9_000, mode: .cycling)
+        ]
+        let snapshot = InsightsSnapshotBuilder.build(days: days, period: .year(2026), now: date(2026, 9, 1, 12, 0), calendar: calendar)
+        let comparison = try XCTUnwrap(snapshot.comparison)
+        XCTAssertEqual(comparison.year, 2025)
+        XCTAssertTrue(comparison.isSameDates)
+        XCTAssertEqual(try XCTUnwrap(comparison.deltaFraction(current: snapshot.groundDistanceMeters)), 5.0, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(snapshot.modes.first { $0.mode == .walking }?.distanceDeltaFraction), 0.5, accuracy: 0.001)
+        XCTAssertNil(snapshot.modes.first { $0.mode == .cycling }?.distanceDeltaFraction)
+    }
+
+    func testYearInProgressComparesWithTheSameDatesLastYear() throws {
+        let days = [
+            day(2025, 2, 10, distance: 1_000, mode: .walking),
+            day(2025, 6, 10, distance: 50_000, mode: .walking),
+            day(2026, 2, 12, distance: 1_500, mode: .walking)
+        ]
+        let inProgress = InsightsSnapshotBuilder.build(days: days, period: .year(2026), now: date(2026, 3, 1, 12, 0), calendar: calendar)
+        XCTAssertEqual(inProgress.modes.first?.previousDistanceMeters ?? 0, 1_000, accuracy: 0.1)
+        XCTAssertEqual(inProgress.comparison?.groundDistanceMeters ?? 0, 1_000, accuracy: 0.1)
+
+        // Once the year is over it is measured against all of the year before.
+        let finished = InsightsSnapshotBuilder.build(days: days, period: .year(2026), now: date(2027, 3, 1, 12, 0), calendar: calendar)
+        XCTAssertEqual(finished.modes.first?.previousDistanceMeters ?? 0, 51_000, accuracy: 0.1)
+        XCTAssertEqual(finished.comparison?.isSameDates, false)
+
+        // All has nothing earlier to compare with.
+        let all = InsightsSnapshotBuilder.build(days: days, period: .all, now: date(2026, 3, 1, 12, 0), calendar: calendar)
+        XCTAssertNil(all.comparison)
+    }
+
+    func testComparisonLeavesFlightsOutOfTheGroundBaseline() throws {
+        let days = [
+            InsightsDayRecord(dayStart: date(2025, 3, 1, 0, 0), moves: [
+                move(2025, 3, 1, 8, distance: 4_000, mode: .walking, duration: 3_000),
+                move(2025, 3, 1, 12, distance: 800_000, mode: .plane, duration: 5_000)
+            ]),
+            day(2026, 3, 1, distance: 6_000, mode: .walking)
+        ]
+        let snapshot = InsightsSnapshotBuilder.build(days: days, period: .year(2026), now: date(2026, 9, 1, 12, 0), calendar: calendar)
+        XCTAssertEqual(snapshot.comparison?.groundDistanceMeters ?? 0, 4_000, accuracy: 0.1)
+    }
+
+    // MARK: - Places, days, and Health keys
+
+    /// Demo history showed 14 countries and 2 cities: countries fall back to the bundled
+    /// boundaries at once, while city names arrive later from geocoding.
+    func testCountryWithoutNamedCitiesIsCountedSeparately() {
+        var unnamedParis = InsightsVisitRecord()
+        unnamedParis.latitude = 48.8584
+        unnamedParis.longitude = 2.2945
+        let days = [
+            InsightsDayRecord(
+                dayStart: date(2026, 4, 1, 0, 0),
+                moves: [move(2026, 4, 1, 9, distance: 1_000, mode: .walking, duration: 900)],
+                visits: [
+                    InsightsVisitRecord(countryCode: "NL", locality: "Amsterdam"),
+                    InsightsVisitRecord(countryCode: "NL", locality: " amsterdam "),
+                    InsightsVisitRecord(countryCode: "NL", locality: "Utrecht"),
+                    unnamedParis
+                ]
+            )
+        ]
+        let snapshot = InsightsSnapshotBuilder.build(days: days, period: .year(2026), now: date(2026, 9, 1, 12, 0), calendar: calendar)
+        XCTAssertEqual(snapshot.cities.map(\.name).sorted(), ["Amsterdam", "Utrecht"])
+        XCTAssertEqual(snapshot.cities.first { $0.name == "Amsterdam" }?.visitCount, 2)
+        XCTAssertEqual(snapshot.countries.compactMap(\.countryCode), ["NL", "FR"])
+        XCTAssertEqual(snapshot.countriesWithoutCityNames, 1)
+    }
+
+    func testPeriodDayKeysRunFromJanuaryFirstThroughToday() {
+        let days = [day(2026, 1, 5, distance: 900)]
+        let snapshot = InsightsSnapshotBuilder.build(days: days, period: .year(2026), now: date(2026, 1, 10, 18, 0), calendar: calendar)
+        XCTAssertEqual(snapshot.periodDayKeys.first, "2026-01-01")
+        XCTAssertEqual(snapshot.periodDayKeys.last, "2026-01-10")
+        XCTAssertEqual(snapshot.periodDayKeys.count, 10)
+
+        let past = InsightsSnapshotBuilder.build(days: days, period: .year(2025), now: date(2026, 1, 10, 18, 0), calendar: calendar)
+        XCTAssertEqual(past.periodDayKeys.count, 365)
+        XCTAssertTrue(past.isEmptyPeriod)
+    }
+
+    func testPerModeTotalsMatchTheSourceRecords() {
+        let days = makeYears(2)
+        let snapshot = InsightsSnapshotBuilder.build(days: days, period: .year(2025), now: date(2026, 9, 20, 12, 0), calendar: calendar)
+        for mode in snapshot.modes {
+            let expected = days
+                .filter { calendar.component(.year, from: $0.dayStart) == 2025 }
+                .flatMap(\.moves)
+                .filter { $0.mode == mode.mode }
+            XCTAssertEqual(mode.distanceMeters, expected.reduce(0) { $0 + $1.distanceMeters }, accuracy: 0.5, "\(mode.modeRaw)")
+            XCTAssertEqual(mode.duration, expected.reduce(0) { $0 + $1.duration }, accuracy: 0.5, "\(mode.modeRaw)")
+        }
+        let activeExpected = days
+            .filter { calendar.component(.year, from: $0.dayStart) == 2025 }
+            .filter { $0.moves.reduce(0) { $0 + $1.distanceMeters } >= 500 }
+            .count
+        XCTAssertEqual(snapshot.activeDayCount, activeExpected)
+        // No flights means exactly nothing by air, not a rounding remainder.
+        XCTAssertEqual(snapshot.airDistanceMeters, 0)
+        XCTAssertEqual(snapshot.airMovingDuration, 0)
+    }
+
     // MARK: - Fixtures
+
+    private func move(
+        _ year: Int, _ month: Int, _ day: Int, _ hour: Int,
+        distance: Double, mode: TransportMode, duration: TimeInterval
+    ) -> InsightsMoveRecord {
+        let start = date(year, month, day, hour, 0)
+        return InsightsMoveRecord(
+            startDate: start,
+            endDate: start.addingTimeInterval(duration),
+            duration: duration,
+            distanceMeters: distance,
+            mode: mode
+        )
+    }
 
     private func day(
         _ year: Int,
