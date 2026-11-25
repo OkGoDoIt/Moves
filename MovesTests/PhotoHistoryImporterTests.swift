@@ -199,6 +199,22 @@ final class PhotoHistoryImporterTests: XCTestCase {
         XCTAssertEqual(moves[0].transportMode, .unknown)
     }
 
+    func testABurstAtOneStopIsKeptAsAFewPhotosAcrossIt() throws {
+        let (context, _) = try makeContext()
+        let burst = (0..<200).map { photo("b\($0)", at: epoch.addingTimeInterval(Double($0) * 10), coordinate: home) }
+        let importer = PhotoHistoryImporter(modelContext: context, calendar: gmt)
+        let interval = DateInterval(start: epoch.addingTimeInterval(-1), end: epoch.addingTimeInterval(3_600))
+        for _ in 0..<2 {
+            _ = try importer.importHistory(assets: burst, in: interval)
+            let stay = try XCTUnwrap(try context.fetch(FetchDescriptor<VisitPlace>()).first)
+            XCTAssertEqual(stay.departureDate, burst.last?.capturedAt, "The stop is as long as it was")
+            let kept = try context.fetch(FetchDescriptor<PhotoAttachment>()).map(\.assetLocalIdentifier)
+            XCTAssertEqual(kept.count, 8)
+            XCTAssertTrue(kept.contains("b0") && kept.contains("b199"))
+            XCTAssertLessThanOrEqual(try context.fetchCount(FetchDescriptor<LocationSample>()), 4)
+        }
+    }
+
     func testALongSilenceBetweenPhotosIsAGapAndNotATrip() throws {
         let hour: TimeInterval = 3_600
         XCTAssertEqual(PhotoHistoryImporter.tripMode(distance: 4_000, gap: 2 * hour), .unknown)
