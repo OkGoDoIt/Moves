@@ -109,7 +109,12 @@ struct PlaceConfirmForm: View {
             Text(String(localized: "Name"))
                 .font(.system(.caption, design: .rounded).weight(.semibold))
                 .foregroundStyle(.secondary)
-            TextField(String(localized: "Name this place"), text: typedName)
+            // Wraps instead of cutting a long name off, at large text sizes especially.
+            TextField(String(localized: "Name this place"), text: typedName, axis: .vertical)
+                .lineLimit(1...4)
+                // Without this the List row keeps the first line's height and a name that
+                // already wraps when the form opens shows only its first line.
+                .fixedSize(horizontal: false, vertical: true)
                 .font(.system(.body, design: .rounded))
                 .textInputAutocapitalization(.words)
                 .submitLabel(.done)
@@ -188,7 +193,10 @@ struct PlaceConfirmForm: View {
     private var typedName: Binding<String> {
         Binding(
             get: { name },
-            set: { newValue in
+            set: { typed in
+                // A name is one line: Return in the wrapping field ends editing.
+                if typed.contains("\n") { isNameFocused = false }
+                let newValue = typed.replacingOccurrences(of: "\n", with: "")
                 guard newValue != name else { return }
                 name = newValue
                 nameSource = .typed
@@ -308,6 +316,7 @@ struct PlaceConfirmForm: View {
         guard PlaceDisplayNamer.meaningful(finalName) != nil else { return }
         isNameFocused = false
         do {
+            var step: AppUndoStep?
             let created = try PlacesLibrary.confirmSuggested(
                 visitIDs: cluster.visitIDs,
                 name: finalName,
@@ -315,12 +324,14 @@ struct PlaceConfirmForm: View {
                 formattedAddress: PlaceDisplayNamer.meaningful(address),
                 thoroughfare: cluster.thoroughfare,
                 category: category,
-                existingPlaceID: existingPlaceID
+                existingPlaceID: existingPlaceID,
+                undoStep: { step = $0 }
             )
             name = created.name
             confirmCount += 1
+            let manager = modelContext.undoManager
             undoToast?.show(actionName: String(localized: "Confirmed \(created.name)")) {
-                modelContext.undoManager?.undo()
+                step?.undo(removingFrom: manager)
             }
             onConfirmed(created)
         } catch {}

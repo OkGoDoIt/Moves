@@ -19,6 +19,7 @@ import UIKit
 enum SettingsPage: Hashable {
     case tracking
     case routeTracking
+    case routeTrackingOptions
     case travelModes
     case map
     case health
@@ -42,7 +43,8 @@ enum SettingsPage: Hashable {
     /// Pages that screenshot agents can open directly with `MOVES_SETTINGS_PAGE=<name>`.
     private static let launchNames: [String: [SettingsPage]] = [
         "tracking": [.tracking],
-        "routeTracking": [.tracking, .routeTracking],
+        "routeTracking": [.routeTracking],
+        "routeTrackingOptions": [.routeTracking, .routeTrackingOptions],
         "travelModes": [.travelModes],
         "map": [.map],
         "health": [.health],
@@ -101,6 +103,7 @@ struct MovesSettingsView: View {
 
     @State private var path: [SettingsPage] = SettingsPage.launchPath()
     @State private var appIconStore = AppIconStore()
+    @ObservedObject private var routeTrackingPreview = RouteTrackingPreview.shared
 
     init(
         dayTimelines: [DayTimeline],
@@ -126,6 +129,7 @@ struct MovesSettingsView: View {
                 LazyVStack(spacing: 14) {
                     SettingsCard(title: String(localized: "Recording")) {
                         row(.tracking, String(localized: "Tracking"), "location.fill", trackingStatus)
+                        row(.routeTracking, String(localized: "Route Tracking"), "location.fill.viewfinder", routeTrackingStatus)
                         row(.travelModes, String(localized: "Travel Modes"), "figure.walk", nil)
                         row(.map, String(localized: "Map"), "map", nil)
                     }
@@ -197,6 +201,8 @@ struct MovesSettingsView: View {
             TrackingSettingsPage(captureManager: captureManager)
         case .routeTracking:
             RouteTrackingSettingsPage(captureManager: captureManager)
+        case .routeTrackingOptions:
+            RouteTrackingOptionsPage(captureManager: captureManager)
         case .travelModes:
             AutomaticModesSettingsView()
         case .map:
@@ -242,6 +248,11 @@ struct MovesSettingsView: View {
 
     // MARK: Row states
 
+    /// "Off" or "On until 6:00 PM", the same words the Route Tracking card uses.
+    private var routeTrackingStatus: String {
+        RouteTrackingControl(captureManager: captureManager, preview: routeTrackingPreview).statusText()
+    }
+
     private var trackingStatus: String {
         if captureManager.isDemoMode {
             return captureManager.captureDetailLevel.title
@@ -254,8 +265,8 @@ struct MovesSettingsView: View {
         @unknown default:
             break
         }
-        if let endsAt = captureManager.temporaryRouteTrackingEndsAt, endsAt > .now {
-            return String(localized: "Route tracking on")
+        if captureManager.isPreciseLocationOff {
+            return String(localized: "Precise Location off")
         }
         guard captureManager.isBackgroundLocationListeningEnabled else {
             return String(localized: "Off")
@@ -498,7 +509,8 @@ struct SettingsNavigationRow: View {
 
 // MARK: - Route tracking
 
-/// The sheet behind the timeline's route-tracking button.
+/// The sheet behind the timeline's route-tracking button: Start (or Stop) first, then
+/// everyday recording.
 struct RouteTrackingSettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
 
@@ -507,10 +519,13 @@ struct RouteTrackingSettingsSheet: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                RouteTrackingSettingsSection(captureManager: captureManager, showsEverydayTracking: true)
-                    .padding(.horizontal, 14)
-                    .padding(.top, 10)
-                    .padding(.bottom, 18)
+                VStack(spacing: 14) {
+                    RouteTrackingCard(captureManager: captureManager)
+                    EverydayTrackingCard(captureManager: captureManager)
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 10)
+                .padding(.bottom, 18)
             }
             .background {
                 LinearGradient(
@@ -520,7 +535,7 @@ struct RouteTrackingSettingsSheet: View {
                 )
                 .ignoresSafeArea()
             }
-            .navigationTitle("Real Route Tracking")
+            .navigationTitle(String(localized: "Route Tracking"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -529,22 +544,308 @@ struct RouteTrackingSettingsSheet: View {
                     }
                 }
             }
+            .navigationDestination(for: SettingsPage.self) { page in
+                if page == .routeTrackingOptions {
+                    RouteTrackingOptionsPage(captureManager: captureManager)
+                }
+            }
         }
     }
 }
 
-/// Settings → Tracking → Real Route Tracking. Everyday tracking is on the Tracking page itself.
+/// Settings → Route Tracking, one tap from the root. The same card sits on the Tracking page.
 struct RouteTrackingSettingsPage: View {
     let captureManager: MovesLocationCaptureManager
 
     var body: some View {
-        ScrollView {
-            RouteTrackingSettingsSection(captureManager: captureManager, showsEverydayTracking: false)
-                .padding(.horizontal, 14)
-                .padding(.top, 10)
-                .padding(.bottom, 18)
+        SettingsScrollPage("Route Tracking") {
+            RouteTrackingCard(captureManager: captureManager)
         }
-        .settingsPageChrome("Real Route Tracking")
+    }
+}
+
+// MARK: Route tracking state
+
+/// Debug builds only: `MOVES_ROUTE_TRACKING_PREVIEW=1` stands in for route tracking in the
+/// simulator, where capture runs in demo mode and Start does nothing. It changes what the
+/// screens show, never what is recorded; a release build never reads the variable.
+@MainActor
+final class RouteTrackingPreview: ObservableObject {
+    static let shared = RouteTrackingPreview()
+    private static let durationKey = "MovesRouteTrackingPreviewDuration"
+
+    let isActive: Bool
+    @Published private(set) var endsAt: Date?
+    @Published private(set) var duration: TemporaryRouteTrackingDuration
+
+    private init() {
+        #if DEBUG
+        isActive = ProcessInfo.processInfo.environment["MOVES_ROUTE_TRACKING_PREVIEW"] == "1"
+        #else
+        isActive = false
+        #endif
+        duration = UserDefaults.standard.string(forKey: Self.durationKey)
+            .flatMap(TemporaryRouteTrackingDuration.init(rawValue:)) ?? .endOfDay
+    }
+
+    func start(_ duration: TemporaryRouteTrackingDuration) {
+        guard isActive else { return }
+        self.duration = duration
+        UserDefaults.standard.set(duration.rawValue, forKey: Self.durationKey)
+        if let interval = duration.timeInterval {
+            endsAt = Date.now.addingTimeInterval(interval)
+        } else {
+            let calendar = Calendar.autoupdatingCurrent
+            endsAt = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: .now))?
+                .addingTimeInterval(-1)
+        }
+    }
+
+    func stop() {
+        endsAt = nil
+    }
+}
+
+/// Route Tracking's state, Start, and Stop for every surface that shows them: the timeline
+/// button and banner, the sheet, the Tracking page, and the Settings root row.
+@MainActor
+struct RouteTrackingControl {
+    let captureManager: MovesLocationCaptureManager
+    var preview: RouteTrackingPreview = .shared
+
+    var endsAt: Date? {
+        preview.isActive ? preview.endsAt : captureManager.temporaryRouteTrackingEndsAt
+    }
+
+    /// The last duration used, which Start offers again.
+    var duration: TemporaryRouteTrackingDuration {
+        preview.isActive ? preview.duration : captureManager.temporaryRouteTrackingDuration
+    }
+
+    var authorization: CLAuthorizationStatus {
+        preview.isActive ? .authorizedAlways : captureManager.authorizationStatus
+    }
+
+    var isAuthorized: Bool {
+        authorization == .authorizedAlways || authorization == .authorizedWhenInUse
+    }
+
+    func isRunning(at date: Date = .now) -> Bool {
+        guard isAuthorized, let endsAt else { return false }
+        return endsAt > date
+    }
+
+    func start(_ duration: TemporaryRouteTrackingDuration) {
+        if preview.isActive {
+            preview.start(duration)
+        } else {
+            captureManager.enableTemporaryRouteTracking(duration: duration)
+        }
+    }
+
+    func stop() {
+        if preview.isActive {
+            preview.stop()
+        } else {
+            captureManager.disableTemporaryRouteTracking()
+        }
+    }
+
+    /// "On until 6:00 PM" or "Off".
+    func statusText(at date: Date = .now) -> String {
+        guard isRunning(at: date), let endsAt else { return String(localized: "Off") }
+        return String(localized: "On until \(endsAt.formatted(date: .omitted, time: .shortened))")
+    }
+
+    /// "1h 12m left", or seconds in the last minute, the way the timeline button counts down.
+    static func remainingText(_ seconds: TimeInterval) -> String {
+        if seconds < 60 {
+            return "\(max(Int(ceil(seconds)), 0))s"
+        }
+        return DurationFormatter.text(for: seconds)
+    }
+}
+
+/// Start and Stop for Route Tracking, with the duration. The one implementation, shown in
+/// the timeline's sheet, on the Tracking page, and on its own page from the Settings root.
+struct RouteTrackingCard: View {
+    @ObservedObject var captureManager: MovesLocationCaptureManager
+    @ObservedObject private var preview = RouteTrackingPreview.shared
+    var showsOptions = true
+
+    /// A duration picked here but not started yet; nil offers the last one used.
+    @State private var pickedDuration: TemporaryRouteTrackingDuration?
+
+    private var control: RouteTrackingControl {
+        RouteTrackingControl(captureManager: captureManager, preview: preview)
+    }
+
+    private var duration: TemporaryRouteTrackingDuration {
+        pickedDuration ?? control.duration
+    }
+
+    var body: some View {
+        SettingsCard(title: String(localized: "Route Tracking")) {
+            SettingsFootnote(String(localized: "Follows every turn of a trip for a set time. Uses more battery."))
+
+            if control.isAuthorized {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    if control.isRunning(at: context.date) {
+                        running(at: context.date)
+                    } else {
+                        idle
+                    }
+                }
+
+                if control.authorization == .authorizedWhenInUse {
+                    SettingsFootnote(String(localized: "Allow Always location access to keep this on while Moves is closed."))
+                }
+            } else {
+                SettingsFootnote(String(localized: "Allow location access to use Route Tracking."))
+            }
+
+            if let error = captureManager.lastErrorMessage, !preview.isActive {
+                SettingsFootnote(error)
+                    .foregroundStyle(.red)
+            }
+
+            if showsOptions {
+                Divider()
+                NavigationLink(value: SettingsPage.routeTrackingOptions) {
+                    SettingsNavigationRow(
+                        title: String(localized: "Options"),
+                        systemImage: "slider.horizontal.3",
+                        status: nil
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private var idle: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text(String(localized: "For"))
+                    .font(.system(.body, design: .rounded, weight: .medium))
+                Spacer(minLength: 8)
+                Menu {
+                    ForEach(TemporaryRouteTrackingDuration.allCases) { option in
+                        Button {
+                            pickedDuration = option
+                        } label: {
+                            if option == duration {
+                                Label(option.localizedTitle, systemImage: "checkmark")
+                            } else {
+                                Text(option.localizedTitle)
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Text(duration.localizedTitle)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                }
+                .buttonStyle(.bordered)
+                .accessibilityLabel(String(localized: "Duration, \(duration.localizedTitle)"))
+            }
+
+            Button {
+                control.start(duration)
+                pickedDuration = nil
+            } label: {
+                Label(String(localized: "Start Route Tracking"), systemImage: "location.fill.viewfinder")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.glassProminent)
+            .controlSize(.large)
+            .tint(MovesPalette.routeTracking)
+        }
+    }
+
+    private func running(at date: Date) -> some View {
+        let remaining = (control.endsAt ?? date).timeIntervalSince(date)
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Image(systemName: "location.fill.viewfinder")
+                    .foregroundStyle(.red)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(control.statusText(at: date))
+                        .font(.system(.body, design: .rounded, weight: .semibold))
+                    Text(String(localized: "\(RouteTrackingControl.remainingText(remaining)) left"))
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                Spacer(minLength: 0)
+            }
+            .accessibilityElement(children: .combine)
+
+            Button(role: .destructive) {
+                control.stop()
+            } label: {
+                Label(String(localized: "Stop"), systemImage: "stop.fill")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.glass)
+            .controlSize(.large)
+            .tint(.red)
+        }
+    }
+}
+
+extension TemporaryRouteTrackingDuration {
+    /// "30 minutes", "Until end of day".
+    var localizedTitle: String {
+        switch self {
+        case .thirtyMinutes: return String(localized: "30 minutes")
+        case .oneHour: return String(localized: "1 hour")
+        case .twoHours: return String(localized: "2 hours")
+        case .fourHours: return String(localized: "4 hours")
+        case .endOfDay: return String(localized: "Until end of day")
+        }
+    }
+}
+
+/// Background recording and tracking detail, under Route Tracking in the timeline's sheet.
+/// In Settings these sit on the Tracking page.
+private struct EverydayTrackingCard: View {
+    @ObservedObject var captureManager: MovesLocationCaptureManager
+
+    var body: some View {
+        SettingsCard(title: String(localized: "Everyday Tracking")) {
+            Toggle(
+                "Record in the background",
+                isOn: Binding(
+                    get: { captureManager.isBackgroundLocationListeningEnabled },
+                    set: { captureManager.setBackgroundLocationListeningEnabled($0) }
+                )
+            )
+            .font(.system(size: 15, weight: .semibold, design: .rounded))
+
+            SettingsFootnote(String(localized: "Records your places and trips while Moves is closed."))
+
+            Divider()
+
+            Picker(
+                "Tracking detail",
+                selection: Binding(
+                    get: { captureManager.captureDetailLevel },
+                    set: { captureManager.setCaptureDetailLevel($0) }
+                )
+            ) {
+                ForEach(CaptureDetailLevel.allCases) { level in
+                    Text(level.title).tag(level)
+                }
+            }
+            .pickerStyle(.segmented)
+            .accessibilityLabel("Tracking detail")
+
+            SettingsFootnote(captureManager.captureDetailLevel.summary)
+        }
     }
 }
 
@@ -754,166 +1055,30 @@ struct HealthWorkoutRouteImportSettingsView: View {
     }
 }
 
-// MARK: - Route tracking section
+// MARK: - Route tracking options
 
-@MainActor
-private func routeTrackingBannerData(
-    authorizationStatus: CLAuthorizationStatus,
-    lastErrorMessage: String?,
-    duration: TemporaryRouteTrackingDuration,
-    endsAt: Date?,
-    stopsAtFiftyPercentBattery: Bool,
-    stopsInLowPowerMode: Bool,
-    isBackgroundLocationListeningEnabled: Bool,
-    context: TrackingStatusBannerContext
-) -> TrackingStatusBannerData? {
-    if let lastErrorMessage {
-        return TrackingStatusBannerData(
-            title: String(localized: "Location tracking error"),
-            message: lastErrorMessage,
-            systemImage: "exclamationmark.triangle.fill",
-            tint: .red
-        )
-    }
+/// Settings → Route Tracking → Options: the rules for stopping on its own.
+struct RouteTrackingOptionsPage: View {
+    let captureManager: MovesLocationCaptureManager
 
-    if let endsAt, endsAt > .now {
-        switch authorizationStatus {
-        case .authorizedAlways, .authorizedWhenInUse:
-            return TrackingStatusBannerData(
-                title: String(localized: "Real route tracking on"),
-                message: routeTrackingBannerMessage(
-                    duration: duration,
-                    stopsAtFiftyPercentBattery: stopsAtFiftyPercentBattery,
-                    stopsInLowPowerMode: stopsInLowPowerMode,
-                    authorizationStatus: authorizationStatus
-                ),
-                systemImage: "location.fill.viewfinder",
-                tint: MovesPalette.routeTracking,
-                buttonTitle: context == .timeline ? String(localized: "Turn off now") : nil,
-                buttonRole: context == .timeline ? .destructive : nil
-            )
-        case .notDetermined, .denied, .restricted:
-            break
-        @unknown default:
-            break
+    var body: some View {
+        SettingsScrollPage("Options") {
+            RouteTrackingOptionsCard(captureManager: captureManager)
         }
     }
-
-    guard context == .settings else {
-        return nil
-    }
-
-    switch authorizationStatus {
-    case .authorizedAlways:
-        if !isBackgroundLocationListeningEnabled {
-            return TrackingStatusBannerData(
-                title: String(localized: "Background recording is off"),
-                message: String(localized: "Moves isn’t recording until you turn it back on."),
-                systemImage: "location.slash",
-                tint: .secondary
-            )
-        }
-
-        return TrackingStatusBannerData(
-            title: String(localized: "Recording in the background"),
-            message: String(localized: "Moves records your places and trips."),
-            systemImage: "location.fill",
-            tint: MovesPalette.place
-        )
-    case .authorizedWhenInUse:
-        return TrackingStatusBannerData(
-            title: String(localized: "Recording while Moves is open"),
-            message: String(localized: "Allow Always location access to record in the background."),
-            systemImage: "location.fill",
-            tint: MovesPalette.start
-        )
-    case .notDetermined:
-        return TrackingStatusBannerData(
-            title: String(localized: "Location access needed"),
-            message: String(localized: "Allow location access to start recording."),
-            systemImage: "location.slash",
-            tint: .secondary
-        )
-    case .denied:
-        return TrackingStatusBannerData(
-            title: String(localized: "Location access is off"),
-            message: String(localized: "Turn on location for Moves in Settings to record your days."),
-            systemImage: "location.slash",
-            tint: .secondary
-        )
-    case .restricted:
-        return TrackingStatusBannerData(
-            title: String(localized: "Location access is blocked"),
-            message: String(localized: "This iPhone doesn’t allow Moves to use location."),
-            systemImage: "lock.fill",
-            tint: .secondary
-        )
-    @unknown default:
-        return nil
-    }
 }
 
-private func routeTrackingBannerMessage(
-    duration: TemporaryRouteTrackingDuration,
-    stopsAtFiftyPercentBattery: Bool,
-    stopsInLowPowerMode: Bool,
-    authorizationStatus: CLAuthorizationStatus
-) -> String {
-    let durationText = duration.availabilityText
-    let autoStopText = routeTrackingAutoStopText(
-        stopsAtFiftyPercentBattery: stopsAtFiftyPercentBattery,
-        stopsInLowPowerMode: stopsInLowPowerMode
-    )
-
-    switch authorizationStatus {
-    case .authorizedWhenInUse:
-        return String(localized: "Following every turn \(durationText) while Moves is open.\(autoStopText)")
-    default:
-        return String(localized: "Following every turn \(durationText).\(autoStopText)")
-    }
-}
-
-private func routeTrackingAutoStopText(
-    stopsAtFiftyPercentBattery: Bool,
-    stopsInLowPowerMode: Bool
-) -> String {
-    switch (stopsAtFiftyPercentBattery, stopsInLowPowerMode) {
-    case (true, true):
-        return String(localized: " Stops at 50% battery or in Low Power Mode.")
-    case (true, false):
-        return String(localized: " Stops at 50% battery.")
-    case (false, true):
-        return String(localized: " Stops in Low Power Mode.")
-    case (false, false):
-        return ""
-    }
-}
-
-private struct RouteTrackingSettingsSection: View {
+private struct RouteTrackingOptionsCard: View {
     @Environment(\.openURL) private var openURL
     let captureManager: MovesLocationCaptureManager
-    /// The timeline's sheet also shows background recording and tracking detail. In
-    /// Settings those sit on the Tracking page one level up.
-    let showsEverydayTracking: Bool
 
-    @State private var routeTrackingDuration: TemporaryRouteTrackingDuration
-    @State private var routeTrackingEndsAt: Date?
-    @State private var routeTrackingAuthorizationStatus: CLAuthorizationStatus
-    @State private var routeTrackingLastErrorMessage: String?
     @State private var routeTrackingStopsAtFiftyPercentBattery: Bool
     @State private var routeTrackingStopsInLowPowerMode: Bool
     @State private var routeTrackingStopNotificationEnabled: Bool
-    @State private var isBackgroundLocationListeningEnabled: Bool
-    @State private var captureDetailLevel: CaptureDetailLevel
     @State private var isShowingNotificationPermissionAlert = false
 
-    init(captureManager: MovesLocationCaptureManager, showsEverydayTracking: Bool) {
+    init(captureManager: MovesLocationCaptureManager) {
         self.captureManager = captureManager
-        self.showsEverydayTracking = showsEverydayTracking
-        _routeTrackingDuration = State(initialValue: captureManager.temporaryRouteTrackingDuration)
-        _routeTrackingEndsAt = State(initialValue: captureManager.temporaryRouteTrackingEndsAt)
-        _routeTrackingAuthorizationStatus = State(initialValue: captureManager.authorizationStatus)
-        _routeTrackingLastErrorMessage = State(initialValue: captureManager.lastErrorMessage)
         _routeTrackingStopsAtFiftyPercentBattery = State(
             initialValue: captureManager.temporaryRouteTrackingStopsAtFiftyPercentBattery
         )
@@ -923,10 +1088,6 @@ private struct RouteTrackingSettingsSection: View {
         _routeTrackingStopNotificationEnabled = State(
             initialValue: captureManager.temporaryRouteTrackingStopNotificationEnabled
         )
-        _isBackgroundLocationListeningEnabled = State(
-            initialValue: captureManager.isBackgroundLocationListeningEnabled
-        )
-        _captureDetailLevel = State(initialValue: captureManager.captureDetailLevel)
     }
 
     private var routeTrackingStopsAtBatteryFiftyBinding: Binding<Bool> {
@@ -971,29 +1132,6 @@ private struct RouteTrackingSettingsSection: View {
         )
     }
 
-    private var bannerData: TrackingStatusBannerData? {
-        // The Tracking page already says whether recording works; here only route
-        // tracking itself and errors are worth a banner.
-        if !showsEverydayTracking, !isRouteTrackingActive, routeTrackingLastErrorMessage == nil {
-            return nil
-        }
-        return routeTrackingBannerData(
-            authorizationStatus: routeTrackingAuthorizationStatus,
-            lastErrorMessage: routeTrackingLastErrorMessage,
-            duration: routeTrackingDuration,
-            endsAt: routeTrackingEndsAt,
-            stopsAtFiftyPercentBattery: routeTrackingStopsAtFiftyPercentBattery,
-            stopsInLowPowerMode: routeTrackingStopsInLowPowerMode,
-            isBackgroundLocationListeningEnabled: isBackgroundLocationListeningEnabled,
-            context: .settings
-        )
-    }
-
-    private var isRouteTrackingActive: Bool {
-        guard let routeTrackingEndsAt else { return false }
-        return routeTrackingEndsAt > .now
-    }
-
     @MainActor
     private func enableRouteTrackingStopNotifications() async {
         let result = await captureManager.enableTemporaryRouteTrackingStopNotifications()
@@ -1005,157 +1143,17 @@ private struct RouteTrackingSettingsSection: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            if let bannerData {
-                TrackingStatusBanner(data: bannerData)
-            }
-
-            if showsEverydayTracking {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Everyday Tracking")
-                        .font(.system(size: 13, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.secondary)
-
-                    Toggle(
-                        "Record in the background",
-                        isOn: $isBackgroundLocationListeningEnabled
-                    )
-                    .font(.system(size: 15, weight: .semibold, design: .rounded))
-
-                    SettingsFootnote(String(localized: "Records your places and trips while Moves is closed."))
-
-                    Divider()
-
-                    Text("Tracking detail")
-                        .font(.system(size: 14, weight: .semibold, design: .rounded))
-
-                    Picker("Tracking detail", selection: $captureDetailLevel) {
-                        ForEach(CaptureDetailLevel.allCases) { level in
-                            Text(level.title).tag(level)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .accessibilityLabel("Tracking detail")
-
-                    SettingsFootnote(captureDetailLevel.summary)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .panelSurface()
-            }
-
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Real Route Tracking")
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.secondary)
-
-                Text("Follows every turn of a trip for a while. Uses more battery.")
-                    .font(.system(size: 13, weight: .medium, design: .rounded))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                if routeTrackingAuthorizationStatus == .authorizedAlways ||
-                    routeTrackingAuthorizationStatus == .authorizedWhenInUse {
-                    Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
-                        GridRow {
-                            Text("Duration")
-                                .gridColumnAlignment(.leading)
-
-                            Menu {
-                                ForEach(TemporaryRouteTrackingDuration.allCases) { duration in
-                                    Button {
-                                        routeTrackingDuration = duration
-                                    } label: {
-                                        if routeTrackingDuration == duration {
-                                            Label(duration.title, systemImage: "checkmark")
-                                        } else {
-                                            Text(duration.title)
-                                        }
-                                    }
-                                }
-                            } label: {
-                                HStack(spacing: 6) {
-                                    Text(routeTrackingDuration.title)
-                                    Image(systemName: "chevron.up.chevron.down")
-                                        .font(.system(size: 11, weight: .semibold))
-                                }
-                            }
-                            .buttonStyle(.bordered)
-                            .gridColumnAlignment(.trailing)
-                        }
-
-                        GridRow {
-                            Text("Turn off at 50% battery")
-
-                            Toggle("Turn off at 50% battery", isOn: routeTrackingStopsAtBatteryFiftyBinding)
-                                .labelsHidden()
-                        }
-
-                        GridRow {
-                            Text("Turn off in Low Power Mode")
-
-                            Toggle("Turn off in Low Power Mode", isOn: routeTrackingStopsInLowPowerModeBinding)
-                                .labelsHidden()
-                        }
-
-                        GridRow {
-                            Text("Notify when tracking stops")
-
-                            Toggle("Notify when tracking stops", isOn: routeTrackingStopNotificationBinding)
-                                .labelsHidden()
-                        }
-                    }
-                    .font(.system(size: 15, weight: .medium, design: .rounded))
-
-                    Button {
-                        if isRouteTrackingActive {
-                            captureManager.disableTemporaryRouteTracking()
-                        } else {
-                            captureManager.enableTemporaryRouteTracking(duration: routeTrackingDuration)
-                        }
-                    } label: {
-                        Label(
-                            isRouteTrackingActive
-                            ? String(localized: "Turn Off")
-                            : String(localized: "Start Real Route Tracking"),
-                            systemImage: isRouteTrackingActive
-                            ? "location.slash"
-                            : "location.fill.viewfinder"
-                        )
-                        .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.glass)
-                    .controlSize(.large)
-                    .tint(isRouteTrackingActive ? .red : nil)
-
-                    if isRouteTrackingActive, let routeTrackingEndsAt {
-                        SettingsFootnote(String(localized: "Turns off at \(routeTrackingEndsAt.formatted(date: .omitted, time: .shortened))."))
-                    }
-
-                    if routeTrackingAuthorizationStatus == .authorizedWhenInUse {
-                        SettingsFootnote(String(localized: "Allow Always location access to keep this on while Moves is closed."))
-                    }
-                } else {
-                    SettingsFootnote(String(localized: "Allow location access to use route tracking."))
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .panelSurface()
+        SettingsCard(title: String(localized: "Stop on Its Own")) {
+            Toggle("Turn off at 50% battery", isOn: routeTrackingStopsAtBatteryFiftyBinding)
+            Divider()
+            Toggle("Turn off in Low Power Mode", isOn: routeTrackingStopsInLowPowerModeBinding)
+            Divider()
+            Toggle("Notify when tracking stops", isOn: routeTrackingStopNotificationBinding)
         }
-        .onReceive(captureManager.$temporaryRouteTrackingDuration.removeDuplicates()) { routeTrackingDuration = $0 }
-        .onReceive(captureManager.$temporaryRouteTrackingEndsAt.removeDuplicates()) { routeTrackingEndsAt = $0 }
-        .onReceive(captureManager.$authorizationStatus.removeDuplicates()) { routeTrackingAuthorizationStatus = $0 }
-        .onReceive(captureManager.$lastErrorMessage.removeDuplicates()) { routeTrackingLastErrorMessage = $0 }
+        .font(.system(size: 15, weight: .medium, design: .rounded))
         .onReceive(captureManager.$temporaryRouteTrackingStopsAtFiftyPercentBattery.removeDuplicates()) { routeTrackingStopsAtFiftyPercentBattery = $0 }
         .onReceive(captureManager.$temporaryRouteTrackingStopsInLowPowerMode.removeDuplicates()) { routeTrackingStopsInLowPowerMode = $0 }
         .onReceive(captureManager.$temporaryRouteTrackingStopNotificationEnabled.removeDuplicates()) { routeTrackingStopNotificationEnabled = $0 }
-        .onReceive(captureManager.$isBackgroundLocationListeningEnabled.removeDuplicates()) { isBackgroundLocationListeningEnabled = $0 }
-        .onChange(of: isBackgroundLocationListeningEnabled) { _, isEnabled in
-            captureManager.setBackgroundLocationListeningEnabled(isEnabled)
-        }
-        .onReceive(captureManager.$captureDetailLevel.removeDuplicates()) { captureDetailLevel = $0 }
-        .onChange(of: captureDetailLevel) { _, level in
-            captureManager.setCaptureDetailLevel(level)
-        }
         .alert("Notifications Are Off", isPresented: $isShowingNotificationPermissionAlert) {
             Button("Open Settings") {
                 openURL(URL(string: UIApplication.openSettingsURLString)!)

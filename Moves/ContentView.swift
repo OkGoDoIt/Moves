@@ -226,6 +226,12 @@ func trackingStatusBannerData(
     for captureManager: MovesLocationCaptureManager,
     context: TrackingStatusBannerContext
 ) -> TrackingStatusBannerData? {
+    let routeTracking = RouteTrackingControl(captureManager: captureManager)
+    // The debug Route Tracking preview stands in for capture in the simulator's demo mode.
+    if routeTracking.preview.isActive, routeTracking.isRunning() {
+        return routeTrackingBanner(routeTracking, context: context)
+    }
+
     if captureManager.isDemoMode {
         return nil
     }
@@ -239,26 +245,8 @@ func trackingStatusBannerData(
         )
     }
 
-    if let endsAt = captureManager.temporaryRouteTrackingEndsAt,
-       endsAt > .now {
-        switch captureManager.authorizationStatus {
-        case .authorizedAlways, .authorizedWhenInUse:
-            return TrackingStatusBannerData(
-                title: "Real route tracking on",
-                message: temporaryRouteTrackingBannerMessage(
-                    for: captureManager,
-                    context: context
-                ),
-                systemImage: "location.fill.viewfinder",
-                tint: MovesPalette.routeTracking,
-                buttonTitle: context == .timeline ? "Turn off now" : nil,
-                buttonRole: context == .timeline ? .destructive : nil
-            )
-        case .notDetermined, .denied, .restricted:
-            break
-        @unknown default:
-            break
-        }
+    if routeTracking.isRunning() {
+        return routeTrackingBanner(routeTracking, context: context)
     }
 
     if !captureManager.isBackgroundLocationListeningEnabled {
@@ -327,58 +315,24 @@ func trackingStatusBannerData(
     }
 }
 
+/// "Route Tracking is on" / "On until 6:00 PM", with Stop on the timeline.
 @MainActor
-private func temporaryRouteTrackingBannerMessage(
-    for captureManager: MovesLocationCaptureManager,
+private func routeTrackingBanner(
+    _ routeTracking: RouteTrackingControl,
     context: TrackingStatusBannerContext
-) -> String {
-    let durationText = captureManager.temporaryRouteTrackingDuration.availabilityText
-    let autoStopText = temporaryRouteTrackingAutoStopText(for: captureManager)
-
-    switch captureManager.authorizationStatus {
-    case .authorizedAlways:
-        switch context {
-        case .timeline:
-            return "Frequent GPS updates are enabled \(durationText). Battery use is higher.\(autoStopText)"
-        case .settings:
-            return "Frequent GPS updates are enabled \(durationText). Battery use is higher and Moves will switch back automatically.\(autoStopText)"
-        }
-    case .authorizedWhenInUse:
-        switch context {
-        case .timeline:
-            return "Frequent GPS updates are enabled \(durationText) while Moves is open. Battery use is higher. Always is needed for background tracking.\(autoStopText)"
-        case .settings:
-            return "Frequent GPS updates are enabled \(durationText) while Moves is open. Battery use is higher. Always is needed for background tracking.\(autoStopText)"
-        }
-    case .notDetermined, .denied, .restricted:
-        switch context {
-        case .timeline:
-            return "Frequent GPS updates are ready once location access is allowed."
-        case .settings:
-            return "Frequent GPS updates are ready once location access is allowed."
-        }
-    @unknown default:
-        return "Frequent GPS updates are enabled."
+) -> TrackingStatusBannerData {
+    var message = routeTracking.statusText()
+    if routeTracking.authorization == .authorizedWhenInUse {
+        message += String(localized: " while Moves is open")
     }
-}
-
-@MainActor
-private func temporaryRouteTrackingAutoStopText(
-    for captureManager: MovesLocationCaptureManager
-) -> String {
-    let stopAtBatteryFifty = captureManager.temporaryRouteTrackingStopsAtFiftyPercentBattery
-    let stopInLowPowerMode = captureManager.temporaryRouteTrackingStopsInLowPowerMode
-
-    switch (stopAtBatteryFifty, stopInLowPowerMode) {
-    case (true, true):
-        return " It will also stop if battery reaches 50% or Low Power Mode turns on."
-    case (true, false):
-        return " It will also stop if battery reaches 50%."
-    case (false, true):
-        return " It will also stop if Low Power Mode turns on."
-    case (false, false):
-        return ""
-    }
+    return TrackingStatusBannerData(
+        title: String(localized: "Route Tracking is on"),
+        message: message,
+        systemImage: "location.fill.viewfinder",
+        tint: MovesPalette.routeTracking,
+        buttonTitle: context == .timeline ? String(localized: "Stop") : nil,
+        buttonRole: context == .timeline ? .destructive : nil
+    )
 }
 
 struct ContentView: View {
@@ -395,6 +349,14 @@ struct ContentView: View {
     @State private var spotlightRefreshTask: Task<Void, Never>?
     @State private var lastSpotlightSignature: [String] = []
     @State private var didOpenScreenshotMove = false
+    @State private var didOpenInitialDay = false
+    @ObservedObject private var routeTrackingPreview = RouteTrackingPreview.shared
+
+    private var routeTracking: RouteTrackingControl {
+        RouteTrackingControl(captureManager: captureManager, preview: routeTrackingPreview)
+    }
+    /// Set when the app goes to the background; coming back from there opens today again.
+    @State private var wentToBackground = false
 
     @State private var selectedDayKey = ""
     @State private var selectedPageIndex = 0
@@ -410,6 +372,9 @@ struct ContentView: View {
     /// Set once the pager has been placed on the selected day, so the scroll view's first
     /// report (its leading page) is not mistaken for a swipe.
     @State private var isPagerPositioned = false
+    /// The page width is changing (rotation, a resize); positions reported meanwhile are not swipes.
+    @State private var isPagerResizing = false
+    @State private var pagerWidth = 0
 
     /// Every calendar day, keyed by its stable day key. The set of pages never changes
     /// while a swipe is in flight, so the pager always settles on exactly one page.
@@ -429,9 +394,14 @@ struct ContentView: View {
         }
         // Days added before the first one (demo seeding, an import) would leave the scroll
         // view unable to page back to them, so it is rebuilt on the selected day instead.
-        .id(dayTimelines.first?.dayKey)
+        // A new width (rotation) rebuilds it too: the old offset would leave it between
+        // pages, and the rebuilt pager starts on the selected day.
+        .id("\(dayTimelines.first?.dayKey ?? "")|\(pagerWidth)")
         .onAppear { syncPagerToSelection(animated: false) }
-        .scrollTargetBehavior(.paging)
+        // Aligned to pages rather than paging by the scroll view's width: in landscape the
+        // pages are narrower than the scroll view by the side safe areas, so paging by
+        // width drifted further between pages with every swipe.
+        .scrollTargetBehavior(.viewAligned(limitBehavior: .alwaysByOne))
         .scrollPosition(id: $pagerDayKey, anchor: .center)
         .scrollIndicators(.hidden)
         .onScrollPhaseChange { _, phase in
@@ -442,11 +412,26 @@ struct ContentView: View {
             // The position can arrive just after the pager reports that it is idle.
             if !isPagerMoving { commitPagerPosition() }
         }
+        // Rotation changes the page width while the scroll offset stays where it was, so
+        // the pager came to rest between pages (or on a neighbor) and that position was
+        // adopted as a swipe. The selected day wins: re-place the pager on it.
+        .onGeometryChange(for: Int.self) { proxy in
+            Int(proxy.size.width.rounded())
+        } action: { width in
+            guard width != pagerWidth else { return }
+            // Positions reported while the old pager goes away are not swipes.
+            isPagerResizing = true
+            pagerWidth = width
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(400))
+                isPagerResizing = false
+            }
+        }
     }
 
     /// Adopts the page the pager settled on.
     private func commitPagerPosition() {
-        guard isPagerPositioned,
+        guard isPagerPositioned, !isPagerResizing,
               let key = pagerDayKey,
               let index = dayTimelines.firstIndex(where: { $0.dayKey == key }) else { return }
         if index != selectedPageIndex {
@@ -528,7 +513,7 @@ struct ContentView: View {
                         TrackingStatusBanner(
                             data: bannerData,
                             buttonAction: {
-                                captureManager.disableTemporaryRouteTracking()
+                                routeTracking.stop()
                             }
                         )
                         .safeAreaPadding(.horizontal, 14)
@@ -580,15 +565,13 @@ struct ContentView: View {
                     
                       
                             RouteTrackingToolbarButton(
-                                endsAt: captureManager.temporaryRouteTrackingEndsAt,
-                                authorizationStatus: captureManager.authorizationStatus,
+                                endsAt: routeTracking.endsAt,
+                                authorizationStatus: routeTracking.authorization,
                                 tapAction: {
                                     rootController.isShowingRouteTrackingSettings = true
                                 },
                                 longPressAction: {
-                                    captureManager.enableTemporaryRouteTracking(
-                                        duration: captureManager.temporaryRouteTrackingDuration
-                                    )
+                                    routeTracking.start(routeTracking.duration)
                                 }
                             )
                            
@@ -625,7 +608,16 @@ struct ContentView: View {
             await captureManager.start()
         }
         .onAppear {
-            openCurrentDay()
+            // The tab bar re-runs onAppear on every return to Timeline: only the first
+            // appearance opens today, so a past day stays put across tab switches.
+            // The root controller outlives this view, so it remembers the day either way.
+            if !didOpenInitialDay, rootController.selectedDayKey.isEmpty {
+                openCurrentDay()
+            } else {
+                if selectedDayKey.isEmpty { selectedDayKey = rootController.selectedDayKey }
+                refreshDayIndex()
+            }
+            didOpenInitialDay = true
             modelContext.undoManager = undoController.manager
             publishWidgetSnapshot()
             refreshSpotlightIndex()
@@ -662,8 +654,16 @@ struct ContentView: View {
         .onDisappear { spotlightRefreshTask?.cancel() }
         .task(id: selectedDay?.id) { await openScreenshotMoveIfNeeded() }
         .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .background { wentToBackground = true }
             guard newPhase == .active else { spotlightRefreshTask?.cancel(); return }
-            openCurrentDay()
+            // A share sheet, permission alert, or Control Center only makes the scene
+            // inactive; the day on screen stays. Coming back from the background opens today.
+            if wentToBackground {
+                wentToBackground = false
+                openCurrentDay()
+            } else {
+                refreshDayIndex()
+            }
             publishWidgetSnapshot()
             refreshSpotlightIndex()
             cloudDataPresencePublisher.publishSoon()
@@ -1762,10 +1762,14 @@ private struct RouteTrackingToolbarButton: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(
                 isRunning
-                    ? "Real route tracking, \(routeTrackingCountdownText(for: remainingSeconds)) remaining"
-                    : "Real route tracking"
+                    ? String(localized: "Route Tracking, on, \(routeTrackingCountdownText(for: remainingSeconds)) left")
+                    : String(localized: "Route Tracking, off")
             )
-            .accessibilityHint("Tap to open settings. Touch and hold to start tracking.")
+            .accessibilityHint(
+                isRunning
+                    ? String(localized: "Opens Route Tracking to stop it.")
+                    : String(localized: "Opens Route Tracking to start it. Touch and hold to start right away.")
+            )
             .accessibilityAddTraits(.isButton)
             .onTapGesture(perform: tapAction)
             .onLongPressGesture(minimumDuration: 0.55, perform: longPressAction)
@@ -1781,7 +1785,7 @@ private struct RouteTrackingToolbarButton: View {
                     : .default,
                 value: isPulsing
             )
-            .help("Real route tracking")
+            .help(String(localized: "Route Tracking"))
         }
     }
 

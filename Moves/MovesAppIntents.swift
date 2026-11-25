@@ -177,13 +177,13 @@ final class MovesIntentRuntime {
             return "Location access is restricted on this device, so Moves cannot start real route tracking."
         case .notDetermined:
             captureManager.enableTemporaryRouteTracking(duration: duration)
-            return "Moves is requesting location access. Real route tracking will start after you allow access."
+            return "Moves is requesting location access. Route tracking will start after you allow access."
         case .authorizedAlways, .authorizedWhenInUse:
             captureManager.enableTemporaryRouteTracking(duration: duration)
             let backgroundNote = captureManager.authorizationStatus == .authorizedWhenInUse
                 ? " It will only continue while Moves is open until Always location access is enabled."
                 : ""
-            return "Real route tracking is on \(duration.availabilityText).\(backgroundNote)"
+            return "Route tracking is on \(duration.availabilityText).\(backgroundNote)"
         @unknown default:
             return "Moves could not determine the current location permission."
         }
@@ -193,14 +193,14 @@ final class MovesIntentRuntime {
         guard let captureManager else { throw MovesIntentError.runtimeUnavailable }
 
         guard captureManager.isTemporaryRouteTrackingActive else {
-            return "Real route tracking is already off."
+            return "Route tracking is already off."
         }
 
         captureManager.disableTemporaryRouteTracking()
         if captureManager.isBackgroundLocationListeningEnabled {
-            return "Real route tracking is off. Moves has returned to low-energy background tracking."
+            return "Route tracking is off. Moves has returned to low-energy background tracking."
         }
-        return "Real route tracking is off. Low-energy background tracking is also disabled."
+        return "Route tracking is off. Low-energy background tracking is also disabled."
     }
 
     func toggleRouteTracking(defaultDuration: TemporaryRouteTrackingDuration) throws -> String {
@@ -217,10 +217,10 @@ final class MovesIntentRuntime {
         if captureManager.isTemporaryRouteTrackingActive,
            let endsAt = captureManager.temporaryRouteTrackingEndsAt {
             let endTime = endsAt.formatted(date: .omitted, time: .shortened)
-            return "Real route tracking is on until \(endTime). \(captureManager.trackingStatusText)."
+            return "Route tracking is on until \(endTime). \(captureManager.trackingStatusText)."
         }
 
-        return "Real route tracking is off. \(captureManager.trackingStatusText)."
+        return "Route tracking is off. \(captureManager.trackingStatusText)."
     }
 
     func setBackgroundTracking(enabled: Bool) throws -> String {
@@ -230,7 +230,7 @@ final class MovesIntentRuntime {
         if enabled {
             return "Low-energy background tracking is enabled."
         }
-        return "Low-energy background tracking is disabled. Real route tracking can still be started separately."
+        return "Low-energy background tracking is disabled. Route tracking can still be started separately."
     }
 
     func timelineSummary(for period: MovesTimelinePeriod, now: Date = .now) throws -> String {

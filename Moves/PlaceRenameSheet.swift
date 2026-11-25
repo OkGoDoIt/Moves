@@ -19,6 +19,7 @@ struct PlaceRenameSheet: View {
 
     @State private var draftName: String
     @State private var namingModel: PlaceNamingModel
+    @State private var didSave = false
     private let isNaming: Bool
     private let initialName: String
 
@@ -44,7 +45,9 @@ struct PlaceRenameSheet: View {
         NavigationStack {
             List {
                 Section {
-                    TextField(isNaming ? visit.displayTitle : String(localized: "Name"), text: $draftName)
+                    // Wraps a long name instead of cutting it off; Return still saves.
+                    TextField(isNaming ? visit.displayTitle : String(localized: "Name"), text: singleLineName, axis: .vertical)
+                        .lineLimit(1...4)
                         .textInputAutocapitalization(.words)
                         .autocorrectionDisabled()
                         .submitLabel(.done)
@@ -88,12 +91,32 @@ struct PlaceRenameSheet: View {
         .presentationDetents([.medium, .large])
     }
 
+    /// The wrapping field takes Return as a newline; a name is one line, so Return saves.
+    private var singleLineName: Binding<String> {
+        Binding(
+            get: { draftName },
+            set: { typed in
+                guard typed.contains("\n") else {
+                    draftName = typed
+                    return
+                }
+                draftName = typed.replacingOccurrences(of: "\n", with: "")
+                if !draftName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    saveTypedName()
+                }
+            }
+        )
+    }
+
     private var title: String {
         if isNaming { return String(localized: "Name this place") }
         return focusesNearby ? String(localized: "Nearby places") : String(localized: "Rename")
     }
 
     private func saveTypedName() {
+        // Return can reach both the binding and onSubmit; the name is saved once.
+        guard !didSave else { return }
+        didSave = true
         editController.applyRename(to: visit, name: draftName)
         dismiss()
     }

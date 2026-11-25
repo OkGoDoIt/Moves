@@ -1998,7 +1998,14 @@ struct StorylineRow: View {
     var onSelect: (() -> Void)? = nil
     var onCollapseShortStops: (() -> Void)? = nil
 
+    @EnvironmentObject private var health: HealthSummaryStore
+
     var style: TimelineRowStyle { entry.rowStyle }
+
+    private var isHealthEstimatedDistance: Bool {
+        guard case .move(let segment) = entry else { return false }
+        return health.isHealthEstimatedDistance(moveID: segment.id)
+    }
 
     var body: some View {
         Group {
@@ -2026,7 +2033,7 @@ struct StorylineRow: View {
                 isFirst: isFirst,
                 isLast: isLast,
                 showsHealthBadge: entry.showsHealthSourceBadge,
-                showsEstimatedGlyph: entry.showsEstimatedGlyph
+                showsEstimatedGlyph: entry.showsEstimatedGlyph || isHealthEstimatedDistance
             )
             StorylineRowBody(entry: entry)
         }
@@ -2234,6 +2241,11 @@ private struct StorylineRowBody: View {
         return "\(entry.subtitleText) · \(HealthSummaryText.walkedHere(meters))"
     }
 
+    private var isHealthEstimatedDistance: Bool {
+        guard case .move(let segment) = entry else { return false }
+        return health.isHealthEstimatedDistance(moveID: segment.id)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
@@ -2305,7 +2317,7 @@ private struct StorylineRowBody: View {
     }
 
     private var moveDetails: some View {
-        Text(entry.moveDetailsText)
+        Text(entry.moveDetailsText(healthEstimatedDistance: isHealthEstimatedDistance))
             .font(.system(size: 12, weight: .medium, design: .rounded))
             .foregroundStyle(Color.primary.opacity(0.68))
             .fixedSize(horizontal: false, vertical: true)
@@ -2603,7 +2615,11 @@ enum TimelineEntry: Identifiable {
     }
 
     /// A move's time, distance, and route notes, without its mode.
-    var moveDetailsText: String {
+    var moveDetailsText: String { moveDetailsText(healthEstimatedDistance: false) }
+
+    /// `healthEstimatedDistance`: the distance came from Apple Health rather than the path.
+    /// It reads "Estimated" like an estimated path, once, so there is one treatment.
+    func moveDetailsText(healthEstimatedDistance: Bool) -> String {
         guard case .move(let segment) = self else { return "" }
         let duration = DurationFormatter.text(for: segment.timelineDuration)
         let distance = Measurement(value: max(segment.distanceMeters, 0), unit: UnitLength.meters)
@@ -2612,7 +2628,7 @@ enum TimelineEntry: Identifiable {
         if segment.usesHealthWorkoutRoute {
             details.append(String(localized: "Apple Health"))
         }
-        if segment.routeMatchConfidence == .estimated {
+        if segment.routeMatchConfidence == .estimated || healthEstimatedDistance {
             details.append(String(localized: "Estimated"))
         }
         return details.joined(separator: "   ")

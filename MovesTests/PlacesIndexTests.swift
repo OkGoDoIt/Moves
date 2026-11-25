@@ -3,6 +3,7 @@ import SwiftData
 import XCTest
 @testable import Moves
 
+@MainActor
 final class PlacesIndexTests: XCTestCase {
     private let calendar: Calendar = {
         var calendar = Calendar(identifier: .gregorian)
@@ -744,6 +745,48 @@ final class PlacesIndexTests: XCTestCase {
         XCTAssertEqual(visit.knownPlace?.rejectedAutoLabels, ["Corner shop"])
         XCTAssertEqual(keeper.rejectedAutoLabels, [])
         XCTAssertEqual(keeper.footprintRadius, 40)
+    }
+
+    /// The Undo pill on a place undoes that edit, even after something else wrote to the
+    /// store, and the edit leaves the shared stack so shake-to-undo cannot run it twice.
+    func testThePlaceUndoPillUndoesItsOwnEditAfterOtherWrites() throws {
+        let schema = Schema(MovesTimelineSchema.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)
+        )
+        let context = ModelContext(container)
+        // Event grouping on, as in the app, so SwiftData can record the other write.
+        let undoManager = UndoManager()
+        context.undoManager = undoManager
+        let place = KnownPlace(name: "Cafe", latitude: 48.86, longitude: 2.33, footprintRadius: 80)
+        let other = KnownPlace(name: "Library", latitude: 48.87, longitude: 2.34, footprintRadius: 60)
+        context.insert(place)
+        context.insert(other)
+        try context.save()
+
+        let shrink = try PlacesLibrary.shrinkFootprint(place, in: context)
+        // A write nobody asked to undo, recorded on the same manager.
+        other.locality = "Paris"
+        try context.save()
+        shrink.undo(removingFrom: undoManager)
+        XCTAssertEqual(place.footprintRadius, 80)
+        XCTAssertEqual(other.locality, "Paris")
+
+        let rename = try XCTUnwrap(try PlacesLibrary.rename(place, to: "Corner Cafe", in: context))
+        other.locality = "Paris 1er"
+        try context.save()
+        rename.undo(removingFrom: undoManager)
+        XCTAssertEqual(place.name, "Cafe")
+        XCTAssertEqual(other.locality, "Paris 1er")
+        XCTAssertFalse(shrink.isPending)
+        XCTAssertFalse(rename.isPending)
+
+        let gym = try PlacesLibrary.setCategory(other, to: .gym, in: context)
+        let delete = try PlacesLibrary.deletePlace(other, in: context)
+        delete.undo(removingFrom: undoManager)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<KnownPlace>()), 2)
+        XCTAssertTrue(gym.isPending)
     }
 
     func testShrinkFootprintUsesEngineClamp() throws {

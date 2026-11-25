@@ -1067,6 +1067,8 @@ final class PlacesIndex {
 
 /// Place mutations for the Places tab. Learning (footprints, occupancy,
 /// merge, shrink) is `PlaceLearningEngine`; Confirm uses `createKnownPlace`.
+/// Each edit returns its `AppUndoStep`, which the Undo pill runs.
+@MainActor
 enum PlacesLibrary {
     /// Creates or assigns a `KnownPlace` from the cluster’s visits.
     /// `createKnownPlace` / `.user` assign already call `PlaceLearningEngine.learn`.
@@ -1079,7 +1081,55 @@ enum PlacesLibrary {
         thoroughfare: String? = nil,
         category: String? = nil,
         existingPlaceID: UUID? = nil,
-        center: CLLocationCoordinate2D? = nil
+        center: CLLocationCoordinate2D? = nil,
+        undoStep: ((AppUndoStep) -> Void)? = nil
+    ) throws -> KnownPlace {
+        var created: KnownPlace?
+        // Every visit's assignment and the new place are one step on the Undo pill.
+        let visitsBefore = VisitAssignmentSnapshot(try fetchVisits(ids: visitIDs, in: context))
+        let existingBefore = try existingPlaceID.flatMap { id in
+            try context.fetch(FetchDescriptor<KnownPlace>(predicate: #Predicate { $0.id == id })).first
+        }.map(KnownPlaceUndoPayload.init)
+        let placeIDsBefore = Set(try context.fetch(FetchDescriptor<KnownPlace>()).map(\.id))
+        var createdID: UUID?
+        let step = try performingRestorableDelete(
+            named: String(localized: "Confirmed"),
+            in: context,
+            restore: { context in
+                visitsBefore.restore(in: context)
+                existingBefore?.overwriteExisting(in: context)
+                if let createdID,
+                   let place = try? context.fetch(FetchDescriptor<KnownPlace>(predicate: #Predicate { $0.id == createdID })).first {
+                    context.delete(place)
+                }
+            }
+        ) {
+            created = try confirmSuggestedWithoutUndoStep(
+                visitIDs: visitIDs,
+                name: name,
+                in: context,
+                formattedAddress: formattedAddress,
+                thoroughfare: thoroughfare,
+                category: category,
+                existingPlaceID: existingPlaceID,
+                center: center
+            )
+            if let id = created?.id, !placeIDsBefore.contains(id) { createdID = id }
+        }
+        guard let created else { throw PlacesLibraryError.missingVisit }
+        undoStep?(step)
+        return created
+    }
+
+    private static func confirmSuggestedWithoutUndoStep(
+        visitIDs: [UUID],
+        name: String,
+        in context: ModelContext,
+        formattedAddress: String?,
+        thoroughfare: String?,
+        category: String?,
+        existingPlaceID: UUID?,
+        center: CLLocationCoordinate2D?
     ) throws -> KnownPlace {
         let visits = try fetchVisits(ids: visitIDs, in: context)
         guard let first = visits.first else {
@@ -1128,10 +1178,11 @@ enum PlacesLibrary {
         return place
     }
 
-    static func rename(_ place: KnownPlace, to name: String, in context: ModelContext) throws {
+    @discardableResult
+    static func rename(_ place: KnownPlace, to name: String, in context: ModelContext) throws -> AppUndoStep? {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        try performingUndoableChange(named: String(localized: "Renamed"), in: context) {
+        guard !trimmed.isEmpty, trimmed != place.name else { return nil }
+        return try performingUndoableChange(named: String(localized: "Renamed"), place: place, in: context) {
             place.name = trimmed
             for visit in place.visits where visit.assignmentSource == .user {
                 visit.userLabel = trimmed
@@ -1139,25 +1190,28 @@ enum PlacesLibrary {
         }
     }
 
-    static func setCategory(_ place: KnownPlace, to category: KnownPlaceCategory?, in context: ModelContext) throws {
-        try performingUndoableChange(named: String(localized: "Set category"), in: context) {
+    @discardableResult
+    static func setCategory(_ place: KnownPlace, to category: KnownPlaceCategory?, in context: ModelContext) throws -> AppUndoStep {
+        try performingUndoableChange(named: String(localized: "Set category"), place: place, in: context) {
             place.category = category?.rawValue
         }
     }
 
-    static func shrinkFootprint(_ place: KnownPlace, in context: ModelContext) throws {
-        try performingUndoableChange(named: String(localized: "Shrunk footprint"), in: context) {
+    @discardableResult
+    static func shrinkFootprint(_ place: KnownPlace, in context: ModelContext) throws -> AppUndoStep {
+        try performingUndoableChange(named: String(localized: "Shrunk footprint"), place: place, in: context) {
             place.footprintRadius = PlaceLearningEngine.clampRadius(
                 place.footprintRadius * PlaceLearningEngine.radiusShrinkFactor
             )
         }
     }
 
-    static func merge(_ source: KnownPlace, into target: KnownPlace, in context: ModelContext) throws {
-        guard source.id != target.id else { return }
+    @discardableResult
+    static func merge(_ source: KnownPlace, into target: KnownPlace, in context: ModelContext) throws -> AppUndoStep? {
+        guard source.id != target.id else { return nil }
         let sourcePayload = KnownPlaceUndoPayload(source)
         let targetPayload = KnownPlaceUndoPayload(target)
-        try performingRestorableDelete(
+        return try performingRestorableDelete(
             named: String(localized: "Merged places"),
             in: context,
             restore: { context in
@@ -1172,9 +1226,10 @@ enum PlacesLibrary {
     }
 
     /// Unassigns visits and deletes the learned place. Visits stay on the timeline.
-    static func deletePlace(_ place: KnownPlace, in context: ModelContext) throws {
+    @discardableResult
+    static func deletePlace(_ place: KnownPlace, in context: ModelContext) throws -> AppUndoStep {
         let payload = KnownPlaceUndoPayload(place)
-        try performingRestorableDelete(
+        return try performingRestorableDelete(
             named: String(localized: "Deleted place"),
             in: context,
             restore: { context in payload.recreate(in: context) },
@@ -1199,15 +1254,37 @@ enum PlacesLibrary {
         }
     }
 
-    private static func performingUndoableChange(named name: String, in context: ModelContext, _ body: () throws -> Void) throws {
-        let undoManager = context.undoManager
-        undoManager?.beginUndoGrouping()
-        undoManager?.setActionName(name)
-        defer { undoManager?.endUndoGrouping() }
-        try body()
-        if context.hasChanges {
-            try context.save()
-        }
+    /// An edit to one place and its visits' names, put back from a copy taken first.
+    private static func performingUndoableChange(
+        named name: String,
+        place: KnownPlace,
+        in context: ModelContext,
+        _ body: () throws -> Void
+    ) throws -> AppUndoStep {
+        let payload = KnownPlaceUndoPayload(place)
+        // Labelling can also assign the earlier stays at the place, so the stays around it
+        // are copied too, not only the ones matched to it now.
+        let visits = VisitAssignmentSnapshot(place.visits + nearbyVisits(of: place, in: context))
+        return try performingRestorableDelete(
+            named: name,
+            in: context,
+            restore: { context in
+                payload.overwriteExisting(in: context)
+                visits.restore(in: context)
+            },
+            body
+        )
+    }
+
+    /// Stays within a kilometer of the place's center.
+    private static func nearbyVisits(of place: KnownPlace, in context: ModelContext) -> [VisitPlace] {
+        let latitudeDelta = 1_000.0 / 111_000
+        let longitudeDelta = latitudeDelta / max(cos(place.centerLatitude * .pi / 180), 0.01)
+        let minLat = place.centerLatitude - latitudeDelta, maxLat = place.centerLatitude + latitudeDelta
+        let minLon = place.centerLongitude - longitudeDelta, maxLon = place.centerLongitude + longitudeDelta
+        return (try? context.fetch(FetchDescriptor<VisitPlace>(predicate: #Predicate {
+            $0.latitude >= minLat && $0.latitude <= maxLat && $0.longitude >= minLon && $0.longitude <= maxLon
+        }))) ?? []
     }
 
     /// SwiftData auto-undo of a delete can crash, so these changes run with undo registration
@@ -1217,7 +1294,7 @@ enum PlacesLibrary {
         in context: ModelContext,
         restore: @escaping (ModelContext) -> Void,
         _ body: () throws -> Void
-    ) throws {
+    ) throws -> AppUndoStep {
         let undoManager = context.undoManager
         context.undoManager = nil
         defer { context.undoManager = undoManager }
@@ -1225,24 +1302,63 @@ enum PlacesLibrary {
         if context.hasChanges {
             try context.save()
         }
-        guard let undoManager else { return }
-        undoManager.beginUndoGrouping()
-        undoManager.setActionName(name)
-        undoManager.registerUndo(withTarget: context) { target in
-            let previous = target.undoManager
-            target.undoManager = nil
-            restore(target)
-            if target.hasChanges {
-                try? target.save()
+        return AppUndoStep.register(named: name, on: undoManager) { [weak context] in
+            guard let context else { return }
+            let previous = context.undoManager
+            context.undoManager = nil
+            restore(context)
+            if context.hasChanges {
+                try? context.save()
             }
-            target.undoManager = previous
+            context.undoManager = previous
         }
-        undoManager.endUndoGrouping()
     }
 }
 
-/// Everything a `KnownPlace` stores, so an undone delete or merge can bring it back.
-private struct KnownPlaceUndoPayload {
+/// Stays' place match, name, and answer as they were, found by id when Undo runs.
+struct VisitAssignmentSnapshot {
+    private struct Row {
+        let knownPlaceID: UUID?
+        let assignmentSourceRaw: String
+        let assignmentConfidence: Double
+        let userLabel: String?
+        let reviewStateRaw: String
+    }
+
+    private let rows: [UUID: Row]
+
+    init(_ visits: [VisitPlace]) {
+        rows = Dictionary(visits.map { visit in
+            (visit.id, Row(
+                knownPlaceID: visit.knownPlace?.id,
+                assignmentSourceRaw: visit.assignmentSourceRaw,
+                assignmentConfidence: visit.assignmentConfidence,
+                userLabel: visit.userLabel,
+                reviewStateRaw: visit.reviewStateRaw
+            ))
+        }, uniquingKeysWith: { first, _ in first })
+    }
+
+    func restore(in context: ModelContext) {
+        let ids = Array(rows.keys)
+        guard !ids.isEmpty else { return }
+        let visits = (try? context.fetch(FetchDescriptor<VisitPlace>(predicate: #Predicate { ids.contains($0.id) }))) ?? []
+        let places = (try? context.fetch(FetchDescriptor<KnownPlace>())) ?? []
+        let placesByID = Dictionary(places.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        for visit in visits {
+            guard let row = rows[visit.id] else { continue }
+            visit.knownPlace = row.knownPlaceID.flatMap { placesByID[$0] }
+            visit.assignmentSourceRaw = row.assignmentSourceRaw
+            visit.assignmentConfidence = row.assignmentConfidence
+            visit.userLabel = row.userLabel
+            visit.reviewStateRaw = row.reviewStateRaw
+        }
+    }
+}
+
+/// Everything a `KnownPlace` stores, so an undone delete, merge, or confirmation can bring
+/// it back as it was.
+struct KnownPlaceUndoPayload {
     let id: UUID
     let name: String
     let centerLatitude: Double

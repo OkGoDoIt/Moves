@@ -78,7 +78,9 @@ struct PlaceDetailView: View {
             )
             .ignoresSafeArea()
         }
-        .navigationTitle(place?.name ?? String(localized: "Place"))
+        // The name shows once, in the header under the map, where it wraps and renames on
+        // tap. The bar title is only for when the place is gone.
+        .navigationTitle(place == nil ? String(localized: "Place") : "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -288,42 +290,45 @@ struct PlaceDetailView: View {
         rootController.requestedJumpDate = visit.arrivalDate
     }
 
-    private func toast(_ name: String) {
+    /// The pill undoes exactly this step, even if something else wrote to the store since.
+    private func toast(_ name: String, _ step: AppUndoStep?) {
+        guard let step else { return }
+        let manager = modelContext.undoManager
         undoToast?.show(actionName: name) {
-            modelContext.undoManager?.undo()
+            step.undo(removingFrom: manager)
         }
     }
 
     private func rename() {
         guard let place else { return }
         do {
-            try PlacesLibrary.rename(place, to: draftName, in: modelContext)
-            toast(String(localized: "Renamed"))
+            let step = try PlacesLibrary.rename(place, to: draftName, in: modelContext)
+            toast(String(localized: "Renamed"), step)
         } catch {}
     }
 
     private func setCategory(_ category: KnownPlaceCategory?) {
         guard let place else { return }
         do {
-            try PlacesLibrary.setCategory(place, to: category, in: modelContext)
-            toast(category.map { String(localized: "Marked as \($0.title)") } ?? String(localized: "Label removed"))
+            let step = try PlacesLibrary.setCategory(place, to: category, in: modelContext)
+            toast(category.map { String(localized: "Marked as \($0.title)") } ?? String(localized: "Label removed"), step)
         } catch {}
     }
 
     private func shrink() {
         guard let place else { return }
         do {
-            try PlacesLibrary.shrinkFootprint(place, in: modelContext)
+            let step = try PlacesLibrary.shrinkFootprint(place, in: modelContext)
             camera = .region(region(for: place))
-            toast(String(localized: "Shrunk footprint"))
+            toast(String(localized: "Shrunk footprint"), step)
         } catch {}
     }
 
     private func merge(into target: KnownPlace) {
         guard let place else { return }
         do {
-            try PlacesLibrary.merge(place, into: target, in: modelContext)
-            toast(String(localized: "Merged places"))
+            let step = try PlacesLibrary.merge(place, into: target, in: modelContext)
+            toast(String(localized: "Merged places"), step)
             dismiss()
         } catch {}
     }
@@ -331,8 +336,8 @@ struct PlaceDetailView: View {
     private func deletePlace() {
         guard let place else { return }
         do {
-            try PlacesLibrary.deletePlace(place, in: modelContext)
-            toast(String(localized: "Deleted place"))
+            let step = try PlacesLibrary.deletePlace(place, in: modelContext)
+            toast(String(localized: "Deleted place"), step)
             dismiss()
         } catch {}
     }

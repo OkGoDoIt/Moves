@@ -222,7 +222,8 @@ struct ReviewEntryButton: View {
     }
 
     var body: some View {
-        let count = count
+        // Waits for the launch pass, so the first number shown is the one that stays.
+        let count = rootController.hasSettledReviewQuestions ? count : 0
         if count > 0 {
             Button {
                 rootController.isShowingReviewInbox = true
@@ -443,13 +444,18 @@ struct ReviewInboxView: View {
     private func open(_ item: ReviewInboxItem) {
         dismiss()
         rootController.selectedTab = .timeline
+        // The middle of the stay or trip, so the timeline lands on its day and highlights
+        // that row rather than a neighbor that ends or starts at the same minute.
+        let moment: Date
         switch item.kind {
         case .visit(let visit):
-            rootController.requestedPlaceID = visit.id
+            let end = visit.departureDate ?? visit.arrivalDate
+            moment = visit.arrivalDate.addingTimeInterval(end.timeIntervalSince(visit.arrivalDate) / 2)
         case .move(let move):
-            rootController.requestedJumpDate = move.startDate
-            rootController.requestedMoveDetailID = move.id
+            moment = move.startDate.addingTimeInterval(move.endDate.timeIntervalSince(move.startDate) / 2)
         }
+        rootController.requestedJumpDate = moment
+        rootController.requestedJumpMoment = moment
     }
 
     private func dismissOne(_ item: ReviewInboxItem) {

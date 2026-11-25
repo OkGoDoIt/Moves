@@ -701,6 +701,126 @@ final class TimelineEditingTests: XCTestCase {
         XCTAssertEqual(visit.reviewState, .pending)
     }
 
+    /// Undoing "Yes" also takes back what it taught the place: its center, footprint, visit
+    /// count, and the stay's name.
+    func testUndoingYesRestoresThePlaceFootprintAndVisitCount() throws {
+        let (_, context, _) = try makeRepository()
+        let place = KnownPlace(name: "Studio", latitude: 52.5, longitude: 13.4, footprintRadius: 30)
+        place.confirmedVisitCount = 3
+        context.insert(place)
+        // Far enough from the center that learning moves it and grows the footprint.
+        let visit = insertPlace(in: context, arrival: date(9, 0), departure: date(10, 0), latitude: 52.5006, longitude: 13.4008)
+        visit.knownPlace = place
+        visit.assignmentSource = .autoAmbiguous
+        visit.reviewState = .pending
+        try context.save()
+        let (controller, undoController) = makeEditController(for: context)
+
+        grouped(undoController) { controller.confirmPlace(visit) }
+        XCTAssertNotEqual(place.confirmedVisitCount, 3)
+        XCTAssertNotEqual(place.centerLatitude, 52.5)
+        XCTAssertEqual(visit.userLabel, "Studio")
+
+        controller.toast?.undo()
+        XCTAssertEqual(place.confirmedVisitCount, 3)
+        XCTAssertEqual(place.footprintRadius, 30)
+        XCTAssertEqual(place.centerLatitude, 52.5)
+        XCTAssertEqual(place.centerLongitude, 13.4)
+        XCTAssertNil(visit.userLabel)
+        XCTAssertEqual(visit.assignmentSource, .autoAmbiguous)
+        XCTAssertEqual(visit.reviewState, .pending)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<PlaceCorrectionEvent>()), 0)
+        XCTAssertFalse(undoController.manager.canUndo, "The pill's step leaves the shared stack")
+    }
+
+    /// Naming a stay and choosing a nearby place each come back whole on the Undo pill:
+    /// the stay's name and match, the place it created or taught, and the answer recorded.
+    func testUndoingANameTakesBackThePlaceItCreatedOrTaught() throws {
+        let (_, context, _) = try makeRepository()
+        let studio = KnownPlace(name: "Studio", latitude: 52.5201, longitude: 13.4201, footprintRadius: 40)
+        studio.confirmedVisitCount = 2
+        context.insert(studio)
+        let visit = insertPlace(in: context, arrival: date(9, 0), departure: date(10, 0), latitude: 52.52, longitude: 13.42)
+        visit.reviewState = .pending
+        try context.save()
+        let (controller, undoController) = makeEditController(for: context)
+
+        grouped(undoController) { controller.applyRename(to: visit, name: "Bakery") }
+        XCTAssertEqual(visit.knownPlace?.name, "Bakery")
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<KnownPlace>()), 2)
+        controller.toast?.undo()
+        XCTAssertNil(visit.knownPlace)
+        XCTAssertNil(visit.userLabel)
+        XCTAssertEqual(visit.reviewState, .pending)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<KnownPlace>()), 1)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<PlaceCorrectionEvent>()), 0)
+
+        let candidate = NearbyPlaceCandidate(
+            id: studio.id.uuidString, name: "Studio", subtitle: nil, distanceMeters: 12,
+            latitude: studio.centerLatitude, longitude: studio.centerLongitude,
+            source: .knownPlace(id: studio.id), confirmedVisitCount: 2
+        )
+        grouped(undoController) { controller.applyCandidate(candidate, to: visit) }
+        XCTAssertEqual(visit.knownPlace?.id, studio.id)
+        controller.toast?.undo()
+        XCTAssertNil(visit.knownPlace)
+        XCTAssertEqual(studio.confirmedVisitCount, 2)
+        XCTAssertEqual(studio.centerLatitude, 52.5201)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<PlaceCorrectionEvent>()), 0)
+    }
+
+    /// The view context also records writes nobody asked to undo (a route rematch, a launch
+    /// repair). The pill must undo the person's change, not the last write to the store.
+    func testThePillUndoesItsOwnChangeAfterOtherWritesToTheStore() throws {
+        let (_, context, _) = try makeRepository()
+        let start = insertPlace(in: context, arrival: date(8, 0), departure: date(8, 10), latitude: 52.5, longitude: 13.4)
+        let brief = insertPlace(in: context, arrival: date(8, 30), departure: date(8, 32), latitude: 52.52, longitude: 13.42)
+        let end = insertPlace(in: context, arrival: date(9, 0), departure: date(9, 30), latitude: 52.54, longitude: 13.44)
+        let first = insertMove(in: context, from: start, to: brief, start: date(8, 10), end: date(8, 30), mode: .walking, distance: 900)
+        _ = insertMove(in: context, from: brief, to: end, start: date(8, 32), end: date(9, 0), mode: .walking, distance: 900)
+        brief.reviewState = .pending
+        first.reviewState = .pending
+        let studio = KnownPlace(name: "Studio", latitude: 52.52, longitude: 13.42)
+        context.insert(studio)
+        try context.save()
+        let (controller, undoController) = makeEditController(for: context)
+        // As in the app: SwiftData records the other writes on the shared manager, grouped
+        // by event (with event grouping off, its save-time grouping throws).
+        undoController.manager.groupsByEvent = true
+
+        // Dismissing one question from the timeline (SwiftData-recorded property edit).
+        controller.dismissReview(first)
+        let dismissPill = try XCTUnwrap(controller.toast?.onUndo)
+        // Something else writes before the person taps Undo.
+        end.comment = "Written by a background repair"
+        try context.save()
+        XCTAssertTrue(undoController.manager.canUndo || undoController.manager.groupingLevel > 0)
+        dismissPill()
+        XCTAssertEqual(first.reviewState, .pending)
+        XCTAssertEqual(end.comment, "Written by a background repair")
+
+        // "Keep Stop", then the pill, after another write.
+        controller.keepStop(brief)
+        XCTAssertEqual(brief.reviewState, .confirmed)
+        let keepPill = try XCTUnwrap(controller.toast?.onUndo)
+        start.comment = "Another write"
+        try context.save()
+        keepPill()
+        XCTAssertEqual(brief.reviewState, .pending)
+        XCTAssertEqual(start.comment, "Another write")
+        _ = studio
+
+        // Not a Stop, then the pill, after another write.
+        controller.markNotAStop(brief)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<VisitPlace>()), 2)
+        let notAStopPill = try XCTUnwrap(controller.toast?.onUndo)
+        start.comment = "Third write"
+        try context.save()
+        notAStopPill()
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<VisitPlace>()), 3)
+        XCTAssertEqual(start.comment, "Third write")
+    }
+
     func testSchemaUpgraderClustersLabeledVisitsIdempotently() throws {
         let (_, context, _) = try makeRepository()
         let first = insertPlace(

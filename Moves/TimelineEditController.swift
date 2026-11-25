@@ -160,7 +160,7 @@ final class TimelineEditController: TimelineItemActions {
     func applyRename(to visit: VisitPlace, name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        performProperty(named: String(localized: "Renamed")) { repo in
+        performProperty(named: String(localized: "Renamed"), around: visit) { repo in
             let nearby = try repo.knownPlaces(near: visit.coordinate, within: NearbyPlaceSuggester.searchRadius)
             if let existing = nearby.first(where: {
                 $0.name.compare(trimmed, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
@@ -183,7 +183,7 @@ final class TimelineEditController: TimelineItemActions {
     }
 
     func applyCandidate(_ candidate: NearbyPlaceCandidate, to visit: VisitPlace) {
-        performProperty(named: String(localized: "Renamed")) { repo in
+        performProperty(named: String(localized: "Renamed"), around: visit) { repo in
             switch candidate.source {
             case .knownPlace(let id):
                 guard let place = knownPlace(id: id) else {
@@ -234,21 +234,21 @@ final class TimelineEditController: TimelineItemActions {
         presentedSheet = nil
     }
 
+    // Review answers are restored from payloads: SwiftData's own undo is not a reliable
+    // step to hand the Undo pill (see `AppUndoStep`).
     func dismissReview(_ visit: VisitPlace) {
-        performProperty(named: String(localized: "Dismissed")) { _ in
-            visit.reviewState = .dismissed
-        }
+        dismissReviews(visitIDs: [visit.id], moveIDs: [])
     }
 
     func dismissReview(_ move: MoveSegment) {
-        performProperty(named: String(localized: "Dismissed")) { _ in
-            move.reviewState = .dismissed
-        }
+        dismissReviews(visitIDs: [], moveIDs: [move.id])
     }
 
     func confirmReview(_ visit: VisitPlace) {
-        performProperty(named: String(localized: "Confirmed")) { _ in
+        let payload = ReviewStatesPayload(visits: [(visit.id, visit.reviewStateRaw)], moves: [])
+        performStructural(named: String(localized: "Confirmed")) { _, context in
             visit.reviewState = .confirmed
+            registerRestore(payload, on: context)
         }
     }
 
@@ -471,7 +471,23 @@ final class TimelineEditController: TimelineItemActions {
         modelContext.map(SwiftDataTimelineRepository.init(modelContext:))
     }
 
-    private func performProperty(named name: String, _ work: (SwiftDataTimelineRepository) throws -> Void) {
+    /// Property edits. With `around`, a naming edit: the stays and learned places near that
+    /// stay are copied first and put back by the Undo step, because SwiftData's own undo
+    /// of these edits was seen restoring nothing in the running app (a rename stayed after
+    /// Undo). Without it (times, splits), SwiftData records the undo on the shared manager.
+    private func performProperty(
+        named name: String,
+        around visit: VisitPlace? = nil,
+        _ work: (SwiftDataTimelineRepository) throws -> Void
+    ) {
+        if let visit, let context = modelContext {
+            let payload = NamingAreaPayload(around: visit, in: context)
+            performStructural(named: name) { repo, context in
+                try work(repo)
+                registerRestore(payload, on: context)
+            }
+            return
+        }
         guard let context = modelContext, let undoController, let repo = repository() else { return }
         context.undoManager = undoController.manager
         undoController.manager.beginUndoGrouping()
@@ -482,54 +498,66 @@ final class TimelineEditController: TimelineItemActions {
             if context.hasChanges {
                 try context.save()
             }
-            presentToast(name)
+            toast?.show(actionName: name) { [weak self] in
+                self?.undoLastChange()
+            }
         } catch {
             context.rollback()
             presentError(error)
         }
     }
 
+    /// Structural edits put back a payload that `work` registers with `registerRestore`.
     private func performStructural(
         named name: String,
         _ work: (SwiftDataTimelineRepository, ModelContext) throws -> Void
     ) {
-        guard let context = modelContext, let undoController, let repo = repository() else { return }
+        guard let context = modelContext, undoController != nil, let repo = repository() else { return }
         let previous = context.undoManager
         context.undoManager = nil
         defer { context.undoManager = previous }
+        registeredStep = nil
+        registeringName = name
         do {
             try work(repo, context)
             if context.hasChanges {
                 try context.save()
             }
-            undoController.manager.setActionName(name)
-            presentToast(name)
+            if let step = registeredStep {
+                presentToast(step)
+            }
         } catch {
+            if let step = registeredStep {
+                // The change did not happen, so there is nothing for its step to undo.
+                undoController?.manager.removeAllActions(withTarget: step)
+            }
             context.rollback()
             presentError(error)
         }
+        registeredStep = nil
     }
+
+    @ObservationIgnored
+    private var registeredStep: AppUndoStep?
+    @ObservationIgnored
+    private var registeringName = ""
 
     private func registerRestore<Payload: TimelineUndoRestoring>(_ payload: Payload, on context: ModelContext) {
         guard let undoController else { return }
-        let manager = undoController.manager
-        manager.beginUndoGrouping()
-        manager.registerUndo(withTarget: self) { editor in
-            guard let targetContext = editor.modelContext else { return }
-            let previous = targetContext.undoManager
-            targetContext.undoManager = nil
-            payload.restore(in: targetContext)
-            if targetContext.hasChanges {
-                try? targetContext.save()
-            }
-            targetContext.undoManager = previous
+        registeredStep = AppUndoStep.register(
+            named: registeringName,
+            on: undoController.manager
+        ) { [weak self] in
+            guard let targetContext = self?.modelContext else { return }
+            targetContext.restoreWithoutUndo(payload)
         }
-        manager.endUndoGrouping()
     }
 
-    private func presentToast(_ name: String) {
-        toast?.show(actionName: name) { [weak self] in
-            self?.undoLastChange()
+    /// The pill undoes exactly this step, whatever has been written to the store since.
+    private func presentToast(_ step: AppUndoStep) {
+        let manager = undoController?.manager
+        toast?.show(actionName: step.name) {
+            step.undo(removingFrom: manager)
         }
     }
 
@@ -610,13 +638,17 @@ private enum LiveTimelineRows {
     }
 }
 
-/// A stay's place match as it was before "Yes", plus the answer it recorded.
+/// A stay's place match as it was before "Yes", the place's learned footprint and visit
+/// count, plus the answer it recorded.
 private struct ConfirmedPlacePayload: TimelineUndoRestoring {
     let id: UUID
     let knownPlaceID: UUID?
     let assignmentSourceRaw: String
     let assignmentConfidence: Double
     let reviewStateRaw: String
+    let userLabel: String?
+    /// What "Yes" teaches the place (center, radius, count, histograms) is put back too.
+    let place: KnownPlaceUndoPayload?
     var eventIDs: [UUID] = []
 
     init(visit: VisitPlace) {
@@ -625,6 +657,8 @@ private struct ConfirmedPlacePayload: TimelineUndoRestoring {
         assignmentSourceRaw = visit.assignmentSourceRaw
         assignmentConfidence = visit.assignmentConfidence
         reviewStateRaw = visit.reviewStateRaw
+        userLabel = visit.userLabel
+        place = visit.knownPlace.map(KnownPlaceUndoPayload.init)
     }
 
     func removingEvents(_ ids: [UUID]) -> ConfirmedPlacePayload {
@@ -639,11 +673,65 @@ private struct ConfirmedPlacePayload: TimelineUndoRestoring {
             visit.assignmentSourceRaw = assignmentSourceRaw
             visit.assignmentConfidence = assignmentConfidence
             visit.reviewStateRaw = reviewStateRaw
+            visit.userLabel = userLabel
         }
+        place?.overwriteExisting(in: context)
         guard !eventIDs.isEmpty else { return }
         let ids = eventIDs
         let events = (try? context.fetch(FetchDescriptor<PlaceCorrectionEvent>(predicate: #Predicate { ids.contains($0.id) }))) ?? []
         for event in events { context.delete(event) }
+    }
+}
+
+/// Everything naming a stay can change, as it was: the stays and learned places around it
+/// (naming can assign a place's earlier stays too), which places and answers existed.
+/// Undo puts those back, removes places and answers the naming added, and nothing else.
+private struct NamingAreaPayload: TimelineUndoRestoring {
+    /// Wide enough for a learned place's largest footprint around the stay.
+    static let reach: CLLocationDistance = 1_000
+
+    let visits: VisitAssignmentSnapshot
+    let places: [KnownPlaceUndoPayload]
+    let placeIDs: Set<UUID>
+    let eventIDs: Set<UUID>
+
+    init(around visit: VisitPlace, in context: ModelContext) {
+        let latitudeDelta = Self.reach / 111_000
+        let longitudeDelta = latitudeDelta / max(cos(visit.latitude * .pi / 180), 0.01)
+        let minLat = visit.latitude - latitudeDelta, maxLat = visit.latitude + latitudeDelta
+        let minLon = visit.longitude - longitudeDelta, maxLon = visit.longitude + longitudeDelta
+        let nearbyVisits = (try? context.fetch(FetchDescriptor<VisitPlace>(predicate: #Predicate {
+            $0.latitude >= minLat && $0.latitude <= maxLat && $0.longitude >= minLon && $0.longitude <= maxLon
+        }))) ?? []
+        let allPlaces = (try? context.fetch(FetchDescriptor<KnownPlace>())) ?? []
+        let nearbyPlaces = allPlaces.filter {
+            $0.centerLatitude >= minLat && $0.centerLatitude <= maxLat
+                && $0.centerLongitude >= minLon && $0.centerLongitude <= maxLon
+        }
+        // Stays already matched to a nearby place, wherever they are, can be reassigned too.
+        let placedVisits = nearbyPlaces.flatMap(\.visits)
+        var seen = Set<UUID>()
+        let touched = ([visit] + nearbyVisits + placedVisits).filter { seen.insert($0.id).inserted }
+        visits = VisitAssignmentSnapshot(touched)
+        places = nearbyPlaces.map(KnownPlaceUndoPayload.init)
+        placeIDs = Set(allPlaces.map(\.id))
+        eventIDs = Set(((try? context.fetch(FetchDescriptor<PlaceCorrectionEvent>())) ?? []).map(\.id))
+    }
+
+    func restore(in context: ModelContext) {
+        let knownIDs = placeIDs
+        for place in (try? context.fetch(FetchDescriptor<KnownPlace>())) ?? [] where !knownIDs.contains(place.id) {
+            for visit in place.visits { visit.knownPlace = nil }
+            context.delete(place)
+        }
+        for payload in places {
+            payload.overwriteExisting(in: context)
+        }
+        visits.restore(in: context)
+        let oldEvents = eventIDs
+        for event in (try? context.fetch(FetchDescriptor<PlaceCorrectionEvent>())) ?? [] where !oldEvents.contains(event.id) {
+            context.delete(event)
+        }
     }
 }
 

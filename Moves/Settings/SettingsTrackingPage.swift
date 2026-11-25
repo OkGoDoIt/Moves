@@ -37,18 +37,8 @@ struct TrackingSettingsPage: View {
                 SettingsFootnote(String(localized: "Records your places and trips while Moves is closed."))
             }
 
-            SettingsCard(title: String(localized: "Manual Tracking")) {
-                NavigationLink(value: SettingsPage.routeTracking) {
-                    SettingsNavigationRow(
-                        title: String(localized: "Real route tracking"),
-                        systemImage: "location.fill.viewfinder",
-                        status: routeTrackingStatus
-                    )
-                }
-                .buttonStyle(.plain)
-
-                SettingsFootnote(String(localized: "Follows every turn of a trip for a while. Uses more battery."))
-            }
+            // Start and Stop right here; the stopping rules are one level down.
+            RouteTrackingCard(captureManager: captureManager)
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
@@ -59,12 +49,43 @@ struct TrackingSettingsPage: View {
 
     // MARK: Status
 
-    private enum FixAction {
+    /// What the status card reads: live values, or in a debug build the
+    /// `MOVES_TRACKING_PREVIEW` state, so every state can be seen in the simulator.
+    private var inputs: TrackingStatusInputs {
+        let live = TrackingStatusInputs(
+            errorMessage: captureManager.lastErrorMessage,
+            isDemoMode: captureManager.isDemoMode,
+            authorization: captureManager.authorizationStatus,
+            isPreciseLocation: !captureManager.isPreciseLocationOff,
+            isBackgroundListeningEnabled: captureManager.isBackgroundLocationListeningEnabled,
+            isRouteTrackingActive: isRouteTrackingActive,
+            motion: motionStatus,
+            trackingStatusText: captureManager.trackingStatusText
+        )
+        #if DEBUG
+        if let preview = TrackingStatusInputs.preview(
+            named: ProcessInfo.processInfo.environment["MOVES_TRACKING_PREVIEW"],
+            from: live
+        ) {
+            return preview
+        }
+        #endif
+        return live
+    }
+
+    private var status: TrackingStatusInputs.Status { inputs.status }
+
+    private var motionIsOff: Bool { inputs.motionIsOff }
+}
+
+/// The Tracking page's status card as plain values, kept apart from the capture manager.
+struct TrackingStatusInputs: Equatable {
+    enum FixAction: Equatable {
         case allowLocation
         case openSettings
     }
 
-    private struct Status {
+    struct Status: Equatable {
         let title: String
         let message: String
         let systemImage: String
@@ -72,8 +93,53 @@ struct TrackingSettingsPage: View {
         var action: FixAction?
     }
 
-    private var status: Status {
-        if let error = captureManager.lastErrorMessage {
+    var errorMessage: String?
+    var isDemoMode: Bool
+    var authorization: CLAuthorizationStatus
+    var isPreciseLocation: Bool
+    var isBackgroundListeningEnabled: Bool
+    var isRouteTrackingActive: Bool
+    var motion: CMAuthorizationStatus
+    var trackingStatusText: String
+
+    #if DEBUG
+    /// `MOVES_TRACKING_PREVIEW=denied|whenInUse|always|motionDenied|reducedAccuracy|notDetermined|restricted|paused`.
+    /// Debug builds only: it changes what the page shows, never what is recorded.
+    static func preview(named name: String?, from live: Self) -> Self? {
+        guard let name else { return nil }
+        var inputs = live
+        inputs.errorMessage = nil
+        inputs.isDemoMode = false
+        inputs.isPreciseLocation = true
+        inputs.isBackgroundListeningEnabled = true
+        inputs.isRouteTrackingActive = false
+        inputs.motion = .authorized
+        inputs.authorization = .authorizedAlways
+        switch name {
+        case "denied": inputs.authorization = .denied
+        case "whenInUse": inputs.authorization = .authorizedWhenInUse
+        case "always": break
+        case "motionDenied": inputs.motion = .denied
+        case "reducedAccuracy": inputs.isPreciseLocation = false
+        case "notDetermined": inputs.authorization = .notDetermined
+        case "restricted": inputs.authorization = .restricted
+        case "paused": inputs.isBackgroundListeningEnabled = false
+        default: return nil
+        }
+        inputs.trackingStatusText = inputs.authorization == .authorizedAlways
+            ? "Tracking in background"
+            : live.trackingStatusText
+        return inputs
+    }
+    #endif
+
+    var motionIsOff: Bool {
+        guard !isDemoMode else { return false }
+        return motion == .denied || motion == .restricted
+    }
+
+    var status: Status {
+        if let error = errorMessage {
             return Status(
                 title: String(localized: "Tracking ran into a problem"),
                 message: error,
@@ -82,16 +148,16 @@ struct TrackingSettingsPage: View {
             )
         }
 
-        if captureManager.isDemoMode {
+        if isDemoMode {
             return Status(
-                title: captureManager.trackingStatusText,
+                title: trackingStatusText,
                 message: String(localized: "Showing demo days. Nothing new is recorded here."),
                 systemImage: "iphone",
                 tint: .secondary
             )
         }
 
-        switch captureManager.authorizationStatus {
+        switch authorization {
         case .notDetermined:
             return Status(
                 title: String(localized: "Location access needed"),
@@ -116,7 +182,7 @@ struct TrackingSettingsPage: View {
                 tint: .secondary
             )
         case .authorizedWhenInUse:
-            if !captureManager.isBackgroundLocationListeningEnabled {
+            if !isBackgroundListeningEnabled {
                 return pausedStatus
             }
             return Status(
@@ -127,19 +193,27 @@ struct TrackingSettingsPage: View {
                 action: .openSettings
             )
         case .authorizedAlways:
-            if !captureManager.isBackgroundLocationListeningEnabled,
-               !isRouteTrackingActive {
+            if !isBackgroundListeningEnabled, !isRouteTrackingActive {
                 return pausedStatus
             }
+            if !isPreciseLocation {
+                return Status(
+                    title: String(localized: "Precise Location is off"),
+                    message: String(localized: "Turn it on to follow your walks and drives."),
+                    systemImage: "location.circle",
+                    tint: .orange,
+                    action: .openSettings
+                )
+            }
             return Status(
-                title: captureManager.trackingStatusText,
+                title: trackingStatusText,
                 message: String(localized: "Moves records your places and trips, even when it’s closed."),
                 systemImage: "location.fill",
                 tint: MovesPalette.place
             )
         @unknown default:
             return Status(
-                title: captureManager.trackingStatusText,
+                title: trackingStatusText,
                 message: "",
                 systemImage: "questionmark.circle",
                 tint: .secondary
@@ -155,11 +229,10 @@ struct TrackingSettingsPage: View {
             tint: .secondary
         )
     }
+}
 
-    private var motionIsOff: Bool {
-        guard !captureManager.isDemoMode else { return false }
-        return motionStatus == .denied || motionStatus == .restricted
-    }
+extension TrackingSettingsPage {
+    fileprivate typealias FixAction = TrackingStatusInputs.FixAction
 
     private var statusCard: some View {
         let status = status
@@ -185,7 +258,7 @@ struct TrackingSettingsPage: View {
                     tint: .orange
                 )
 
-                if motionStatus == .denied {
+                if inputs.motion == .denied {
                     fixButton(.openSettings)
                 }
             }
@@ -275,12 +348,5 @@ struct TrackingSettingsPage: View {
     private var isRouteTrackingActive: Bool {
         guard let endsAt = captureManager.temporaryRouteTrackingEndsAt else { return false }
         return endsAt > .now
-    }
-
-    private var routeTrackingStatus: String {
-        guard isRouteTrackingActive, let endsAt = captureManager.temporaryRouteTrackingEndsAt else {
-            return String(localized: "Off")
-        }
-        return String(localized: "On until \(endsAt.formatted(date: .omitted, time: .shortened))")
     }
 }

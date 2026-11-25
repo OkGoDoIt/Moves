@@ -47,6 +47,8 @@ final class MovesRootController: ObservableObject {
     /// When set, the Timeline tab locates this instant and highlights the row.
     @Published var requestedJumpMoment: Date?
     @Published var isShowingReviewInbox = false
+    /// The launch pass over review questions is done, so the count is the settled one.
+    @Published var hasSettledReviewQuestions = false
     /// Applied once from `moves://map?from=&to=`, then cleared.
     @Published var requestedMapInterval: DateInterval?
     /// Opens a named trip (`moves://trip/{uuid}`) on Insights.
@@ -136,9 +138,16 @@ struct MovesRootView: View {
             )
             applyLaunchJumpIfNeeded()
             presentOnboardingIfNeeded()
+        }
+        .task {
             // Questions whose reason has gone (a stay that grew long, an answer given
-            // elsewhere, imported or old history) are cleared before anything counts them.
+            // elsewhere, imported or old history) are cleared, and brief stays asked about.
+            // Only once the launch upgrade is done: its repairs add and remove stays on
+            // another context, so settling earlier gave a different count on the launch
+            // that ran the upgrade than on the next one.
+            await TimelineSchemaUpgrader.waitUntilFinished()
             TimelineSchemaUpgrader.settleReviewQuestions(onViewContext: modelContext)
+            controller.hasSettledReviewQuestions = true
         }
         .onChange(of: earliestDays.isEmpty) { _, isEmpty in
             if isEmpty {
@@ -216,7 +225,7 @@ struct MovesRootView: View {
         } message: {
             Text(editController.errorMessage ?? "")
         }
-        .undoToast(undoToast)
+        .undoToast(undoToast, bottomClearance: UndoToastPlacement.aboveTabBar)
         .fullScreenCover(isPresented: $isShowingOnboarding, onDismiss: presentPendingOnboardingImport) {
             OnboardingFlow(
                 onRequestLocation: {
@@ -382,10 +391,60 @@ struct MovesRootView: View {
         }
     }
 
-    private func handleDeepLink(_ url: URL) {
-        guard url.scheme?.lowercased() == "moves" else { return }
+    /// A link goes somewhere else in the app, so whatever sheet is up gives way first.
+    /// The root presents one sheet at a time; a second one asked for meanwhile never shows.
+    @discardableResult
+    private func dismissPresentedSheets() -> Bool {
+        let wasPresenting = controller.isShowingSettings
+            || controller.isShowingStatisticsSearch
+            || controller.isShowingRouteTrackingSettings
+            || controller.isShowingDatePicker
+            || controller.isShowingReviewInbox
+            || editController.presentedSheet != nil
+            || isShowingGoogleImport || isShowingPhotoImport
+            || isShowingHealthImport || isShowingFileImport
+        controller.isShowingSettings = false
+        controller.isShowingStatisticsSearch = false
+        controller.isShowingRouteTrackingSettings = false
+        controller.isShowingDatePicker = false
+        controller.isShowingReviewInbox = false
+        editController.presentedSheet = nil
+        editController.confirmDeletePlaceID = nil
+        isShowingGoogleImport = false
+        isShowingPhotoImport = false
+        isShowingHealthImport = false
+        isShowingFileImport = false
+        return wasPresenting
+    }
 
-        switch url.host?.lowercased() {
+    /// Opens a sheet from a link once any sheet that was up has finished going away.
+    private func presentFromLink(_ open: @escaping () -> Void) {
+        guard dismissPresentedSheets() else {
+            open()
+            return
+        }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(600))
+            open()
+        }
+    }
+
+    private static let linkHosts: Set<String> = [
+        "today", "at", "tracking", "place", "calendar-visit", "day", "map",
+        "places", "insights", "trips", "trip", "review", "settings",
+    ]
+
+    private func handleDeepLink(_ url: URL) {
+        guard url.scheme?.lowercased() == "moves",
+              let host = url.host?.lowercased(), Self.linkHosts.contains(host) else { return }
+        switch host {
+        case "tracking", "review", "settings":
+            break
+        default:
+            dismissPresentedSheets()
+        }
+
+        switch host {
         case "today":
             controller.selectedTab = .timeline
             controller.shouldOpenToday = true
@@ -396,7 +455,7 @@ struct MovesRootView: View {
             controller.requestedJumpMoment = moment
         case "tracking":
             controller.selectedTab = .timeline
-            controller.isShowingRouteTrackingSettings = true
+            presentFromLink { controller.isShowingRouteTrackingSettings = true }
         case "place":
             guard let identifier = url.pathComponents.dropFirst().first,
                   let placeID = UUID(uuidString: identifier) else { return }
@@ -434,9 +493,9 @@ struct MovesRootView: View {
             controller.requestedTripID = tripID
         case "review":
             controller.selectedTab = .timeline
-            controller.isShowingReviewInbox = true
+            presentFromLink { controller.isShowingReviewInbox = true }
         case "settings":
-            controller.isShowingSettings = true
+            presentFromLink { controller.isShowingSettings = true }
         default:
             break
         }

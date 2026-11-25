@@ -982,13 +982,13 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         if isTemporaryRouteTrackingActive {
             switch authorizationStatus {
             case .authorizedAlways, .authorizedWhenInUse:
-                return "Real route tracking on"
+                return "Route tracking on"
             case .notDetermined:
-                return "Real route tracking waiting for permission"
+                return "Route tracking waiting for permission"
             case .denied, .restricted:
-                return "Real route tracking paused"
+                return "Route tracking paused"
             @unknown default:
-                return "Real route tracking on"
+                return "Route tracking on"
             }
         }
 
@@ -2166,7 +2166,7 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
 
             let center = UNUserNotificationCenter.current()
             let content = UNMutableNotificationContent()
-            content.title = "Real route tracking stopped"
+            content.title = "Route tracking stopped"
             content.body = "Moves switched back to lower-power tracking."
             content.sound = .default
 
@@ -2206,7 +2206,7 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
 
             let center = UNUserNotificationCenter.current()
             let content = UNMutableNotificationContent()
-            content.title = "Real route tracking stopped"
+            content.title = "Route tracking stopped"
             content.body = "Moves switched back to lower-power tracking."
             content.sound = .default
 
