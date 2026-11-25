@@ -103,12 +103,14 @@ Optional: `DEVICE_UDID=... ./Scripts/install-iphone.sh`.
 | Models + repository | `Moves/VisitedLocation.swift` (`DayTimeline`, `VisitPlace`, `MoveSegment`, `LocationSample`, `KnownPlace`, `PhotoAttachment`, `PlaceCorrectionEvent`, `VisitedCell`, `NamedTrip`) |
 | Place learning | `Moves/PlaceLearningEngine.swift` (resolve / learn / negatives / merge / clampRadius); hooked from `DefaultTimelineAssembler.ingestVisit` and `SwiftDataTimelineRepository`. Places tab occupancy, merge, and shrink consume these APIs. |
 | Photos | `Moves/Photos/` (`PhotoLibraryService`, `PhotoHistoryImporter`, `PhotoHistoryImportJob`, `PhotoFixes`, `PhotoAttachmentQuery`, storyline + range thumbnail strips, Settings → Photos). Read-only PhotoKit; Limited Library explained in Settings. Never modifies the library. Named trips (WS9b) lens `PhotoAttachment` rows in a date range — they do not copy photos. See "Photos as location" below. |
-| Timeline lookup / schema upgrade | `Moves/TimelineLocator.swift`, `Moves/TimelineSchemaUpgrader.swift` |
+| Timeline day map | `Moves/TimelineDayMap.swift`: one long-lived `MKMapView` for the whole day pager (`TimelineDayMapModel`), with snapshots standing in on the neighboring pages. Do not go back to one SwiftUI `Map` per day page: those cost a watchdog kill on the phone. |
+| Which day a row belongs to | `Moves/PlaceTimeZone.swift`, `Moves/TimelineDayRepair.swift`. A stay, trip, fix, or photo is filed on the local calendar day of the place where it happened (`dayTimeline(for:at:)`), and a day's times are shown on that day's own clock (`.timelineClock(zone)`). Places, Search, statistics, Review rows, and export names still use the phone's clock. |
+| Timeline lookup / schema upgrade | `Moves/TimelineLocator.swift`, `Moves/TimelineSchemaUpgrader.swift` (version 9; a new step reports progress to `TimelineUpgradeProgress`) |
 | Route rendering / speed shading | `Moves/RouteRendering.swift`, `Moves/SpeedProfileBuilder.swift` |
 | Settings, export, integrations | `Moves/MovesSettingsView.swift`, `Moves/DawarichSync.swift`, `Moves/WebhookSync.swift` (generic webhook), `Moves/MovesZipArchive.swift` (zip export/import) |
 | iCloud status, privacy zones | `Moves/CloudDataPresencePublisher.swift` (Settings → iCloud), `Moves/PrivacyZones.swift` (Home/Work circles on share cards and exports) |
 | Imports | `Moves/Import/` (Google Timeline: `GoogleTimelineImporter`, `GoogleTimelineDocument`, streaming `Records.json` scanner, zip reader); `Moves/OnboardingFlow.swift`; `Moves/TimelineArchiveImport.swift` (Moves GPX+GeoJSON+CSV+zip); `Moves/LocationLogImport.swift` + `Moves/RouteFileImport.swift` (any timestamped GPX/TCX/KML log → stays, moves, speed-based modes, geocoded names; bulk writer is `importLocationLog` in `VisitedLocation.swift`). Real-file fixtures live in gitignored `import-staging/` and `MovesTests/Fixtures/`; Google Timeline unit fixtures are `MovesTests/Fixtures/GoogleTimeline/`. |
-| Location capture, motion, route tracking | `Moves/LocationChange.swift` (`MovesLocationCaptureManager`) |
+| Location capture, motion, route tracking | `Moves/LocationChange.swift` (`MovesLocationCaptureManager`), `Moves/CapturePolicy.swift`, `Moves/CaptureIngestPipeline.swift`. The pipeline is one serial queue; fixes are written past a job that has stalled, and every lookup that can hang in the background (place names, Core Motion) goes through `BoundedWait`. The capture manager writes "Trip heartbeat" and "Stop heartbeat" lines to `DiagnosticsLog` (`Library/Caches/Diagnostics/moves.log` in the App Group container); read those first when a walk or drive is missing. |
 | Stops and trips from stored fixes | `Moves/SampleStayInference.swift`; `reconcileSampleStays` in `VisitedLocation.swift`, driven by `DefaultTimelineAssembler`. It rebuilds the last week on every location batch, so it must leave corrected, imported, and reviewed items alone, and `RemovedTimelineSpan` records what the person removed so fixes don't bring it back. |
 | Timeline assembly / transport inference | `DefaultTimelineAssembler` in the location/timeline sources; tests in `MovesTests/TimelineAssemblerTests.swift` |
 | App Intents / Siri / Action button | `Moves/MovesAppIntents.swift` |
@@ -143,6 +145,20 @@ precedence. See `docs/VISUAL-QA.md` for the current coverage record.
 ## Store safety
 
 Never hold a model across a delete on another context: touching a row another context deleted aborts the process (`SwiftData/BackingData.swift: This model instance was invalidated`), and nothing can catch it. Long background reads copy values out of a prefetched fetch (see `ShareMapAggregateBuilder`). Use `MovesApp.sharedContainer()`; a second container means a second CloudKit mirror on one file. Anything that deletes rows in bulk at launch goes in `TimelineSchemaUpgrader`, which holds back the timeline UI and background work until it finishes.
+
+The stay rebuild runs on its own context while the timeline is on screen, so it **retires
+rows instead of deleting them** (`TimelineRetirement`, `retire(_:)` in `VisitedLocation.swift`).
+A retired stay or trip is kept, detached, has no `dayTimeline`, and carries a mark (a trip's
+`retired-` dedupe key, a stop's `"retired"` review state). `purgeRetiredRowsIfAny` deletes
+marked rows at the next launch, before any view exists; a row with no day and no mark may be
+one iCloud is still bringing in and is never purged. Three rules follow:
+
+- Every fetch of `VisitPlace` or `MoveSegment` leaves retired rows out: use
+  `FetchDescriptor.live(sortBy:)` or add `&& $0.dayTimeline != nil` to the predicate.
+- Code that awaits keeps ids, not rows, and looks the row up again afterwards
+  (`livePlace(id:)`, `RoadRouteMatcher.matchedCoordinates(moveID:in:)`).
+- New code that removes automatic rows outside the launch upgrade retires them. Only
+  actions the person takes on the view's own context delete.
 
 To check a change against real history before it reaches a phone, back up the device (`xcrun devicectl device copy from --domain-type appGroupDataContainer --domain-identifier group.<bundle id> --source / --destination import-staging/device-backup-<date>/group-container`, which is gitignored). `StoreResilienceTests` then runs against that copy. Launching the simulator with `SIMCTL_CHILD_MOVES_SIMULATOR_STORE=<path to a copy of default.store>` opens that copy instead of demo data.
 

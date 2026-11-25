@@ -385,11 +385,11 @@ private struct TimelineUpgradeView: View {
                 .padding(.top, 4)
                 .animation(.default, value: progress.fractionCompleted)
                 .accessibilityLabel(Text("Updating your timeline"))
-            if let detail = progress.stepDetail {
-                Text(detail)
-                    .font(.footnote.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
+            // Always there, so the lines above stay put when a step starts counting.
+            Text(progress.stepDetail ?? " ")
+                .font(.footnote.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(progress.stepDetail == nil)
         }
         .padding(.horizontal, 32)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
