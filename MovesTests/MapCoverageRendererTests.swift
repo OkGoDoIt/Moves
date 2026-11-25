@@ -60,7 +60,21 @@ final class MapCoverageRendererTests: XCTestCase {
         XCTAssertEqual(street, MapCoverageRenderer.heatSigmaPoints * 1.18, accuracy: 3)
     }
 
-    func testAFlightAcrossTheAntimeridianDoesNotCrossTheWholeMap() throws {
+    /// Flying over a place is not being there; a ferry or train crossing it is.
+    func testHeatLeavesFlightsOut() throws {
+        let request = request(.heat, metersPerPoint: 2_000)
+        let geometry = try XCTUnwrap(MapCoverageRenderer.geometry(for: request, blurSigmaPoints: MapCoverageRenderer.heatSigmaPoints))
+        let flight = horizontalTrack(across: request.viewport, at: 0.5, mode: .plane)
+        let density = try MapCoverageRenderer.heatDensity(
+            MapActivitySubset(tracks: [flight], stays: [], undatedCoverage: []), geometry: geometry)
+        XCTAssertEqual(density.max() ?? 0, 0)
+        for mode in TransportMode.allCases where mode != .plane {
+            XCTAssertTrue(MapCoverageLayer.heat.draws(mode), mode.rawValue)
+        }
+        XCTAssertTrue(MapCoverageLayer.routes.draws(.plane))
+    }
+
+    func testACrossingOfTheAntimeridianDoesNotCrossTheWholeMap() throws {
         let tokyo = MercatorPoint(CLLocationCoordinate2D(latitude: 35.5, longitude: 139.8))
         let pacific = MercatorPoint(CLLocationCoordinate2D(latitude: 45, longitude: 179.5))
         let alaska = MercatorPoint(CLLocationCoordinate2D(latitude: 50, longitude: -179.5))
@@ -71,7 +85,7 @@ final class MapCoverageRendererTests: XCTestCase {
         let world = MKMapSize.world.width
         let viewport = MercatorRect(minX: alaska.x - world / 100, minY: alaska.y - world / 100,
                                     maxX: alaska.x + world / 100, maxY: alaska.y + world / 100)
-        let track = MapActivityTrack(start: .distantPast, end: .distantFuture, mode: .plane, chunks: MapActivityIndex.chunks(for: points))
+        let track = MapActivityTrack(start: .distantPast, end: .distantFuture, mode: .boat, chunks: MapActivityIndex.chunks(for: points))
         XCTAssertEqual(MapRasterGeometry.worldOffsets(for: track.chunks[0].bounds, in: viewport), [-world])
         let request = MapCoverageRenderRequest(layer: .heat, viewport: viewport, viewSize: viewSize, isDark: false)
         let geometry = try XCTUnwrap(MapCoverageRenderer.geometry(for: request, blurSigmaPoints: MapCoverageRenderer.heatSigmaPoints))

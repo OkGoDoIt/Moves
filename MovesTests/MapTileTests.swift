@@ -225,6 +225,26 @@ final class MapTileTests: XCTestCase {
         XCTAssertGreaterThan(alphaSum(walking.image), alphaSum(staysOnly.image))
     }
 
+    func testFlightsDrawInRoutesButNotInHeatOrFog() throws {
+        var generator = SeededGenerator(seed: 5)
+        let values = syntheticValues(trips: 30, stays: 10, start: date(2026, 1, 5, calendar: calendar), seed: &generator, modes: [.plane])
+        let database = try makeDatabase()
+        let built = MapTileBuilder.build(month: 202_601, values: values, calendar: calendar)
+        try database.commit([MapTileDatabase.MonthBuild(bucket: 202_601, signature: "s", summary: built.summary, tiles: built.tiles)])
+        let plan = MapTileRangePlan(buckets: [0], partial: [], includeUndated: false)
+        for layer in MapCoverageLayer.allCases {
+            let request = request(layer, metersPerPoint: 25)
+            let everyMode = try XCTUnwrap(MapTileCompositor.render(request, input: .init(database: database, plan: plan, loose: nil, modes: nil)))
+            // Routes with no mode draws nothing at all; Heat and Fog are then their stays alone.
+            let noMode = try MapTileCompositor.render(request, input: .init(database: database, plan: plan, loose: nil, modes: []))
+            if layer == .routes {
+                XCTAssertGreaterThan(alphaSum(everyMode.image), noMode.map { alphaSum($0.image) } ?? 0)
+            } else {
+                XCTAssertEqual(meanAbsoluteDifference(everyMode.image, try XCTUnwrap(noMode).image), 0, accuracy: 0.001, "\(layer)")
+            }
+        }
+    }
+
     func testTilesLookLikeTheIndexRenderer() throws {
         var generator = SeededGenerator(seed: 11)
         let values = syntheticValues(trips: 400, stays: 200, start: Date(timeIntervalSince1970: 1_700_000_000), seed: &generator,

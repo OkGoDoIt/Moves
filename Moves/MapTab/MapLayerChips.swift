@@ -15,6 +15,12 @@ enum MapCoverageLayer: String, CaseIterable, Identifiable, Sendable {
         case .fog: return String(localized: "Fog")
         }
     }
+
+    /// Heat and Fog are about where a person has been, and flying over a place is not being
+    /// there. Both ends of a flight still show, as stays.
+    func draws(_ mode: TransportMode) -> Bool {
+        self == .routes || mode != .plane
+    }
 }
 
 /// Mode filter chips and Routes / Heat / Fog layer picker.
@@ -23,10 +29,13 @@ struct MapLayerChips: View {
     @Binding var enabledModes: Set<TransportMode>
     let presentModes: [TransportMode]
 
+    /// Only modes this layer draws. The others keep their setting for when the layer changes.
+    private var shownModes: [TransportMode] { presentModes.filter(layer.draws) }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             layerPicker
-            if !presentModes.isEmpty {
+            if !shownModes.isEmpty {
                 modeChips
             }
         }
@@ -61,7 +70,7 @@ struct MapLayerChips: View {
 
     private var modeChips: some View {
         HStack(spacing: 6) {
-            ForEach(presentModes, id: \.self) { mode in
+            ForEach(shownModes, id: \.self) { mode in
                 let isOn = enabledModes.isEmpty || enabledModes.contains(mode)
                 Button {
                     toggle(mode)
@@ -92,7 +101,7 @@ struct MapLayerChips: View {
         var current = enabledModes.isEmpty ? Set(presentModes) : enabledModes
         if current.contains(mode) {
             current.remove(mode)
-            if current.isEmpty {
+            if current.isDisjoint(with: shownModes) {
                 current = Set(presentModes)
             }
         } else {

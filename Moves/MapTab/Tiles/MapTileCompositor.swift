@@ -215,8 +215,8 @@ enum MapTileCompositor {
         }
     }
 
-    static func allowedModes(_ modes: Set<TransportMode>?) -> [Bool] {
-        TransportMode.allCases.map { modes?.contains($0) ?? true }
+    static func allowedModes(_ modes: Set<TransportMode>?, in layer: MapCoverageLayer = .routes) -> [Bool] {
+        TransportMode.allCases.map { layer.draws($0) && (modes?.contains($0) ?? true) }
     }
 
     /// Calls `body` with each visible segment's endpoints in bitmap pixels, once per world copy.
@@ -392,7 +392,7 @@ enum MapTileCompositor {
                 base[row + width] += w * (1 - fx) * fy
                 base[row + width + 1] += w * fx * fy
             }
-            forEachSegment(tiles, geometry: geometry, cull: cull, allowed: allowedModes(input.modes)) { _, a, b, count in
+            forEachSegment(tiles, geometry: geometry, cull: cull, allowed: allowedModes(input.modes, in: .heat)) { _, a, b, count in
                 guard let (p, q) = MapCoverageRenderer.clip((a.x, a.y), (b.x, b.y), width: Double(width), height: Double(height)) else { return }
                 let dx = q.x - p.x, dy = q.y - p.y
                 let length = (dx * dx + dy * dy).squareRoot()
@@ -433,9 +433,7 @@ enum MapTileCompositor {
         }
         let cull = geometry.cullRect(marginPixels: radius * 2)
         let minimumStep = max(1, radius * 0.3)
-        // A flight is travel, not ground explored.
-        var allowed = allowedModes(input.modes)
-        allowed[Int(MapTileTiler.modeIndex(.plane))] = false
+        let allowed = allowedModes(input.modes, in: .fog)
         var level = level(geometry: geometry, cellPixels: minimumStep, cull: cull)
         var tiles: [MapPlacedTile] = []
         var pieces: [CGPoint] = []

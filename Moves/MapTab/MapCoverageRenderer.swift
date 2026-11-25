@@ -407,7 +407,7 @@ enum MapCoverageRenderer {
                 }
             }
 
-            for track in subset.tracks {
+            for track in subset.tracks where MapCoverageLayer.heat.draws(track.mode) {
                 try Task.checkCancellation()
                 for chunk in track.chunks {
                     for shift in MapRasterGeometry.worldOffsets(for: chunk.bounds, in: cull) {
@@ -602,8 +602,7 @@ enum MapCoverageRenderer {
 
         // Each run is stroked on its own: a stroke's cost grows with how much of its own outline
         // overlaps, and separate strokes don't overlap each other.
-        for track in subset.tracks where track.mode != .plane {
-            // A flight is travel, not ground explored.
+        for track in subset.tracks where MapCoverageLayer.fog.draws(track.mode) {
             try Task.checkCancellation()
             for chunk in track.chunks {
                 let spanX = chunk.bounds.width * geometry.scale, spanY = chunk.bounds.height * geometry.scale
