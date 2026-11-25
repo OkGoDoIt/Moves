@@ -3,7 +3,7 @@ import SwiftUI
 
 /// Correction actions for a storyline row.
 ///
-/// WS1 should wrap `StorylineRow` with swipe and a context menu using this
+/// WS1 should wrap `StorylineRow` with a context menu using this
 /// environment value:
 ///
 /// ```
@@ -12,7 +12,8 @@ import SwiftUI
 ///     .timelinePlaceActions(visit)   // or .timelineMoveActions(move)
 /// ```
 ///
-/// Leading swipe: Rename (place) / Mode (move). Trailing swipe: Delete.
+/// Rows carry no swipe actions: a horizontal swipe on the day list changes the day.
+/// Every correction is in the long-press menu and on the row's detail screen.
 /// Context menu: place = Rename, Pick nearby, Not a stop, Merge prev/next,
 /// Split, Edit times, Delete. Move = Change mode, Split, Merge prev/next,
 /// Delete. Path is WS4 — omitted here so WS1 does not need a no-op menu.
@@ -58,21 +59,6 @@ private struct TimelinePlaceActionsModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                if let actions {
-                    Button(String(localized: "Rename")) {
-                        actions.requestRename(visit)
-                    }
-                    .tint(.blue)
-                }
-            }
-            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                if let actions {
-                    Button(String(localized: "Delete"), role: .destructive) {
-                        actions.requestDeletePlace(visit)
-                    }
-                }
-            }
             .contextMenu {
                 if let actions {
                     TimelinePlaceContextMenu(visit: visit, actions: actions)
@@ -87,21 +73,6 @@ private struct TimelineMoveActionsModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                if let actions {
-                    Button(String(localized: "Mode")) {
-                        actions.requestChangeMode(move)
-                    }
-                    .tint(.indigo)
-                }
-            }
-            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                if let actions {
-                    Button(String(localized: "Delete"), role: .destructive) {
-                        actions.requestDeleteMove(move)
-                    }
-                }
-            }
             .contextMenu {
                 if let actions {
                     TimelineMoveContextMenu(move: move, actions: actions)

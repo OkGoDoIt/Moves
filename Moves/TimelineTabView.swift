@@ -129,23 +129,24 @@ struct DayHeaderView: View {
 
             Button(action: onJumpToDate) {
                 VStack(spacing: 3) {
-                    HStack(spacing: 8) {
-                        Text(day.dayStart, format: .dateTime.weekday(.wide).day().month(.wide))
-                            .font(.system(size: 18, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.primary)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.75)
+                    // The whole date always shows: the long form when it fits, else the short one.
+                    ViewThatFits(in: .horizontal) {
+                        dateText(.dateTime.weekday(.wide).day().month(.wide))
+                        dateText(.dateTime.weekday(.abbreviated).day().month(.abbreviated))
+                        dateText(.dateTime.weekday(.abbreviated).day().month(.abbreviated))
+                            .minimumScaleFactor(0.7)
+                    }
 
+                    HStack(spacing: 6) {
                         if isToday {
                             liveNowBadge
                         }
+                        Text(statsText)
+                            .font(.system(size: 12, weight: .medium, design: .rounded))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
                     }
-
-                    Text(statsText)
-                        .font(.system(size: 12, weight: .medium, design: .rounded))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.85)
                 }
                 .frame(maxWidth: .infinity)
             }
@@ -166,6 +167,13 @@ struct DayHeaderView: View {
         }
     }
 
+    private func dateText(_ format: Date.FormatStyle) -> some View {
+        Text(day.dayStart, format: format)
+            .font(.system(size: 18, weight: .semibold, design: .rounded))
+            .foregroundStyle(.primary)
+            .lineLimit(1)
+    }
+
     private var liveNowBadge: some View {
         TimelineView(.periodic(from: .now, by: 30)) { context in
             HStack(spacing: 5) {
@@ -183,8 +191,8 @@ struct DayHeaderView: View {
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 1)
             .background(.thinMaterial, in: Capsule())
         }
         .accessibilityElement(children: .combine)
@@ -207,26 +215,42 @@ struct ActivityBubbleMetric: Identifiable, Equatable {
 
     var id: String { mode.rawValue }
 
-    var title: String { mode.title }
-    var chipTitle: String { mode.chipTitle }
+    /// Trips without a known mode share one chip, so the chips add up to the day's total.
+    var title: String { mode == .unknown ? String(localized: "Other") : mode.title }
+    var chipTitle: String { mode == .unknown ? String(localized: "Other") : mode.chipTitle }
     var symbolName: String { mode.symbolName }
     var tint: Color { MovesPalette.transport(mode) }
 }
 
 enum ActivityBubbleMetrics {
-    /// Groups a day’s moves by `TransportMode`, skipping stationary / unknown.
+    /// The chip a trip counts towards. Trips with no known way of moving go under Other.
+    static func chipMode(for mode: TransportMode) -> TransportMode {
+        switch mode {
+        case .stationary, .unknown:
+            return .unknown
+        case .walking, .running, .swimming, .cycling, .automotive, .train, .plane, .boat:
+            return mode
+        }
+    }
+
+    /// Groups a day’s moves by `TransportMode`. Every trip counts towards one chip, so the
+    /// chips add up to the day's distance in the header; Other comes last.
     static func make(from dayTimeline: DayTimeline) -> [ActivityBubbleMetric] {
+        make(from: dayTimeline.moves.map { ($0.transportMode, $0.timelineDuration, $0.distanceMeters) })
+    }
+
+    static func make(from moves: [(mode: TransportMode, duration: TimeInterval, distance: CLLocationDistance)]) -> [ActivityBubbleMetric] {
         var durationByMode: [TransportMode: TimeInterval] = [:]
         var distanceByMode: [TransportMode: CLLocationDistance] = [:]
 
-        for move in dayTimeline.moves {
-            let mode = move.transportMode
-            guard mode != .stationary, mode != .unknown else { continue }
-            durationByMode[mode, default: 0] += move.timelineDuration
-            distanceByMode[mode, default: 0] += max(move.distanceMeters, 0)
+        for move in moves {
+            let mode = chipMode(for: move.mode)
+            durationByMode[mode, default: 0] += move.duration
+            distanceByMode[mode, default: 0] += max(move.distance, 0)
         }
 
-        return TransportMode.allCases.compactMap { mode in
+        let ordered = TransportMode.allCases.filter { $0 != .unknown && $0 != .stationary } + [.unknown]
+        return ordered.compactMap { mode in
             let duration = durationByMode[mode] ?? 0
             let distance = distanceByMode[mode] ?? 0
             guard duration > 0 || distance > 0 else { return nil }

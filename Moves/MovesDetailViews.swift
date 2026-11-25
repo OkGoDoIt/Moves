@@ -15,12 +15,19 @@ struct PlaceMapDetailView: View {
     @EnvironmentObject private var undoController: AppUndoController
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.timelineEditController) private var editController
     @Bindable var place: VisitPlace
     @AppStorage(MapMarkerDisplaySettings.showsBigMarkersKey) private var showsBigMarkers = false
 
     @State private var camera: MapCameraPosition
     @State private var draftLabel: String
     @State private var draftComment: String
+    @FocusState private var focusedField: Field?
+
+    private enum Field: Hashable {
+        case name
+        case remarks
+    }
     @State private var isConfirmingDeletion = false
     @State private var isDeleting = false
     @State private var deleteErrorMessage = ""
@@ -28,7 +35,7 @@ struct PlaceMapDetailView: View {
 
     init(place: VisitPlace) {
         self.place = place
-        _draftLabel = State(initialValue: place.userLabel ?? place.autoLabel ?? "")
+        _draftLabel = State(initialValue: Self.currentName(of: place) ?? "")
         _draftComment = State(initialValue: place.comment ?? "")
         _camera = State(initialValue: .region(
             MKCoordinateRegion(
@@ -44,7 +51,7 @@ struct PlaceMapDetailView: View {
                 MovesDetailArrangement {
                     placeMap
                 } controls: {
-                    placeControls
+                    placeControls(includesNamingCard: true)
                 }
             } else if LandscapeLayoutSettings.usesSplitLayout(proxy.size) {
                 LandscapeSplitView {
@@ -56,7 +63,7 @@ struct PlaceMapDetailView: View {
                                 Spacer()
                                 LandscapePaneSideButton()
                             }
-                            placeControls
+                            placeControls(includesNamingCard: true)
                         }
                         .padding(12)
                     }
@@ -67,14 +74,36 @@ struct PlaceMapDetailView: View {
                 .safeAreaPadding(.bottom, 8)
             } else {
                 placeMap
+                    .overlay(alignment: .top) {
+                        if needsName {
+                            namingCard
+                                .padding(.horizontal, 12)
+                                .padding(.top, 8)
+                        }
+                    }
                     .safeAreaBar(edge: .bottom, spacing: 0) {
-                        placeControls
+                        placeControls(includesNamingCard: false)
                             .detailMapOverlayChrome(bottomInset: proxy.safeAreaInsets.bottom)
                     }
             }
         }
-        .navigationTitle("Place")
+        .navigationTitle(placeTitle)
         .navigationBarTitleDisplayMode(.inline)
+        .onChange(of: focusedField) { previous, _ in
+            // Name and remarks save when the field is left; the Undo pill takes a name back.
+            switch previous {
+            case .name: saveLabel()
+            case .remarks: saveComment()
+            case nil: break
+            }
+        }
+        .onChange(of: Self.currentName(of: place)) { _, name in
+            if focusedField != .name { draftLabel = name ?? "" }
+        }
+        .onDisappear {
+            if focusedField == .remarks { saveComment() }
+            if focusedField == .name { saveLabel() }
+        }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button(role: .destructive) {
@@ -115,99 +144,153 @@ struct PlaceMapDetailView: View {
                     MapLocationDot(tint: MovesPalette.place)
                 }
             }
+            UserAnnotation()
         }
         .mapStyle(.standard(elevation: .flat, emphasis: .muted))
     }
 
-    private var placeControls: some View {
+    /// The stay's name as the timeline shows it: the person's own label, then the learned place.
+    private static func currentName(of place: VisitPlace) -> String? {
+        if let label = place.userLabel?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty {
+            return label
+        }
+        if let known = place.knownPlace?.name.trimmingCharacters(in: .whitespacesAndNewlines), !known.isEmpty {
+            return known
+        }
+        return nil
+    }
+
+    private var placeTitle: String {
+        Self.currentName(of: place) ?? place.displayTitle
+    }
+
+    private var needsName: Bool {
+        TimelinePlaceNaming.needsName(place)
+    }
+
+    /// "8:15 AM – 8:43 AM · 28m", or "Since 8:15 AM · 3h 2m" while the stay goes on.
+    private var stayText: String {
+        let arrival = place.arrivalDate.formatted(date: .omitted, time: .shortened)
+        guard let departure = place.departureDate else {
+            let duration = DurationFormatter.text(for: max(Date.now.timeIntervalSince(place.arrivalDate), 0))
+            return String(localized: "Since \(arrival) · \(duration)")
+        }
+        let left = departure.formatted(date: .omitted, time: .shortened)
+        let duration = DurationFormatter.text(for: max(departure.timeIntervalSince(place.arrivalDate), 0))
+        return "\(arrival) – \(left) · \(duration)"
+    }
+
+    /// Nearby names first; one tap names the stay.
+    private var namingCard: some View {
         VStack(alignment: .leading, spacing: 8) {
-                Text(place.displayTitle)
-                    .font(.system(size: 18, weight: .bold, design: .rounded))
-                Text("Arrived \(place.arrivalDate, format: .dateTime.hour().minute())")
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    .foregroundStyle(Color.primary.opacity(0.75))
-
-                if let autoLabel = place.autoLabel,
-                   (place.userLabel?.isEmpty ?? true) {
-                    Text("Auto-detected: \(autoLabel)")
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                Image(systemName: "pencil")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(MovesPalette.place)
+                Text(String(localized: "Name this place"))
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                Spacer(minLength: 0)
+                Button(String(localized: "Type a name")) {
+                    focusedField = .name
                 }
-
-                HStack(spacing: 8) {
-                    TextField("Label (Home, Work...)", text: $draftLabel)
-                        .textInputAutocapitalization(.words)
-                        .autocorrectionDisabled()
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
-                        .background(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(MovesPalette.textFieldBackground.opacity(0.92))
-                        )
-                        .onSubmit(saveLabel)
-
-                    Button("Save") {
-                        saveLabel()
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-
-                HStack(spacing: 8) {
-                    QuickLabelButton(label: "Home") {
-                        draftLabel = "Home"
-                        saveLabel()
-                    }
-                    QuickLabelButton(label: "Work") {
-                        draftLabel = "Work"
-                        saveLabel()
-                    }
-                    QuickLabelButton(label: "Gym") {
-                        draftLabel = "Gym"
-                        saveLabel()
-                    }
-                }
-
-                HStack(alignment: .bottom, spacing: 8) {
-                    TextField("Remarks", text: $draftComment, axis: .vertical)
-                        .textInputAutocapitalization(.sentences)
-                        .lineLimit(1...4)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
-                        .background(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(MovesPalette.textFieldBackground.opacity(0.92))
-                        )
-                        .accessibilityLabel("Place remarks")
-
-                    Button("Save") {
-                        saveComment()
-                    }
-                    .buttonStyle(.bordered)
-                }
+                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                .buttonStyle(.plain)
+                .foregroundStyle(MovesPalette.place)
+            }
+            PlaceNamingSuggestions(visit: place) { candidate in
+                editController?.applyCandidate(candidate, to: place)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .panelSurface()
     }
 
+    private func placeControls(includesNamingCard: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+                if needsName && includesNamingCard {
+                    namingCard
+                }
+
+                Text(placeTitle)
+                    .font(.system(size: 18, weight: .bold, design: .rounded))
+                    .lineLimit(2)
+                Text(stayText)
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Color.primary.opacity(0.75))
+
+                if let autoLabel = place.autoLabel, autoLabel != placeTitle {
+                    Text(autoLabel)
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                TextField(needsName ? place.displayTitle : String(localized: "Name"), text: $draftLabel)
+                    .textInputAutocapitalization(.words)
+                    .autocorrectionDisabled()
+                    .submitLabel(.done)
+                    .focused($focusedField, equals: .name)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(MovesPalette.textFieldBackground.opacity(0.92))
+                    )
+                    .onSubmit { focusedField = nil }
+                    .accessibilityLabel(String(localized: "Place name"))
+
+                HStack(spacing: 8) {
+                    ForEach([String(localized: "Home"), String(localized: "Work"), String(localized: "Gym")], id: \.self) { label in
+                        QuickLabelButton(label: label) {
+                            draftLabel = label
+                            saveLabel()
+                        }
+                    }
+                }
+
+                TextField(String(localized: "Remarks"), text: $draftComment, axis: .vertical)
+                    .textInputAutocapitalization(.sentences)
+                    .lineLimit(1...4)
+                    .focused($focusedField, equals: .remarks)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(MovesPalette.textFieldBackground.opacity(0.92))
+                    )
+                    .accessibilityLabel(String(localized: "Place remarks"))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .panelSurface()
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button(String(localized: "Done")) { focusedField = nil }
+            }
+        }
+    }
+
+    /// Names the stay through the same correction path as the timeline, so it learns the
+    /// place and the Undo pill can take it back.
     private func saveLabel() {
         let trimmed = draftLabel.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            place.userLabel = nil
+        guard !trimmed.isEmpty, trimmed != Self.currentName(of: place) else {
+            draftLabel = Self.currentName(of: place) ?? ""
+            return
+        }
+        if let editController {
+            editController.applyRename(to: place, name: trimmed)
         } else {
             place.userLabel = trimmed
-            place.autoLabel = nil
-        }
-
-        do {
-            try modelContext.save()
-        } catch {
-            print("Failed to save place label: \(error.localizedDescription)")
+            try? modelContext.save()
         }
     }
 
     private func saveComment() {
         let trimmed = draftComment.trimmingCharacters(in: .whitespacesAndNewlines)
-        place.comment = trimmed.isEmpty ? nil : trimmed
+        let value: String? = trimmed.isEmpty ? nil : trimmed
+        guard value != place.comment else { return }
+        place.comment = value
 
         do {
             try modelContext.save()
@@ -534,6 +617,9 @@ struct MoveMapDetailView: View {
                         }
                     }
                 }
+
+                // Where the person is now; the camera still frames only this trip.
+                UserAnnotation()
             }
             .simultaneousGesture(manualRouteEditGesture(proxy: proxy))
         }
