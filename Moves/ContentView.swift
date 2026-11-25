@@ -561,6 +561,11 @@ struct ContentView: View {
                     .help("Settings")
                 }
 
+                // Shows itself only when something is waiting for a look.
+                ToolbarItem(placement: .principal) {
+                    ReviewEntryButton()
+                }
+
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         rootController.isShowingStatisticsSearch = true

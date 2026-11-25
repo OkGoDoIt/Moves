@@ -252,6 +252,58 @@ final class TimelineEditController: TimelineItemActions {
         }
     }
 
+    /// Accepts the place a stay was matched to, so later stays there match it too.
+    func confirmPlace(_ visit: VisitPlace) {
+        guard let place = visit.knownPlace else {
+            confirmReview(visit)
+            return
+        }
+        // Restored from a payload so Undo reliably brings the question back.
+        let payload = ConfirmedPlacePayload(visit: visit)
+        performStructural(named: String(localized: "Confirmed")) { repo, context in
+            let eventsBefore = Set(try context.fetch(FetchDescriptor<PlaceCorrectionEvent>()).map(\.id))
+            try assign(visit, to: place, using: repo)
+            let added = try context.fetch(FetchDescriptor<PlaceCorrectionEvent>())
+                .map(\.id).filter { !eventsBefore.contains($0) }
+            registerRestore(payload.removingEvents(added), on: context)
+        }
+    }
+
+    /// Keeps a brief stay as a stop.
+    func keepStop(_ visit: VisitPlace) {
+        let payload = ReviewStatesPayload(visits: [(visit.id, visit.reviewStateRaw)], moves: [])
+        performStructural(named: String(localized: "Kept stop")) { _, context in
+            visit.reviewState = .confirmed
+            registerRestore(payload, on: context)
+        }
+    }
+
+    /// Dismisses every listed question as one Undo step. Rows are looked up by id here,
+    /// so a list built a moment ago never writes to a row that has since gone.
+    func dismissReviews(visitIDs: [UUID], moveIDs: [UUID]) {
+        guard let context = modelContext, !(visitIDs.isEmpty && moveIDs.isEmpty) else { return }
+        let count = visitIDs.count + moveIDs.count
+        let name = count == 1
+            ? String(localized: "Dismissed")
+            : String(localized: "Dismissed \(count)")
+        // Restored from a payload, so a bulk change is exactly one step on the Undo pill.
+        performStructural(named: name) { _, context in
+            let visits = visitIDs.isEmpty ? [] : try context.fetch(FetchDescriptor<VisitPlace>(
+                predicate: #Predicate { visitIDs.contains($0.id) }
+            ))
+            let moves = moveIDs.isEmpty ? [] : try context.fetch(FetchDescriptor<MoveSegment>(
+                predicate: #Predicate { moveIDs.contains($0.id) }
+            ))
+            let payload = ReviewStatesPayload(
+                visits: visits.map { ($0.id, $0.reviewStateRaw) },
+                moves: moves.map { ($0.id, $0.reviewStateRaw) }
+            )
+            for visit in visits { visit.reviewState = .dismissed }
+            for move in moves { move.reviewState = .dismissed }
+            registerRestore(payload, on: context)
+        }
+    }
+
     func undoLastChange() {
         guard let context = modelContext, let undoController else { return }
         context.undoManager = undoController.manager
@@ -555,6 +607,64 @@ private enum LiveTimelineRows {
         guard !identifiers.isEmpty else { return [] }
         return ((try? context.fetch(FetchDescriptor<PhotoAttachment>())) ?? [])
             .filter { identifiers.contains($0.assetLocalIdentifier) }
+    }
+}
+
+/// A stay's place match as it was before "Yes", plus the answer it recorded.
+private struct ConfirmedPlacePayload: TimelineUndoRestoring {
+    let id: UUID
+    let knownPlaceID: UUID?
+    let assignmentSourceRaw: String
+    let assignmentConfidence: Double
+    let reviewStateRaw: String
+    var eventIDs: [UUID] = []
+
+    init(visit: VisitPlace) {
+        id = visit.id
+        knownPlaceID = visit.knownPlace?.id
+        assignmentSourceRaw = visit.assignmentSourceRaw
+        assignmentConfidence = visit.assignmentConfidence
+        reviewStateRaw = visit.reviewStateRaw
+    }
+
+    func removingEvents(_ ids: [UUID]) -> ConfirmedPlacePayload {
+        var copy = self
+        copy.eventIDs = ids
+        return copy
+    }
+
+    func restore(in context: ModelContext) {
+        if let visit = LiveTimelineRows.visit(id, in: context) {
+            visit.knownPlace = LiveTimelineRows.knownPlace(knownPlaceID, in: context)
+            visit.assignmentSourceRaw = assignmentSourceRaw
+            visit.assignmentConfidence = assignmentConfidence
+            visit.reviewStateRaw = reviewStateRaw
+        }
+        guard !eventIDs.isEmpty else { return }
+        let ids = eventIDs
+        let events = (try? context.fetch(FetchDescriptor<PlaceCorrectionEvent>(predicate: #Predicate { ids.contains($0.id) }))) ?? []
+        for event in events { context.delete(event) }
+    }
+}
+
+/// Review answers as they were before a Dismiss, found by id when Undo runs.
+private struct ReviewStatesPayload: TimelineUndoRestoring {
+    let visits: [(UUID, String)]
+    let moves: [(UUID, String)]
+
+    func restore(in context: ModelContext) {
+        let visitStates = Dictionary(visits, uniquingKeysWith: { first, _ in first })
+        let moveStates = Dictionary(moves, uniquingKeysWith: { first, _ in first })
+        let visitIDs = Array(visitStates.keys)
+        let moveIDs = Array(moveStates.keys)
+        if !visitIDs.isEmpty {
+            let rows = (try? context.fetch(FetchDescriptor<VisitPlace>(predicate: #Predicate { visitIDs.contains($0.id) }))) ?? []
+            for row in rows { row.reviewStateRaw = visitStates[row.id] ?? row.reviewStateRaw }
+        }
+        if !moveIDs.isEmpty {
+            let rows = (try? context.fetch(FetchDescriptor<MoveSegment>(predicate: #Predicate { moveIDs.contains($0.id) }))) ?? []
+            for row in rows { row.reviewStateRaw = moveStates[row.id] ?? row.reviewStateRaw }
+        }
     }
 }
 

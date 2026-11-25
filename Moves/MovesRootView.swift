@@ -97,19 +97,13 @@ struct MovesRootView: View {
         query.fetchLimit = 1
         return query
     }
-    @Query(filter: #Predicate<VisitPlace> { $0.reviewStateRaw == "pending" })
-    private var pendingReviewVisits: [VisitPlace]
-
-    @Query(filter: #Predicate<MoveSegment> { $0.reviewStateRaw == "pending" })
-    private var pendingReviewMoves: [MoveSegment]
-
     var body: some View {
         @Bindable var editor = editController
         TabView(selection: $controller.selectedTab) {
+            // The Review count lives on `ReviewEntryButton`, not as a red tab badge.
             Tab("Timeline", systemImage: "calendar", value: MovesTab.timeline) {
                 TimelineTabView()
             }
-            .badge(pendingReviewVisits.count + pendingReviewMoves.count)
 
             Tab("Map", systemImage: "map", value: MovesTab.map) {
                 MapTabView()
@@ -142,6 +136,9 @@ struct MovesRootView: View {
             )
             applyLaunchJumpIfNeeded()
             presentOnboardingIfNeeded()
+            // Questions whose reason has gone (a stay that grew long, an answer given
+            // elsewhere, imported or old history) are cleared before anything counts them.
+            TimelineSchemaUpgrader.settleReviewQuestions(onViewContext: modelContext)
         }
         .onChange(of: earliestDays.isEmpty) { _, isEmpty in
             if isEmpty {

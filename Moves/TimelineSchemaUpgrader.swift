@@ -8,7 +8,7 @@ import SwiftData
 /// launch: a UserDefaults version key skips work that already completed, and
 /// the individual steps are idempotent if the key is missing.
 enum TimelineSchemaUpgrader {
-    static let currentVersion = 3
+    static let currentVersion = 4
     static let userDefaultsKey = "moves.timelineSchemaVersion"
 
     @MainActor private static var running: Task<Void, Never>?
@@ -64,8 +64,96 @@ enum TimelineSchemaUpgrader {
             try repository.repairDuplicateStays()
             try repository.repairTripLabels()
         }
+        if storedVersion < 4 {
+            try tagImportedHistory(in: context)
+            try settleReviewQuestions(in: context)
+        }
         if context.hasChanges {
             try context.save()
+        }
+    }
+
+    // MARK: - Review questions
+
+    /// Trips and stays imported before the importer tagged their origin still read as
+    /// recorded here. A trip whose every fix came from a history file is imported, and so
+    /// is a stay whose every trip in and out is. Their open questions go with them.
+    @discardableResult
+    static func tagImportedHistory(in context: ModelContext) throws -> Int {
+        let sensor = TimelineItemOrigin.sensor.rawValue
+        var moveDescriptor = FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.originRaw == sensor })
+        moveDescriptor.relationshipKeyPathsForPrefetching = [\.samplesStorage]
+        var tagged = 0
+        for move in try context.fetch(moveDescriptor) where TimelineReviewHeuristics.isImportedHistory(move) {
+            move.origin = .imported
+            if move.reviewState == .pending { move.reviewState = .none }
+            tagged += 1
+        }
+        guard tagged > 0 else { return 0 }
+        let visits = try context.fetch(FetchDescriptor<VisitPlace>(predicate: #Predicate { $0.originRaw == sensor }))
+        for visit in visits where TimelineReviewHeuristics.isImportedHistory(visit) {
+            visit.origin = .imported
+            if visit.reviewState == .pending { visit.reviewState = .none }
+            tagged += 1
+        }
+        return tagged
+    }
+
+    /// Clears open questions whose reason no longer holds, and asks about recent stays
+    /// too brief to have been flagged when they were written. Reads only open questions
+    /// and recent brief stays, so it is cheap enough to run on every launch.
+    @discardableResult
+    static func settleReviewQuestions(in context: ModelContext, now: Date = .now) throws -> Int {
+        let pending = ReviewState.pending.rawValue
+        let none = ReviewState.none.rawValue
+        let sensor = TimelineItemOrigin.sensor.rawValue
+        var changed = 0
+
+        let pendingVisits = try context.fetch(FetchDescriptor<VisitPlace>(
+            predicate: #Predicate { $0.reviewStateRaw == pending }
+        ))
+        for visit in pendingVisits where TimelineReviewHeuristics.question(for: visit, now: now) == nil {
+            visit.reviewState = .none
+            changed += 1
+        }
+
+        let pendingMoves = try context.fetch(FetchDescriptor<MoveSegment>(
+            predicate: #Predicate { $0.reviewStateRaw == pending }
+        ))
+        for move in pendingMoves where TimelineReviewHeuristics.question(for: move, now: now) == nil {
+            move.reviewState = .none
+            changed += 1
+        }
+
+        let windowStart = now.addingTimeInterval(-TimelineReviewHeuristics.newQuestionWindow)
+        let recentStays = try context.fetch(FetchDescriptor<VisitPlace>(
+            predicate: #Predicate { visit in
+                visit.reviewStateRaw == none
+                    && visit.originRaw == sensor
+                    && visit.arrivalDate >= windowStart
+                    && visit.departureDate != nil
+            }
+        ))
+        for visit in recentStays where TimelineReviewHeuristics.shouldAskAboutStay(visit, now: now) {
+            visit.reviewState = .pending
+            changed += 1
+        }
+        return changed
+    }
+
+    /// The launch-time pass for review questions once the schema is current. Runs on the
+    /// view context with undo detached, so it never lands on the person's Undo stack.
+    @MainActor
+    static func settleReviewQuestions(onViewContext context: ModelContext) {
+        let manager = context.undoManager
+        context.undoManager = nil
+        defer { context.undoManager = manager }
+        do {
+            if try settleReviewQuestions(in: context) > 0 {
+                try context.save()
+            }
+        } catch {
+            print("Settling review questions failed: \(error.localizedDescription)")
         }
     }
 

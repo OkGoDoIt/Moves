@@ -683,11 +683,14 @@ final class DefaultTimelineAssembler: TimelineAssembler {
             let unsureOfMode = transportMode == classification.mode
                 ? classification.confidence < TimelineReviewHeuristics.uncertainModeConfidence
                 : transportMode != afterLastBlock
-            if asksForReview, move.reviewState == .none, move.transportModeSource == .auto, unsureOfMode {
+            // Only recent, recorded trips are worth a question: nobody should be asked
+            // about imported history or last month.
+            if asksForReview, move.reviewState == .none, move.transportModeSource == .auto, unsureOfMode,
+               Date.now.timeIntervalSince(move.startDate) <= TimelineReviewHeuristics.newQuestionWindow,
+               !TimelineReviewHeuristics.isImportedHistory(move) {
                 move.reviewState = .pending
             }
-            if asksForReview, leg.startPlace.reviewState == .none,
-               TimelineReviewHeuristics.isShortTransitStop(leg.startPlace) {
+            if asksForReview, TimelineReviewHeuristics.shouldAskAboutStay(leg.startPlace) {
                 leg.startPlace.reviewState = .pending
             }
         }
