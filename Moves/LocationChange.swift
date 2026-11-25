@@ -1077,6 +1077,11 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
     private var appliedConfiguration: CaptureConfiguration?
     /// The distance filter for sessions that ask Core Location for every fix.
     private var distanceGate = CaptureDistanceGate()
+    /// Held while a trip is followed or a route is tracked. On iOS 27 a standard location
+    /// session alone no longer keeps the app running in the background: the phone
+    /// suspended it seconds after it left the screen, even with no distance filter. iOS
+    /// shows its location indicator while this is held and the app is in the background.
+    private var backgroundActivitySession: CLBackgroundActivitySession?
     private var appliedShowsIndicator = false
     private let motionActivityManager = CMMotionActivityManager()
     private var isReceivingMotionUpdates = false
@@ -1281,6 +1286,8 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         isStandardLocationRunning = false
         appliedConfiguration = nil
         distanceGate.reset()
+        backgroundActivitySession?.invalidate()
+        backgroundActivitySession = nil
         stopMotionUpdates()
         removeDepartureRegion()
         updateSettleChecks()
@@ -1582,8 +1589,13 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
                 energy: currentEnergyState,
                 isRouteTrackingActive: false
             )
-            // Automatic capture never shows the location indicator or a Live Activity.
-            applyLocationConfiguration(configuration, showsIndicator: false)
+            // Following a trip shows the location indicator: on iOS 27 the app is suspended
+            // in the background without it. Waiting at a stop shows nothing, and automatic
+            // capture never starts a Live Activity.
+            applyLocationConfiguration(
+                configuration,
+                showsIndicator: configuration.mode == .continuous && authorizationStatus == .authorizedAlways
+            )
             updateSettleChecks()
             ensureDepartureRegion()
             return
@@ -1624,6 +1636,11 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         }
 
         if !configuration.usesStandardLocationUpdates, isStandardLocationRunning {
+            manager.stopUpdatingLocation()
+            isStandardLocationRunning = false
+        }
+        if updateBackgroundActivitySession(for: configuration), isStandardLocationRunning {
+            // The session has to exist before the updates start, so start them again.
             manager.stopUpdatingLocation()
             isStandardLocationRunning = false
         }
@@ -1858,6 +1875,9 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         // Memory is here because a large app is the first one iOS ends in the background.
         let gap = (sinceLast.map { "\(Int($0)) s" } ?? "first")
             + ", memory \(Int(MapPerformanceProbe.memoryMegabytes())) MB"
+            + ", background updates \(manager.allowsBackgroundLocationUpdates ? "allowed" : "not allowed")"
+            + ", activity session \(backgroundActivitySession == nil ? "off" : "on")"
+            + ", updates \(isStandardLocationRunning ? "running" : "stopped")"
         if isMoving {
             Self.captureLog.notice(
                 "Trip heartbeat: \(self.deliveredFixesSinceHeartbeat) fixes from iOS, \(self.fixFilter.acceptedCount) kept this trip, last \(lastFix, privacy: .public), \(self.pendingContinuousFixes.count) buffered, motion \(self.captureMachine.motion.rawValue, privacy: .public), app \(appState, privacy: .public), writes \(self.pipeline.statusDescription, privacy: .public), since last heartbeat \(gap, privacy: .public)"
@@ -1881,6 +1901,27 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
                 self.logTripHeartbeat(now: .now)
             }
         }
+    }
+
+    /// Holds a background activity session for the configurations that must keep the app
+    /// running, and ends it for the others. Returns true when one was just created.
+    private func updateBackgroundActivitySession(for configuration: CaptureConfiguration) -> Bool {
+        let wanted: Bool
+        switch configuration.mode {
+        case .continuous, .routeTracking, .lastMile: wanted = isAuthorizedForTracking
+        case .departureWatch, .lowPower: wanted = false
+        }
+        if wanted, backgroundActivitySession == nil {
+            backgroundActivitySession = CLBackgroundActivitySession()
+            Self.captureLog.notice("Background activity session started")
+            return true
+        }
+        if !wanted, let session = backgroundActivitySession {
+            session.invalidate()
+            backgroundActivitySession = nil
+            Self.captureLog.notice("Background activity session ended")
+        }
+        return false
     }
 
     /// A location session can go quiet while the person is plainly moving. Starting it

@@ -1282,10 +1282,12 @@ enum PlacesLibrary {
         let longitudeDelta = latitudeDelta / max(cos(place.centerLatitude * .pi / 180), 0.01)
         let minLat = place.centerLatitude - latitudeDelta, maxLat = place.centerLatitude + latitudeDelta
         let minLon = place.centerLongitude - longitudeDelta, maxLon = place.centerLongitude + longitudeDelta
-        return (try? context.fetch(FetchDescriptor<VisitPlace>(predicate: #Predicate {
+        // Retired stays are left out in code. A predicate that compares `dayTimeline` with
+        // nil does not compile in this file on an incremental build.
+        let inBox = (try? context.fetch(FetchDescriptor<VisitPlace>(predicate: #Predicate {
             $0.latitude >= minLat && $0.latitude <= maxLat && $0.longitude >= minLon && $0.longitude <= maxLon
-                && $0.dayTimeline != nil
         }))) ?? []
+        return inBox.filter { !TimelineRetirement.isRetired($0) }
     }
 
     /// SwiftData auto-undo of a delete can crash, so these changes run with undo registration
@@ -1343,7 +1345,9 @@ struct VisitAssignmentSnapshot {
     func restore(in context: ModelContext) {
         let ids = Array(rows.keys)
         guard !ids.isEmpty else { return }
-        let visits = (try? context.fetch(FetchDescriptor<VisitPlace>(predicate: #Predicate { ids.contains($0.id) && $0.dayTimeline != nil }))) ?? []
+        // Retired stays are left out in code, as in `nearbyVisits`.
+        let visits = ((try? context.fetch(FetchDescriptor<VisitPlace>(predicate: #Predicate { ids.contains($0.id) }))) ?? [])
+            .filter { !TimelineRetirement.isRetired($0) }
         let places = (try? context.fetch(FetchDescriptor<KnownPlace>())) ?? []
         let placesByID = Dictionary(places.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         for visit in visits {
