@@ -451,9 +451,75 @@ final class PlacesIndexTests: XCTestCase {
         )
 
         XCTAssertEqual(snapshot.suggested.count, 2)
-        XCTAssertTrue(snapshot.suggested.allSatisfy { $0.name == "Hobbemakade" })
+        // Same street, different buildings: the house number tells them apart.
+        XCTAssertEqual(Set(snapshot.suggested.map(\.name)), ["Hobbemakade 120", "Hobbemakade 40"])
         XCTAssertTrue(snapshot.suggested.allSatisfy(\.showsMapThumbnail))
         XCTAssertTrue(snapshot.suggested.contains { $0.subtitle.localizedCaseInsensitiveContains("away") })
+    }
+
+    /// A hotel geocodes to a different house number on each stay; it must stay one suggestion.
+    func testHouseNumberLabelsAroundOneStayFormOneSuggestion() {
+        func stay(_ label: String, dLat: Double, dLon: Double, start: Int, hours length: Int) -> PlacesVisitRecord {
+            PlacesVisitRecord(
+                name: label,
+                latitude: 45.0 + dLat,
+                longitude: 7.0 + dLon,
+                arrivalDate: hours(start),
+                departureDate: hours(start - length),
+                locality: "Sampletown",
+                autoLabel: label,
+                thoroughfare: "24 Oak Row",
+                formattedAddress: "24 Oak Row, Sampletown"
+            )
+        }
+        let visits = [
+            stay("32 Oak Row", dLat: 0, dLon: 0, start: 100, hours: 14),
+            stay("32 Oak Row", dLat: 0.00004, dLon: -0.00003, start: 76, hours: 12),
+            stay("28 Oak Row", dLat: 0.00006, dLon: -0.00025, start: 52, hours: 15),
+            stay("41 Oak Row", dLat: 0.0003, dLon: 0.0001, start: 4, hours: 3),
+            stay("74 Oak Row", dLat: 0.0004, dLon: 0.0003, start: 30, hours: 10),
+            stay("Elm Row", dLat: -0.0003, dLon: -0.0001, start: 150, hours: 20),
+            stay("8 Elm Row", dLat: -0.0005, dLon: 0.0001, start: 170, hours: 1),
+            // A real place next door keeps its own suggestion.
+            stay("Corner Bakery", dLat: 0.0002, dLon: 0.0002, start: 10, hours: 1),
+        ]
+
+        let snapshot = PlacesIndexBuilder.build(
+            knownPlaces: [],
+            visits: visits,
+            sort: .mostVisited,
+            query: "",
+            now: now,
+            calendar: calendar
+        )
+
+        XCTAssertEqual(snapshot.suggested.count, 2)
+        let hotel = snapshot.suggested[0]
+        XCTAssertEqual(hotel.visitCount, 7)
+        // Named after where the most time was spent, not the latest stray fix.
+        XCTAssertEqual(hotel.name, "32 Oak Row")
+        XCTAssertEqual(hotel.address, "Sampletown")
+        XCTAssertEqual(snapshot.suggested[1].name, "Corner Bakery")
+        XCTAssertTrue(hotel.subtitle.hasPrefix("7 visits"))
+        XCTAssertGreaterThan(hotel.spreadRadius, PlaceLearningEngine.minimumFootprintRadius)
+    }
+
+    func testHouseNumberTitleNeverSitsOverADifferentHouseNumber() {
+        XCTAssertEqual(
+            PlacesIndexBuilder.consistentAddress(title: "41 Oak Row", address: "24 Oak Row, Sampletown", locality: "Sampletown"),
+            "Sampletown"
+        )
+        XCTAssertEqual(
+            PlacesIndexBuilder.consistentAddress(title: "41 Oak Row", address: "41 Oak Row, Sampletown", locality: nil),
+            "Sampletown"
+        )
+        XCTAssertEqual(
+            PlacesIndexBuilder.consistentAddress(title: "Ben Van Don", address: "150 Ben Van Don, District 4", locality: nil),
+            "150 Ben Van Don, District 4"
+        )
+        XCTAssertEqual(PlacesIndexBuilder.streetPart(of: "Hobbemakade 120"), "Hobbemakade")
+        XCTAssertEqual(PlacesIndexBuilder.streetPart(of: "8 Nguyen Bieu"), "Nguyen Bieu")
+        XCTAssertNil(PlacesIndexBuilder.streetPart(of: "Corner Bakery"))
     }
 
     func testPlaceDisplayNamerPrefersPOIThenStreetThenCoordinate() {

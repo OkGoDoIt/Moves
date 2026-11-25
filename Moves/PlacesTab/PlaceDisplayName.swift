@@ -130,7 +130,13 @@ enum PlaceDisplayNamer {
     }
 
     private static func fold(_ value: String) -> String {
-        value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+        folded(value)
+    }
+
+    /// Case- and accent-insensitive form used to compare names.
+    static func folded(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
     }
 
     private static func firstDistinct(from values: [String?], notEqualTo primary: String) -> String? {

@@ -164,6 +164,9 @@ struct PlacesVisitRecord: Equatable, Sendable, Identifiable {
         CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
     }
 
+    /// `name` as an optional, for helpers that read optional labels.
+    var optionalName: String? { name }
+
     /// Stay length; open visits run until `now`.
     func stayDuration(now: Date) -> TimeInterval {
         let end = min(departureDate ?? now, now)
@@ -363,6 +366,8 @@ struct PlacesSuggestedCluster: Equatable, Sendable, Identifiable {
     var lastVisitAt: Date?
     var latitude: Double
     var longitude: Double
+    /// Footprint the place would learn from these visits, same rule as `PlaceLearningEngine`.
+    var spreadRadius: CLLocationDistance = PlaceLearningEngine.minimumFootprintRadius
     var countryCode: String?
     var locality: String?
     var thoroughfare: String?
@@ -425,8 +430,13 @@ struct PlacesIndexSnapshot: Equatable, Sendable {
 enum PlacesIndexBuilder {
     /// Distance used to cluster unassigned visits that share a name.
     static let namedClusterRadius: CLLocationDistance = 120
-    /// Unnamed visits share a ~100 m bucket.
-    static let unnamedBucketDegrees = 1_000.0
+    /// Visits named only by a street address join the longest nearby stay within this distance.
+    ///
+    /// Reverse geocoding a hotel or apartment returns a different house number for each
+    /// GPS fix, so the address cannot hold these visits together; distance does.
+    static let unnamedClusterRadius: CLLocationDistance = 100
+    /// "1.2 km away" helps tell neighbors apart; a distance from another city does not.
+    static let nearbyDistanceLimit: CLLocationDistance = 50_000
 
     static func build(
         knownPlaces: [PlacesKnownRecord],
@@ -561,31 +571,53 @@ enum PlacesIndexBuilder {
         now: Date,
         userCoordinate: CLLocationCoordinate2D? = nil
     ) -> [PlacesSuggestedCluster] {
-        var remaining = visits
+        let streets = streetNames(in: visits)
+        var named: [(key: String, visit: PlacesVisitRecord)] = []
+        var unnamed: [PlacesVisitRecord] = []
+        for visit in visits {
+            if let key = clusteringKey(visit, streets: streets) {
+                named.append((key, visit))
+            } else {
+                unnamed.append(visit)
+            }
+        }
+
         var clusters: [PlacesSuggestedCluster] = []
 
-        while let seed = remaining.first {
-            remaining.removeFirst()
-            let seedKey = clusteringKey(seed)
-            var members = [seed]
-            remaining.removeAll { candidate in
-                let belongs: Bool
-                if let seedKey {
-                    belongs = clusteringKey(candidate) == seedKey
-                        && distance(from: seed.coordinate, to: candidate.coordinate) <= namedClusterRadius
-                } else {
-                    belongs = clusteringKey(candidate) == nil
-                        && unnamedBucket(candidate) == unnamedBucket(seed)
-                }
-                if belongs {
-                    members.append(candidate)
-                }
+        // Named visits: same name within `namedClusterRadius` of the first one seen.
+        var remainingNamed = named
+        while let seed = remainingNamed.first {
+            remainingNamed.removeFirst()
+            var members = [seed.visit]
+            remainingNamed.removeAll { candidate in
+                let belongs = candidate.key == seed.key
+                    && distance(from: seed.visit.coordinate, to: candidate.visit.coordinate) <= namedClusterRadius
+                if belongs { members.append(candidate.visit) }
                 return belongs
             }
             clusters.append(makeCluster(from: members, now: now))
         }
 
-        let disambiguated = disambiguate(clusters, userCoordinate: userCoordinate)
+        // Street-addressed visits: the longest stay seeds a cluster and gathers
+        // everything within `unnamedClusterRadius`, so an overnight stay anchors it.
+        var remainingUnnamed = unnamed.sorted { lhs, rhs in
+            let left = lhs.stayDuration(now: now)
+            let right = rhs.stayDuration(now: now)
+            if left != right { return left > right }
+            return lhs.arrivalDate > rhs.arrivalDate
+        }
+        while let seed = remainingUnnamed.first {
+            remainingUnnamed.removeFirst()
+            var members = [seed]
+            remainingUnnamed.removeAll { candidate in
+                let belongs = distance(from: seed.coordinate, to: candidate.coordinate) <= unnamedClusterRadius
+                if belongs { members.append(candidate) }
+                return belongs
+            }
+            clusters.append(makeCluster(from: members, now: now))
+        }
+
+        let disambiguated = disambiguate(clusters, userCoordinate: userCoordinate, now: now)
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let visible = needle.isEmpty
             ? disambiguated
@@ -595,7 +627,9 @@ enum PlacesIndexBuilder {
                     || (cluster.locality?.localizedCaseInsensitiveContains(needle) == true)
             }
 
+        // Where the person spent the most time is the most worth naming.
         return visible.sorted {
+            if $0.totalStay != $1.totalStay { return $0.totalStay > $1.totalStay }
             if $0.visitCount != $1.visitCount { return $0.visitCount > $1.visitCount }
             return $0.name.localizedStandardCompare($1.name) == .orderedAscending
         }
@@ -612,21 +646,33 @@ enum PlacesIndexBuilder {
                 && PlaceDisplayNamer.meaningful($0.name) == nil
         }
         let resolved = PlaceDisplayNamer.resolve(
-            userLabel: firstMeaningful(members.map(\.userLabel)),
-            autoLabel: firstMeaningful(members.map(\.autoLabel)),
-            thoroughfare: firstMeaningful(members.map(\.thoroughfare)),
-            formattedAddress: firstMeaningful(members.map(\.formattedAddress)),
+            userLabel: dominantMeaningful(members, \.userLabel, now: now),
+            autoLabel: dominantMeaningful(members, \.autoLabel, now: now),
+            thoroughfare: dominantMeaningful(members, \.thoroughfare, now: now),
+            formattedAddress: dominantMeaningful(members, \.formattedAddress, now: now),
             locality: firstMeaningful(members.map(\.locality)) ?? majority(members.map(\.locality)),
             coordinate: coordinate,
             isPending: pending,
-            fallbackName: firstMeaningful(members.map(\.name))
+            fallbackName: dominantMeaningful(members, \.optionalName, now: now)
+        )
+        let address = consistentAddress(
+            title: resolved.primary,
+            address: resolved.address,
+            locality: majority(members.map(\.locality))
         )
         let lastVisitAt = members.map(\.arrivalDate).max()
         let visitCount = members.count
+        let spread = members
+            .map { distance(from: coordinate, to: $0.coordinate) }
+            .sorted()
+        let spreadIndex = min(spread.count - 1, Int((Double(spread.count - 1) * 0.9).rounded()))
+        let spreadRadius = PlaceLearningEngine.clampRadius(
+            (spread.isEmpty ? 0 : spread[spreadIndex]) * PlaceLearningEngine.radiusGrowthFactor
+        )
         return PlacesSuggestedCluster(
             id: members.map(\.id.uuidString).sorted().joined(separator: "|"),
             name: resolved.primary,
-            address: resolved.address,
+            address: address,
             isNaming: resolved.isPending,
             showsMapThumbnail: false,
             visitIDs: members.map(\.id),
@@ -635,15 +681,16 @@ enum PlacesIndexBuilder {
             lastVisitAt: lastVisitAt,
             latitude: latitude,
             longitude: longitude,
+            spreadRadius: spreadRadius,
             countryCode: majority(members.map(\.countryCode)),
             locality: majority(members.map(\.locality)),
-            thoroughfare: firstMeaningful(members.map(\.thoroughfare)),
-            formattedAddress: firstMeaningful(members.map(\.formattedAddress)),
+            thoroughfare: dominantMeaningful(members, \.thoroughfare, now: now),
+            formattedAddress: dominantMeaningful(members, \.formattedAddress, now: now),
             subtitle: defaultSubtitle(
-                address: resolved.isPending ? String(localized: "Naming…") : resolved.address,
+                address: resolved.isPending ? String(localized: "Naming…") : address,
                 visitCount: visitCount,
                 lastVisitAt: lastVisitAt,
-                preciseTime: false
+                now: now
             )
         )
     }
@@ -651,63 +698,184 @@ enum PlacesIndexBuilder {
     /// Same-street clusters keep visit time, distance, and a map thumbnail so Confirm isn't random.
     private static func disambiguate(
         _ clusters: [PlacesSuggestedCluster],
-        userCoordinate: CLLocationCoordinate2D?
+        userCoordinate: CLLocationCoordinate2D?,
+        now: Date
     ) -> [PlacesSuggestedCluster] {
-        let groups = Dictionary(grouping: clusters) {
-            $0.name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-        }
+        let groups = Dictionary(grouping: clusters) { PlaceDisplayNamer.folded($0.name) }
         return clusters.map { cluster in
-            let key = cluster.name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-            let peers = groups[key] ?? [cluster]
+            let peers = groups[PlaceDisplayNamer.folded(cluster.name)] ?? [cluster]
             guard peers.count > 1 else { return cluster }
             var copy = cluster
             copy.showsMapThumbnail = true
+            // "Hobbemakade" twice reads as a duplicate; "Hobbemakade 40" and "Hobbemakade 120" do not.
+            var address = cluster.address
+            if let specific = specificTitle(from: cluster.address, sharing: cluster.name) {
+                copy.name = specific
+                address = remainder(of: cluster.address, after: specific)
+            }
+            copy.address = address
             copy.subtitle = defaultSubtitle(
-                address: cluster.address,
+                address: address,
                 visitCount: cluster.visitCount,
                 lastVisitAt: cluster.lastVisitAt,
-                preciseTime: true,
-                distanceMeters: userCoordinate.map { distance(from: cluster.coordinate, to: $0) }
+                now: now,
+                distanceMeters: userCoordinate
+                    .map { distance(from: cluster.coordinate, to: $0) }
+                    .flatMap { $0 <= nearbyDistanceLimit ? $0 : nil }
             )
             return copy
         }
     }
 
-    private static func defaultSubtitle(
+    /// A house-number title ("41 Hai Ba Trung") under a different house number from
+    /// another geocode reads as two places; show only the area then.
+    static func consistentAddress(title: String, address: String?, locality: String?) -> String? {
+        guard streetPart(of: title) != nil else { return address }
+        let first = address?.split(separator: ",").first.map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if let first, PlaceDisplayNamer.folded(first) == PlaceDisplayNamer.folded(title) {
+            let rest = address?.split(separator: ",").dropFirst()
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .joined(separator: ", ")
+            return rest?.isEmpty == false ? rest : PlaceDisplayNamer.meaningful(locality)
+        }
+        return PlaceDisplayNamer.meaningful(locality)
+    }
+
+    /// First address component when it names the same street more precisely ("Hobbemakade 40").
+    private static func specificTitle(from address: String?, sharing name: String) -> String? {
+        guard let first = address?.split(separator: ",").first?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !first.isEmpty,
+            PlaceDisplayNamer.folded(first) != PlaceDisplayNamer.folded(name),
+            PlaceDisplayNamer.folded(first).contains(PlaceDisplayNamer.folded(name))
+        else { return nil }
+        return first
+    }
+
+    private static func remainder(of address: String?, after title: String) -> String? {
+        guard let address else { return nil }
+        let parts = address.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard parts.first == title else { return address }
+        let rest = parts.dropFirst().joined(separator: ", ")
+        return rest.isEmpty ? nil : rest
+    }
+
+    /// Visit count first so it is never the part a narrow row cuts off.
+    static func defaultSubtitle(
         address: String?,
         visitCount: Int,
         lastVisitAt: Date?,
-        preciseTime: Bool,
+        now: Date,
+        calendar: Calendar = .autoupdatingCurrent,
         distanceMeters: CLLocationDistance? = nil
     ) -> String {
-        let visits = visitCount == 1
-            ? String(localized: "1 visit")
-            : String(localized: "\(visitCount) visits")
-        var parts: [String] = []
-        if let address, !address.isEmpty {
-            parts.append(address)
-        }
-        parts.append(visits)
+        var parts: [String] = [
+            visitCount == 1 ? String(localized: "1 visit") : String(localized: "\(visitCount) visits")
+        ]
         if let lastVisitAt {
-            if preciseTime {
-                parts.append(lastVisitAt.formatted(date: .abbreviated, time: .shortened))
-            } else {
-                parts.append(lastVisitAt.formatted(.relative(presentation: .named)))
-            }
+            parts.append(shortDay(lastVisitAt, now: now, calendar: calendar))
         }
         if let distanceMeters {
             parts.append(String(localized: "\(MovesStatisticsFormatting.distance(distanceMeters)) away"))
         }
+        if let address, !address.isEmpty {
+            parts.append(address)
+        }
         return parts.joined(separator: " · ")
     }
 
-    private static func clusteringKey(_ visit: PlacesVisitRecord) -> String? {
-        PlaceDisplayNamer.clusteringName(
+    /// "Today", "Yesterday", "Nov 24", or "Nov 24, 2025" outside the current year.
+    static func shortDay(_ date: Date, now: Date, calendar: Calendar = .autoupdatingCurrent) -> String {
+        if calendar.isDate(date, inSameDayAs: now) { return String(localized: "Today") }
+        if let yesterday = calendar.date(byAdding: .day, value: -1, to: now),
+           calendar.isDate(date, inSameDayAs: yesterday) {
+            return String(localized: "Yesterday")
+        }
+        var style = Date.FormatStyle.dateTime.month(.abbreviated).day()
+        style.timeZone = calendar.timeZone
+        if calendar.component(.year, from: date) != calendar.component(.year, from: now) {
+            style = style.year()
+        }
+        return date.formatted(style)
+    }
+
+    /// A name that holds visits together, or nil when the visit is known only by its street.
+    /// Bare street names ("To Ngoc Van" beside "92 To Ngoc Van") count as streets.
+    private static func clusteringKey(_ visit: PlacesVisitRecord, streets: Set<String>) -> String? {
+        let key = PlaceDisplayNamer.clusteringName(
             userLabel: visit.userLabel,
             autoLabel: visit.autoLabel,
             thoroughfare: visit.thoroughfare,
             fallbackName: visit.name
         )
+        guard let key else { return nil }
+        if PlaceDisplayNamer.meaningful(visit.userLabel) != nil { return key }
+        // "8 Nguyen Bieu" is an address even with a one-digit house number.
+        if let label = PlaceDisplayNamer.meaningful(visit.autoLabel) ?? PlaceDisplayNamer.meaningful(visit.name),
+           streetPart(of: label) != nil {
+            return nil
+        }
+        return streets.contains(key) ? nil : key
+    }
+
+    /// Folded street names seen in house-number labels ("92 To Ngoc Van", "Hobbemakade 120").
+    static func streetNames(in visits: [PlacesVisitRecord]) -> Set<String> {
+        var streets = Set<String>()
+        for visit in visits {
+            for label in [visit.autoLabel, visit.thoroughfare] {
+                guard let label = PlaceDisplayNamer.meaningful(label),
+                      let street = streetPart(of: label) else { continue }
+                streets.insert(PlaceDisplayNamer.folded(street))
+            }
+        }
+        return streets
+    }
+
+    /// The street in "<number> <street>" or "<street> <number>", nil for anything else.
+    static func streetPart(of label: String) -> String? {
+        let tokens = label.split(separator: " ", omittingEmptySubsequences: true)
+        guard tokens.count >= 2 else { return nil }
+        let isNumber: (Substring) -> Bool = { token in
+            token.first?.isNumber == true
+        }
+        if let first = tokens.first, isNumber(first) {
+            return tokens.dropFirst().joined(separator: " ")
+        }
+        if let last = tokens.last, isNumber(last) {
+            return tokens.dropLast().joined(separator: " ")
+        }
+        return nil
+    }
+
+    /// The label the person spent the most time under, so one stray fix cannot rename a place.
+    private static func dominantMeaningful(
+        _ members: [PlacesVisitRecord],
+        _ field: KeyPath<PlacesVisitRecord, String?>,
+        now: Date
+    ) -> String? {
+        var totals: [String: (label: String, stay: TimeInterval, latest: Date)] = [:]
+        for member in members {
+            guard let label = PlaceDisplayNamer.meaningful(member[keyPath: field]) else { continue }
+            let key = PlaceDisplayNamer.folded(label)
+            let stay = member.stayDuration(now: now)
+            if var entry = totals[key] {
+                entry.stay += stay
+                if member.arrivalDate > entry.latest {
+                    entry.latest = member.arrivalDate
+                    entry.label = label
+                }
+                totals[key] = entry
+            } else {
+                totals[key] = (label, stay, member.arrivalDate)
+            }
+        }
+        return totals.values.max { lhs, rhs in
+            if lhs.stay != rhs.stay { return lhs.stay < rhs.stay }
+            if lhs.latest != rhs.latest { return lhs.latest < rhs.latest }
+            return lhs.label > rhs.label
+        }?.label
     }
 
     private static func matches(_ place: PlacesPlaceSummary, query: String) -> Bool {
@@ -762,12 +930,6 @@ enum PlacesIndexBuilder {
             if lhs.value != rhs.value { return lhs.value < rhs.value }
             return lhs.key < rhs.key
         }?.key
-    }
-
-    private static func unnamedBucket(_ visit: PlacesVisitRecord) -> String {
-        let latitudeBucket = Int((visit.latitude * unnamedBucketDegrees).rounded())
-        let longitudeBucket = Int((visit.longitude * unnamedBucketDegrees).rounded())
-        return "\(latitudeBucket)|\(longitudeBucket)"
     }
 
     private static func distance(
@@ -835,6 +997,8 @@ final class PlacesIndex {
     var sort: PlacesSort = .mostVisited
     var query: String = ""
     private(set) var snapshot: PlacesIndexSnapshot = .empty
+    /// False until the first build finishes, so the empty state never flashes while loading.
+    private(set) var hasLoaded = false
 
     @ObservationIgnored
     private var generation = 0
@@ -895,6 +1059,7 @@ final class PlacesIndex {
             await MainActor.run {
                 guard generation == self.generation else { return }
                 self.snapshot = snapshot
+                self.hasLoaded = true
             }
         }
     }
