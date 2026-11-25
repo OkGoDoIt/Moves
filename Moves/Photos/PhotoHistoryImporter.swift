@@ -669,7 +669,7 @@ struct PhotoHistoryImporter {
         _ stay: PhotoHistoryStay,
         step: inout Step
     ) throws -> (visit: VisitPlace?, created: Bool, skippedSensorDay: Bool) {
-        let day = try repository.dayTimeline(for: stay.arrivalDate)
+        let day = try repository.dayTimeline(for: stay.arrivalDate, at: stay.coordinate)
         let overlapping = step.visitsOverlapping(stay)
         let match = matchingVisit(for: stay, among: overlapping)
         if isProtected(day, step: &step) || overlapping.contains(where: { $0.origin != .photoInferred }) {
@@ -802,7 +802,10 @@ struct PhotoHistoryImporter {
             longitude: asset.longitude
         )
         attachment.visitPlace = visit
-        attachment.dayTimeline = try visit?.dayTimeline ?? repository.dayTimeline(for: asset.capturedAt)
+        attachment.dayTimeline = try visit?.dayTimeline ?? repository.dayTimeline(
+            for: asset.capturedAt,
+            at: asset.latitude.flatMap { latitude in asset.longitude.map { CLLocationCoordinate2D(latitude: latitude, longitude: $0) } }
+        )
         modelContext.insert(attachment)
         return true
     }

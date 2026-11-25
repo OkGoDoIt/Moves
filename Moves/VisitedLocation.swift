@@ -286,19 +286,66 @@ final class DayTimeline {
         self.createdAt = .now
     }
 
+    /// The day `date` falls on where it happened: its key and midnight in `timeZone`.
+    init(containing date: Date, in timeZone: TimeZone) {
+        self.dayStart = TimelineDayFiling.startOfDay(for: date, in: timeZone)
+        self.dayKey = TimelineDayFiling.dayKey(for: date, in: timeZone)
+        self.createdAt = .now
+    }
+
     /// Reads the time zone on every call: a formatter would keep the zone the process
     /// launched in, and after a flight would file today under yesterday.
     static func makeDayKey(for date: Date) -> String {
-        var gregorian = Calendar(identifier: .gregorian)
-        gregorian.timeZone = Calendar.current.timeZone
-        let day = gregorian.dateComponents([.year, .month, .day], from: date)
-        return String(format: "%04d-%02d-%02d", day.year ?? 0, day.month ?? 0, day.day ?? 0)
+        TimelineDayFiling.dayKey(for: date, in: Calendar.current.timeZone)
+    }
+
+    /// The key of the day `date` falls on in `timeZone`.
+    static func makeDayKey(for date: Date, in timeZone: TimeZone) -> String {
+        TimelineDayFiling.dayKey(for: date, in: timeZone)
     }
 }
 
 extension DayTimeline {
+    /// This day's date on `calendar`: midnight of `dayKey` in the calendar's zone.
+    ///
+    /// `dayStart` is midnight where the day happened, so a day east of the phone's zone
+    /// starts on the phone's previous date. Anything that groups, labels, or compares
+    /// days by date reads this, never `dayStart` converted on the phone's clock.
+    func calendarDate(in calendar: Calendar = .current) -> Date {
+        TimelineDayFiling.startOfDay(forKey: dayKey, in: calendar.timeZone) ?? calendar.startOfDay(for: dayStart)
+    }
+
     var hasRecordedActivity: Bool {
         !places.isEmpty || !moves.isEmpty || !samples.isEmpty
+    }
+
+    /// The clock a day is read on: the zone where its first stay, trip, or fix happened.
+    /// Today, and a day with nothing on it, read on the phone's own clock.
+    var placeTimeZone: TimeZone {
+        let phone = Calendar.current.timeZone
+        guard dayKey != DayTimeline.makeDayKey(for: .now) else { return phone }
+        let firstPlace = places.min { $0.arrivalDate < $1.arrivalDate }
+        let firstMove = moves.min { $0.startDate < $1.startDate }
+        let candidates: [(Date, CLLocationCoordinate2D)] = [
+            firstPlace.map { ($0.arrivalDate, $0.coordinate) },
+            firstMove.flatMap { move in move.startPlace.map { (move.startDate, $0.coordinate) } },
+        ].compactMap { $0 }
+        if let first = candidates.min(by: { $0.0 < $1.0 }), let zone = PlaceTimeZone.timeZone(at: first.1) {
+            return zone
+        }
+        if let fix = samples.min(by: { $0.timestamp < $1.timestamp }),
+           let zone = PlaceTimeZone.timeZone(at: CLLocationCoordinate2D(latitude: fix.latitude, longitude: fix.longitude)) {
+            return zone
+        }
+        return phone
+    }
+
+    /// The zone's short name ("PDT") when this day's clock is not the phone's, else nil.
+    var foreignTimeZoneAbbreviation: String? {
+        let zone = placeTimeZone
+        let moment = dayStart.addingTimeInterval(12 * 3600)
+        guard zone.secondsFromGMT(for: moment) != Calendar.current.timeZone.secondsFromGMT(for: moment) else { return nil }
+        return zone.abbreviation(for: moment) ?? zone.identifier
     }
 
     /// The last known place from an earlier day, used when nothing was recorded on this day
@@ -1225,6 +1272,9 @@ final class SwiftDataTimelineRepository: TimelineRepository {
     private var archiveImportSampleKeys: Set<String>?
     /// Day timelines keyed by `dayKey`, populated only during bulk imports.
     private var bulkDayTimelineCache: [String: DayTimeline]?
+    /// Fixes around the last day lookup that had no coordinate, so the day can still be
+    /// the one where the person was. Short-lived: other contexts add fixes too.
+    private var dayZoneFixes: (window: DateInterval, loadedAt: Date, fixes: RecordedTimeZones)?
     /// User-labelled places, populated only during bulk imports.
     private var bulkLabeledPlaces: [(label: String, coordinate: CLLocationCoordinate2D)]?
     /// Learned places, populated only during bulk imports.
@@ -1708,7 +1758,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                 }
             }
             existing.horizontalAccuracy = min(existing.horizontalAccuracy, visit.horizontalAccuracy)
-            existing.dayTimeline = try timeline(for: arrival)
+            existing.dayTimeline = try timeline(for: arrival, at: existing.coordinate)
             let canonical = try collapseDuplicatePlaces(around: existing)
             try applyPlaceLearning(to: canonical)
             try saveIfNeeded()
@@ -1726,7 +1776,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             place.latitude = center.latitude
             place.longitude = center.longitude
         }
-        place.dayTimeline = try timeline(for: arrival)
+        place.dayTimeline = try timeline(for: arrival, at: place.coordinate)
         modelContext.insert(place)
         let canonical = try collapseDuplicatePlaces(around: place)
         try applyPlaceLearning(to: canonical)
@@ -1748,8 +1798,9 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                     continue
                 }
                 let sample = LocationSample(location: location, source: source, dedupeKey: dedupeKey)
-                sample.dayTimeline = try timeline(for: location.timestamp)
+                sample.dayTimeline = try timeline(for: location.timestamp, at: location.coordinate)
                 modelContext.insert(sample)
+                noteStoredFix(location)
                 archiveImportSampleKeys?.insert(dedupeKey)
                 inserted.append(sample)
                 newlyInserted.append(sample)
@@ -1765,8 +1816,9 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             }
 
             let sample = LocationSample(location: location, source: source, dedupeKey: dedupeKey)
-            sample.dayTimeline = try timeline(for: location.timestamp)
+            sample.dayTimeline = try timeline(for: location.timestamp, at: location.coordinate)
             modelContext.insert(sample)
+            noteStoredFix(location)
             inserted.append(sample)
             newlyInserted.append(sample)
         }
@@ -2050,6 +2102,11 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         try timeline(for: date)
     }
 
+    /// The day a moment at `coordinate` is filed under: the calendar day there.
+    func dayTimeline(for date: Date, at coordinate: CLLocationCoordinate2D?) throws -> DayTimeline {
+        try timeline(for: date, at: coordinate)
+    }
+
     /// Loads the lookup tables the bulk importers use to avoid per-record fetches.
     private func beginBulkImport(covering range: DateInterval? = nil) throws {
         var keyDescriptor = FetchDescriptor<LocationSample>()
@@ -2149,7 +2206,6 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                 .map(\.arrivalDate)
                 .min()
 
-            let previousArrivalDay = Calendar.current.startOfDay(for: match.arrivalDate)
             if stay.arrivalDate < match.arrivalDate,
                match.arrivalDate.timeIntervalSince(stay.arrivalDate) <= Self.logPlaceExtendLimit {
                 match.arrivalDate = max(stay.arrivalDate, previousDeparture ?? stay.arrivalDate)
@@ -2164,9 +2220,10 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                 match.departureDate = max(wantedDeparture, match.arrivalDate)
             }
             match.horizontalAccuracy = min(match.horizontalAccuracy, Self.logPlaceAccuracy(for: stay))
-            if match.dayTimeline == nil
-                || Calendar.current.startOfDay(for: match.arrivalDate) != previousArrivalDay {
-                match.dayTimeline = try timeline(for: match.arrivalDate)
+            // The arrival may have moved to another local day; the lookup is cached in bulk.
+            let day = try timeline(for: match.arrivalDate, at: match.coordinate)
+            if match.dayTimeline !== day {
+                match.dayTimeline = day
             }
             try applyGoogleStayMetadata(stay, to: match, source: source)
             return (match, false)
@@ -2179,7 +2236,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             longitude: stay.longitude,
             horizontalAccuracy: Self.logPlaceAccuracy(for: stay)
         )
-        place.dayTimeline = try timeline(for: stay.arrivalDate)
+        place.dayTimeline = try timeline(for: stay.arrivalDate, at: stay.coordinate)
         modelContext.insert(place)
         try applyPlaceLearning(to: place)
         applyImportedOrigin(to: place, source: source)
@@ -2278,7 +2335,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         )
         segment.startPlace = startPlace
         segment.endPlace = endPlace
-        segment.dayTimeline = try timeline(for: startDate)
+        segment.dayTimeline = try timeline(for: startDate, at: startPlace.coordinate)
         applyImportedMoveProvenance(
             to: segment,
             source: source,
@@ -2492,7 +2549,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                 resumed.administrativeArea = stop.administrativeArea
                 resumed.thoroughfare = stop.thoroughfare
                 resumed.formattedAddress = stop.formattedAddress
-                resumed.dayTimeline = try timeline(for: backAt)
+                resumed.dayTimeline = try timeline(for: backAt, at: resumed.coordinate)
                 modelContext.insert(resumed)
                 leavesFrom = resumed
             } else {
@@ -3151,7 +3208,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                     resumed.administrativeArea = current.administrativeArea
                     resumed.thoroughfare = current.thoroughfare
                     resumed.formattedAddress = current.formattedAddress
-                    resumed.dayTimeline = try timeline(for: nextEnd)
+                    resumed.dayTimeline = try timeline(for: nextEnd, at: resumed.coordinate)
                     modelContext.insert(resumed)
                     for move in Array(current.outgoingMoves) where !isUserCurated(move) && move.startDate >= nextEnd {
                         move.startPlace = resumed
@@ -3446,7 +3503,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         if stay.horizontalAccuracy < place.horizontalAccuracy {
             place.horizontalAccuracy = stay.horizontalAccuracy
         }
-        let day = try timeline(for: place.arrivalDate)
+        let day = try timeline(for: place.arrivalDate, at: place.coordinate)
         if place.dayTimeline?.persistentModelID != day.persistentModelID {
             place.dayTimeline = day
         }
@@ -3527,7 +3584,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             departure = min(stay.lastInsideDate, next.arrivalDate)
             draft.departureDate = departure
         }
-        draft.dayTimeline = try timeline(for: draft.arrivalDate)
+        draft.dayTimeline = try timeline(for: draft.arrivalDate, at: draft.coordinate)
         modelContext.insert(draft)
         return draft
     }
@@ -4011,7 +4068,8 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             endDate: endDate
         )
 
-        let timeline = try timeline(for: startDate)
+        // The local day where the trip starts, at the stop it leaves from.
+        let timeline = try timeline(for: startDate, at: startPlace.coordinate)
 
         let move: MoveSegment
         if let existing = try findMove(byDedupeKey: dedupeKey)
@@ -4333,15 +4391,16 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                 throw TimelineEditingError.invalidTimeRange
             }
 
-            let previousArrivalDay = Calendar.current.startOfDay(for: visit.arrivalDate)
             visit.arrivalDate = arrival
             visit.departureDate = departure
             if visit.origin == .sensor {
                 visit.origin = .manual
             }
 
-            if Calendar.current.startOfDay(for: arrival) != previousArrivalDay {
-                visit.dayTimeline = try timeline(for: arrival)
+            // The local day where the new arrival falls, not the phone's date for it.
+            let day = try timeline(for: arrival, at: visit.coordinate)
+            if visit.dayTimeline !== day {
+                visit.dayTimeline = day
             }
 
             for move in visit.incomingMoves {
@@ -4366,11 +4425,14 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         }
     }
 
-    /// Moves are filed under the day they start, and the day's stats read that list.
+    /// Moves are filed under the local day they start where they start, and the day's stats
+    /// read that list.
     private func refileIfStartChangedDay(_ move: MoveSegment, previousStart: Date) throws {
-        let calendar = Calendar.current
-        if calendar.startOfDay(for: move.startDate) != calendar.startOfDay(for: previousStart) {
-            move.dayTimeline = try timeline(for: move.startDate)
+        guard move.startDate != previousStart || move.dayTimeline == nil else { return }
+        let start = move.startPlace.map(\.coordinate).flatMap { PlaceTimeZone.isUsable($0) ? $0 : nil }
+        let day = try timeline(for: move.startDate, at: start)
+        if move.dayTimeline !== day {
+            move.dayTimeline = day
         }
     }
 
@@ -4873,7 +4935,17 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         }
     }
 
-    private func timeline(for date: Date, exportedDayKey: String?) throws -> DayTimeline {
+    /// An archive's `day_key` was worked out in whatever zone the exporting phone was in,
+    /// so a row with a real position is filed by where it happened; the key only places
+    /// rows that have none.
+    private func timeline(
+        for date: Date,
+        at coordinate: CLLocationCoordinate2D?,
+        exportedDayKey: String?
+    ) throws -> DayTimeline {
+        if let coordinate, let zone = PlaceTimeZone.timeZone(at: coordinate) {
+            return try timeline(for: date, in: zone)
+        }
         let trimmed = exportedDayKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !trimmed.isEmpty {
             var descriptor = FetchDescriptor<DayTimeline>(
@@ -4900,7 +4972,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                 return existing
             }
             applyArchiveMetadata(record, to: existing)
-            existing.dayTimeline = try timeline(for: record.arrivalDate, exportedDayKey: record.dayKey)
+            existing.dayTimeline = try timeline(for: record.arrivalDate, at: existing.coordinate, exportedDayKey: record.dayKey)
             return try collapseDuplicatePlaces(around: existing)
         }
 
@@ -4915,7 +4987,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             comment: record.comment
         )
         place.origin = newRowOrigin
-        place.dayTimeline = try timeline(for: record.arrivalDate, exportedDayKey: record.dayKey)
+        place.dayTimeline = try timeline(for: record.arrivalDate, at: place.coordinate, exportedDayKey: record.dayKey)
         modelContext.insert(place)
         return try collapseDuplicatePlaces(around: place)
     }
@@ -5002,7 +5074,11 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             samples: samples
         )
         if let existing, isUserCurated(existing) { return samples.count }
-        move.dayTimeline = try timeline(for: record.startDate, exportedDayKey: record.dayKey)
+        move.dayTimeline = try timeline(
+            for: record.startDate,
+            at: PlaceTimeZone.isUsable(startPlace.coordinate) ? startPlace.coordinate : locations.first?.coordinate,
+            exportedDayKey: record.dayKey
+        )
         if let comment = record.comment, !comment.isEmpty, move.comment?.isEmpty ?? true {
             move.comment = comment
         }
@@ -5056,7 +5132,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             userLabel: title,
             autoLabel: nil
         )
-        place.dayTimeline = try timeline(for: date, exportedDayKey: exportedDayKey)
+        place.dayTimeline = try timeline(for: date, at: nil, exportedDayKey: exportedDayKey)
         modelContext.insert(place)
         return place
     }
@@ -5156,15 +5232,29 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         return formatter
     }
 
+    /// The day `date` is filed under: the calendar day where the person was then. With no
+    /// coordinate to go on, the nearest stored fix says where that was; with none of those
+    /// either, the phone's own zone does.
     private func timeline(for date: Date) throws -> DayTimeline {
-        let dayStart = Calendar.current.startOfDay(for: date)
-        let dayKey = DayTimeline.makeDayKey(for: dayStart)
+        try timeline(for: date, in: try recordedTimeZone(near: date) ?? Calendar.current.timeZone)
+    }
+
+    /// The day `date` is filed under when it happened at `coordinate`.
+    private func timeline(for date: Date, at coordinate: CLLocationCoordinate2D?) throws -> DayTimeline {
+        if let coordinate, let zone = PlaceTimeZone.timeZone(at: coordinate) {
+            return try timeline(for: date, in: zone)
+        }
+        return try timeline(for: date)
+    }
+
+    private func timeline(for date: Date, in zone: TimeZone) throws -> DayTimeline {
+        let dayKey = DayTimeline.makeDayKey(for: date, in: zone)
 
         if bulkDayTimelineCache != nil {
             if let cached = bulkDayTimelineCache?[dayKey] {
                 return cached
             }
-            let timeline = DayTimeline(dayStart: dayStart)
+            let timeline = DayTimeline(containing: date, in: zone)
             modelContext.insert(timeline)
             bulkDayTimelineCache?[dayKey] = timeline
             return timeline
@@ -5181,10 +5271,41 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             return existing
         }
 
-        let timeline = DayTimeline(dayStart: dayStart)
+        let timeline = DayTimeline(containing: date, in: zone)
         modelContext.insert(timeline)
         return timeline
     }
+
+    /// The zone of the stored fix nearest `date`. Fixes two days either side are read
+    /// once and kept for a minute, so a rebuild filing a week of rows reads them once.
+    private func recordedTimeZone(near date: Date) throws -> TimeZone? {
+        let now = Date.now
+        if let cached = dayZoneFixes,
+           cached.window.contains(date),
+           now.timeIntervalSince(cached.loadedAt) < Self.dayZoneFixLifetime {
+            return cached.fixes.timeZone(near: date)
+        }
+        let start = date.addingTimeInterval(-Self.dayZoneFixWindow)
+        let end = date.addingTimeInterval(Self.dayZoneFixWindow)
+        var descriptor = FetchDescriptor<LocationSample>(
+            predicate: #Predicate { $0.timestamp >= start && $0.timestamp <= end }
+        )
+        descriptor.propertiesToFetch = [\.timestamp, \.latitude, \.longitude]
+        let fixes = RecordedTimeZones(fixes: try modelContext.fetch(descriptor).map {
+            (date: $0.timestamp, coordinate: CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude))
+        })
+        dayZoneFixes = (DateInterval(start: start, end: end), now, fixes)
+        return fixes.timeZone(near: date)
+    }
+
+    /// Keeps the fix cache in step with fixes this repository writes itself.
+    private func noteStoredFix(_ location: CLLocation) {
+        guard dayZoneFixes?.window.contains(location.timestamp) == true else { return }
+        dayZoneFixes?.fixes.insert(location.timestamp, location.coordinate)
+    }
+
+    private static let dayZoneFixWindow: TimeInterval = 2 * 24 * 60 * 60
+    private static let dayZoneFixLifetime: TimeInterval = 60
 
     private func routeEndpointPlace(
         at location: CLLocation,
@@ -5196,7 +5317,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             if existing.departureDate == nil {
                 existing.departureDate = departureDate
             }
-            existing.dayTimeline = try timeline(for: arrivalDate)
+            existing.dayTimeline = try timeline(for: arrivalDate, at: existing.coordinate)
             let canonical = try collapseDuplicatePlaces(around: existing)
             try applyPlaceLearning(to: canonical)
             return canonical
@@ -5210,7 +5331,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             horizontalAccuracy: max(location.horizontalAccuracy, 20)
         )
         place.origin = newRowOrigin
-        place.dayTimeline = try timeline(for: arrivalDate)
+        place.dayTimeline = try timeline(for: arrivalDate, at: location.coordinate)
         modelContext.insert(place)
         let canonical = try collapseDuplicatePlaces(around: place)
         try applyPlaceLearning(to: canonical)
@@ -5763,7 +5884,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             }
 
             if place.dayTimeline == nil {
-                place.dayTimeline = try timeline(for: place.arrivalDate)
+                place.dayTimeline = try timeline(for: place.arrivalDate, at: place.coordinate)
             }
         }
     }
@@ -6150,18 +6271,26 @@ enum SimulatorDemoDataSeeder {
         calendar: Calendar,
         context: ModelContext
     ) async throws {
-        let timeline = DayTimeline(dayStart: dayStart)
-        context.insert(timeline)
-
         let plannedStops = plannedStops(for: route)
         guard let firstMode = plannedStops.first?.transportMode else {
             return
         }
 
-        guard let routeStart = calendar.date(
+        // Each demo city keeps its own clock: the intended date, on the wall where the route
+        // runs, so the day is filed where a real one would be whatever zone the simulator uses.
+        let zone = plannedStops.first.flatMap { PlaceTimeZone.timeZone(at: $0.stop.coordinate) } ?? calendar.timeZone
+        let localCalendar = TimelineDayFiling.calendar(in: zone)
+        let localDayStart = TimelineDayFiling.startOfDay(
+            forKey: DayTimeline.makeDayKey(for: dayStart, in: calendar.timeZone),
+            in: zone
+        ) ?? dayStart
+        let timeline = DayTimeline(containing: localDayStart, in: zone)
+        context.insert(timeline)
+
+        guard let routeStart = localCalendar.date(
             byAdding: .minute,
             value: startOffsetMinutes(for: firstMode, routeIndex: routeIndex),
-            to: dayStart
+            to: localDayStart
         ) else {
             return
         }

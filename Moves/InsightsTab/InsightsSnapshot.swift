@@ -53,13 +53,15 @@ enum InsightsSourceLoader {
         let context = ModelContext(container)
         context.autosaveEnabled = false
 
-        let days = try context.fetch(FetchDescriptor<DayTimeline>(sortBy: [SortDescriptor(\.dayStart)]))
+        let days = try context.fetch(FetchDescriptor<DayTimeline>(sortBy: [SortDescriptor(\.dayKey)]))
         var order: [PersistentIdentifier] = []
         var dayStarts: [PersistentIdentifier: Date] = [:]
         for day in days {
             let id = day.persistentModelID
             if dayStarts[id] == nil { order.append(id) }
-            dayStarts[id] = day.dayStart
+            // The day's own date on the phone's calendar: every grouping below works in
+            // `Calendar.current`, and a day east of the phone starts on its previous date.
+            dayStarts[id] = day.calendarDate()
         }
 
         var moveFetch = FetchDescriptor<MoveSegment>(sortBy: [SortDescriptor(\.startDate)])

@@ -160,8 +160,11 @@
 		F20000013040000100000003 /* TimelineSchemaUpgrader.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000013040000100000002 /* TimelineSchemaUpgrader.swift */; };
 		F2A0000130B0000100000002 /* LaunchLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2A0000130B0000100000001 /* LaunchLog.swift */; };
 		F20000013040000100000005 /* TimelineLocator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000013040000100000004 /* TimelineLocator.swift */; };
+		D4A7DA010000000100000002 /* PlaceTimeZone.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4A7DA010000000100000001 /* PlaceTimeZone.swift */; };
+		D4A7DA010000000100000004 /* TimelineDayRepair.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4A7DA010000000100000003 /* TimelineDayRepair.swift */; };
 		F20000013040000100000007 /* TimelineEditingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000013040000100000006 /* TimelineEditingTests.swift */; };
 		F20000013040000100000009 /* TimelineLocatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000013040000100000008 /* TimelineLocatorTests.swift */; };
+		D4A7DA010000000100000006 /* TimelineDayFilingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4A7DA010000000100000005 /* TimelineDayFilingTests.swift */; };
 		F21000013050000100000001 /* TimelineItemActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = F21000013050000100000000 /* TimelineItemActions.swift */; };
 		F21000013050000100000003 /* TimelineEditController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F21000013050000100000002 /* TimelineEditController.swift */; };
 		F21000013050000100000005 /* PlaceRenameSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = F21000013050000100000004 /* PlaceRenameSheet.swift */; };
@@ -494,8 +497,11 @@
 		F20000013040000100000002 /* TimelineSchemaUpgrader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineSchemaUpgrader.swift; sourceTree = "<group>"; };
 		F2A0000130B0000100000001 /* LaunchLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchLog.swift; sourceTree = "<group>"; };
 		F20000013040000100000004 /* TimelineLocator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineLocator.swift; sourceTree = "<group>"; };
+		D4A7DA010000000100000001 /* PlaceTimeZone.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaceTimeZone.swift; sourceTree = "<group>"; };
+		D4A7DA010000000100000003 /* TimelineDayRepair.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineDayRepair.swift; sourceTree = "<group>"; };
 		F20000013040000100000006 /* TimelineEditingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineEditingTests.swift; sourceTree = "<group>"; };
 		F20000013040000100000008 /* TimelineLocatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineLocatorTests.swift; sourceTree = "<group>"; };
+		D4A7DA010000000100000005 /* TimelineDayFilingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineDayFilingTests.swift; sourceTree = "<group>"; };
 		F21000013050000100000000 /* TimelineItemActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineItemActions.swift; sourceTree = "<group>"; };
 		F21000013050000100000002 /* TimelineEditController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineEditController.swift; sourceTree = "<group>"; };
 		F21000013050000100000004 /* PlaceRenameSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaceRenameSheet.swift; sourceTree = "<group>"; };
@@ -718,6 +724,8 @@
 				F20000013040000100000002 /* TimelineSchemaUpgrader.swift */,
 				F2A0000130B0000100000001 /* LaunchLog.swift */,
 				F20000013040000100000004 /* TimelineLocator.swift */,
+				D4A7DA010000000100000001 /* PlaceTimeZone.swift */,
+				D4A7DA010000000100000003 /* TimelineDayRepair.swift */,
 				F50000013060000100000000 /* PlaceLearningEngine.swift */,
 				F21000013050000100000002 /* TimelineEditController.swift */,
 				F21000013050000100000004 /* PlaceRenameSheet.swift */,
@@ -871,6 +879,7 @@
 				CA9E11E02F00000100000004 /* CaptureHardeningTests.swift */,
 				F20000013040000100000006 /* TimelineEditingTests.swift */,
 				F20000013040000100000008 /* TimelineLocatorTests.swift */,
+				D4A7DA010000000100000005 /* TimelineDayFilingTests.swift */,
 				F21100013051000100000002 /* TimelineTabTests.swift */,
 				D7A00001000000000000000C /* TimelineDayMapTests.swift */,
 				F31100013060000100000002 /* StoreResilienceTests.swift */,
@@ -1454,6 +1463,8 @@
 				F20000013040000100000003 /* TimelineSchemaUpgrader.swift in Sources */,
 				F2A0000130B0000100000002 /* LaunchLog.swift in Sources */,
 				F20000013040000100000005 /* TimelineLocator.swift in Sources */,
+				D4A7DA010000000100000002 /* PlaceTimeZone.swift in Sources */,
+				D4A7DA010000000100000004 /* TimelineDayRepair.swift in Sources */,
 				F50000013060000100000001 /* PlaceLearningEngine.swift in Sources */,
 				F21000013050000100000003 /* TimelineEditController.swift in Sources */,
 				F21000013050000100000005 /* PlaceRenameSheet.swift in Sources */,
@@ -1517,6 +1528,7 @@
 				CA9E11E02F00000100000003 /* CaptureHardeningTests.swift in Sources */,
 				F20000013040000100000007 /* TimelineEditingTests.swift in Sources */,
 				F20000013040000100000009 /* TimelineLocatorTests.swift in Sources */,
+				D4A7DA010000000100000006 /* TimelineDayFilingTests.swift in Sources */,
 				F21100013051000100000003 /* TimelineTabTests.swift in Sources */,
 				D7A00001000000000000000D /* TimelineDayMapTests.swift in Sources */,
 				F31100013060000100000003 /* StoreResilienceTests.swift in Sources */,
@@ -1642,7 +1654,7 @@
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_ENTITLEMENTS = QuickLookThumbnails/QuickLookThumbnails.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 63;
+				CURRENT_PROJECT_VERSION = 64;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = QuickLookThumbnails/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
@@ -1665,7 +1677,7 @@
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_ENTITLEMENTS = QuickLookThumbnails/QuickLookThumbnails.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 63;
+				CURRENT_PROJECT_VERSION = 64;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = QuickLookThumbnails/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
@@ -1813,7 +1825,7 @@
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_ENTITLEMENTS = Moves/Moves.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 63;
+				CURRENT_PROJECT_VERSION = 64;
 				DEVELOPMENT_ASSET_PATHS = "\"Moves/Preview Content\"";
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
@@ -1862,7 +1874,7 @@
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_ENTITLEMENTS = Moves/Moves.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 63;
+				CURRENT_PROJECT_VERSION = 64;
 				DEVELOPMENT_ASSET_PATHS = "\"Moves/Preview Content\"";
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
@@ -1910,7 +1922,7 @@
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_ENTITLEMENTS = QuickLookPreview/QuickLookPreview.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 63;
+				CURRENT_PROJECT_VERSION = 64;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = QuickLookPreview/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
@@ -1982,7 +1994,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = "Moves Watch App/MovesWatch.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 63;
+				CURRENT_PROJECT_VERSION = 64;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Moves Watch App/Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -2008,7 +2020,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = "Moves Watch App/MovesWatch.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 63;
+				CURRENT_PROJECT_VERSION = 64;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Moves Watch App/Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -2034,7 +2046,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = "Moves Widgets/MovesWidgets.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 63;
+				CURRENT_PROJECT_VERSION = 64;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Moves Widgets/MovesWidgets-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -2060,7 +2072,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = "Moves Widgets/MovesWidgets.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 63;
+				CURRENT_PROJECT_VERSION = 64;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Moves Widgets/MovesWidgets-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -2086,7 +2098,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = "Moves Widgets/MovesWidgets.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 63;
+				CURRENT_PROJECT_VERSION = 64;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Moves Widgets/MovesWidgets-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -2113,7 +2125,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = "Moves Widgets/MovesWidgets.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 63;
+				CURRENT_PROJECT_VERSION = 64;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Moves Widgets/MovesWidgets-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -2141,7 +2153,7 @@
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_ENTITLEMENTS = QuickLookPreview/QuickLookPreview.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 63;
+				CURRENT_PROJECT_VERSION = 64;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = QuickLookPreview/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;

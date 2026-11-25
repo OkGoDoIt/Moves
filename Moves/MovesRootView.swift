@@ -370,19 +370,23 @@ struct MovesRootView: View {
             }
         case .editTimes(let id):
             if let visit = editController.visit(id: id) {
+                // Pickers show and set times on the stay's own clock.
                 EditTimesSheet(
                     visit: visit,
                     bounds: editController.timeBounds(for: visit),
                     editController: editController
                 )
+                .timelineClock(visit.placeTimeZone)
             }
         case .splitVisit(let id):
             if let visit = editController.visit(id: id) {
                 SplitSheet(target: .visit(visit), editController: editController)
+                    .timelineClock(visit.placeTimeZone)
             }
         case .splitMove(let id):
             if let move = editController.move(id: id) {
                 SplitSheet(target: .move(move), editController: editController)
+                    .timelineClock(move.placeTimeZone)
             }
         case .changeMode(let id):
             if let move = editController.move(id: id) {

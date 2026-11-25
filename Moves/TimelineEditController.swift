@@ -639,10 +639,14 @@ private enum LiveTimelineRows {
         return (try? context.fetch(descriptor))?.first
     }
 
+    /// Only the stay's own photos: the library can hold tens of thousands, and this runs
+    /// on the main context when a delete is undone.
     static func photos(_ identifiers: [String], in context: ModelContext) -> [PhotoAttachment] {
         guard !identifiers.isEmpty else { return [] }
-        return ((try? context.fetch(FetchDescriptor<PhotoAttachment>())) ?? [])
-            .filter { identifiers.contains($0.assetLocalIdentifier) }
+        let wanted = Array(Set(identifiers))
+        return (try? context.fetch(FetchDescriptor<PhotoAttachment>(
+            predicate: #Predicate { wanted.contains($0.assetLocalIdentifier) }
+        ))) ?? []
     }
 }
 

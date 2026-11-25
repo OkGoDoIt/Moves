@@ -41,6 +41,8 @@ struct TimelineDayMapSlot: Equatable {
 /// What the map draws for one day, copied out of the store so no model is held.
 struct TimelineDayMapContent {
     var dayKey = ""
+    /// The clock the day is read on, for the times in callouts.
+    var timeZone: TimeZone = .current
     var routes: [RenderedRoute] = []
     var placeMarkers: [PlaceMarker] = []
     var placeArrivals: [UUID: Date] = [:]
@@ -77,6 +79,7 @@ struct TimelineDayMapContent {
         let routeKey = routeRefreshKey(for: dayTimeline)
         var content = TimelineDayMapContent()
         content.dayKey = dayTimeline.dayKey
+        content.timeZone = dayTimeline.placeTimeZone
         content.placeMarkers = places.map { place in
             let knownName = place.knownPlace?.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let title = knownName.isEmpty ? place.displayTitle : knownName
@@ -1027,10 +1030,12 @@ private struct TimelineDayMapCalloutOverlay: View {
     private var callout: (title: String, subtitle: String, tint: Color)? {
         let _ = model.contentVersion
         let content = model.content
+        var clock = Date.FormatStyle.dateTime.hour().minute()
+        clock.timeZone = content.timeZone
         switch model.selection {
         case .place(let id):
             guard let marker = content.placeMarkers.first(where: { $0.id == id }) else { return nil }
-            let subtitle = content.placeArrivals[id].map { $0.formatted(.dateTime.hour().minute()) } ?? marker.title
+            let subtitle = content.placeArrivals[id].map { $0.formatted(clock) } ?? marker.title
             return (marker.title, subtitle, MovesPalette.place)
         case .move(let id):
             guard let route = content.routes.first(where: { $0.id == id.uuidString }) else { return nil }
@@ -1044,7 +1049,7 @@ private struct TimelineDayMapCalloutOverlay: View {
                 : String(localized: "Route tracking")
             let distance = Measurement(value: max(live.distanceMeters, 0), unit: UnitLength.meters)
                 .formatted(.measurement(width: .abbreviated, usage: .road))
-            return (title, String(localized: "Since \(live.startDate.formatted(date: .omitted, time: .shortened)) · \(distance)"), TimelineLiveTrip.tint(for: live))
+            return (title, String(localized: "Since \(live.startDate.formatted(clock)) · \(distance)"), TimelineLiveTrip.tint(for: live))
         case .sample:
             return (String(localized: "Captured location"), String(localized: "Now"), MovesPalette.start)
         case nil:

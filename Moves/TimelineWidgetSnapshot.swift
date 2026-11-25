@@ -71,7 +71,7 @@ extension TimelineWidgetSnapshot {
         return TimelineWidgetSnapshot(
             generatedAt: .now,
             dayKey: dayTimeline.dayKey,
-            dayTitle: dayTimeline.dayStart.formatted(.dateTime.weekday(.wide).day().month(.abbreviated)),
+            dayTitle: dayTimeline.calendarDate().formatted(.dateTime.weekday(.wide).day().month(.abbreviated)),
             totalDistanceMeters: totalDistance,
             visitedLocationCount: dayTimeline.uniqueLocationCount,
             moveCount: dayTimeline.moves.count,

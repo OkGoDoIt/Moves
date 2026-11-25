@@ -10,8 +10,16 @@ struct SplitSheet: View {
     }
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.timeZone) private var timeZone
 
     let target: Target
+
+    /// The split moment on the item's own clock.
+    private var splitClock: Date.FormatStyle {
+        var style = Date.FormatStyle.dateTime.hour().minute().second()
+        style.timeZone = timeZone
+        return style
+    }
     var editController: TimelineEditController
 
     @State private var progress: Double = 0.5
@@ -49,7 +57,7 @@ struct SplitSheet: View {
                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(currentDate, format: .dateTime.hour().minute().second())
+                    Text(currentDate, format: splitClock)
                         .font(.system(.title3, design: .rounded).weight(.semibold))
                     Slider(value: $progress, in: 0.05...0.95)
                     Text(String(localized: "Drag to pick the moment to split."))

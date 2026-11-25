@@ -112,12 +112,19 @@ struct DayHeaderView: View {
     private var statsText: String {
         let places = String(localized: "\(day.uniqueLocationCount) places")
         let moves = String(localized: "\(day.moves.count) moves")
-        guard totalDistanceMeters > 1 else {
-            return "\(places) · \(moves)"
+        var parts = [places, moves]
+        if totalDistanceMeters > 1 {
+            parts.append(Measurement(value: totalDistanceMeters, unit: UnitLength.meters)
+                .formatted(.measurement(width: .abbreviated, usage: .road)))
         }
-        let distance = Measurement(value: totalDistanceMeters, unit: UnitLength.meters)
-            .formatted(.measurement(width: .abbreviated, usage: .road))
-        return "\(places) · \(moves) · \(distance)"
+        return parts.joined(separator: " · ")
+    }
+
+    /// The day's clock when it is not the phone's, so its times read as local ones.
+    private var zoneText: String? { day.foreignTimeZoneAbbreviation }
+
+    private func withZone(_ text: String) -> String {
+        zoneText.map { "\(text) · \($0)" } ?? text
     }
 
     var body: some View {
@@ -148,11 +155,12 @@ struct DayHeaderView: View {
                             LiveNowBadge()
                         }
                         // Steps are the first thing to go when the line is tight.
+                        // The zone stays when the line is tight; steps go first.
                         ViewThatFits(in: .horizontal) {
                             if let stepsText {
-                                statsLine("\(statsText) · \(stepsText)")
+                                statsLine(withZone("\(statsText) · \(stepsText)"))
                             }
-                            statsLine(statsText)
+                            statsLine(withZone(statsText))
                                 .minimumScaleFactor(0.85)
                         }
                     }
@@ -187,7 +195,9 @@ struct DayHeaderView: View {
     }
 
     private func dateText(_ format: Date.FormatStyle) -> some View {
-        Text(day.dayStart, format: format)
+        // The day's own date: `dayStart` is midnight where it happened, which on the
+        // phone's clock can fall on the date before.
+        Text(day.calendarDate(), format: format)
             .font(.system(size: 18, weight: .semibold, design: .rounded))
             .foregroundStyle(.primary)
             .lineLimit(1)

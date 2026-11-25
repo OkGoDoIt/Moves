@@ -173,8 +173,8 @@ enum ShareMapAggregateStore {
 
     static func sourceSignature(for timelines: [DayTimeline]) -> String {
         sourceSignature(
-            moves: timelines.flatMap { day in day.moves.map { moveRow($0, dayStart: day.dayStart) } },
-            places: timelines.flatMap { day in day.places.map { placeRow($0, dayStart: day.dayStart) } }
+            moves: timelines.flatMap { day in day.moves.map { moveRow($0, dayStart: day.calendarDate()) } },
+            places: timelines.flatMap { day in day.places.map { placeRow($0, dayStart: day.calendarDate()) } }
         )
     }
 
@@ -263,12 +263,13 @@ enum ShareMapAggregateBuilder {
             var moveFetch = FetchDescriptor<MoveSegment>()
             moveFetch.relationshipKeyPathsForPrefetching = [\.dayTimeline]
             moves = try context.fetch(moveFetch).compactMap { move in
-                move.dayTimeline.map { ShareMapAggregateStore.moveRow(move, dayStart: $0.dayStart) }
+                // Months and years group days by their own date on the phone's calendar.
+                move.dayTimeline.map { ShareMapAggregateStore.moveRow(move, dayStart: $0.calendarDate()) }
             }
             var placeFetch = FetchDescriptor<VisitPlace>()
             placeFetch.relationshipKeyPathsForPrefetching = [\.dayTimeline]
             places = try context.fetch(placeFetch).compactMap { place in
-                place.dayTimeline.map { ShareMapAggregateStore.placeRow(place, dayStart: $0.dayStart) }
+                place.dayTimeline.map { ShareMapAggregateStore.placeRow(place, dayStart: $0.calendarDate()) }
             }
         }
     }
@@ -397,7 +398,7 @@ enum ShareMapAggregateBuilder {
         let maximumCoordinateCount = period == .year ? 80 : 120
         return try context.fetch(fetch).compactMap { move -> ShareMapAggregateTrack? in
             guard !Task.isCancelled,
-                  let dayStart = move.dayTimeline?.dayStart,
+                  let dayStart = move.dayTimeline?.calendarDate(),
                   period.contains(dayStart, periodStart: periodStart) else { return nil }
             let fallback = MoveRouteGeometry.rawCoordinates(for: move)
             let routeSignature = MoveRouteGeometry.cacheSignature(for: move, fallback: fallback)

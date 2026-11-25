@@ -33,7 +33,7 @@ final class LaunchUpgradeTests: XCTestCase {
     func testPhoneAtVersionThreeRunsOnlyTheNewerStepsAndNoTripRebuild() {
         let plan = TimelineSchemaUpgrader.steps(from: 3)
 
-        XCTAssertEqual(plan.map(\.version), [4, 4, 5, 5, 6, 7, 8])
+        XCTAssertEqual(plan.map(\.version), [4, 4, 5, 5, 6, 7, 8, 9, 9])
         XCTAssertFalse(plan.contains { if case .longTrips = $0.work { true } else { false } })
         XCTAssertTrue(TimelineSchemaUpgrader.steps(from: TimelineSchemaUpgrader.currentVersion).isEmpty)
     }

@@ -9,8 +9,9 @@ import SwiftData
 /// the individual steps are idempotent if the key is missing.
 enum TimelineSchemaUpgrader {
     /// Step 4 settles Review questions; steps 5–7 are the place-identity repairs; step 8
-    /// takes out trips drawn between photos hours apart.
-    static let currentVersion = 8
+    /// takes out trips drawn between photos hours apart; step 9 files every row on the
+    /// local day where it happened and drops days left with nothing on them.
+    static let currentVersion = 9
     static let userDefaultsKey = "moves.timelineSchemaVersion"
 
     @MainActor private static var running: Task<Void, Never>?
@@ -110,6 +111,18 @@ enum TimelineSchemaUpgrader {
             Step(version: 8, logName: "Upgrade 8: implausible photo trips",
                  title: String(localized: "Removing trips between far-apart photos"),
                  work: .store { _ = try PhotoHistoryImporter.removeImplausibleTrips(in: $0) }),
+            Step(version: 9, logName: "Upgrade 9: local days",
+                 title: String(localized: "Putting each day on local time"),
+                 work: .store { context in
+                     _ = try TimelineDayRepair.fileDaysByLocalTime(in: context) { done, total in
+                         Task { @MainActor in
+                             TimelineUpgradeProgress.shared.showProgressWithinStep(done: done, of: total)
+                         }
+                     }
+                 }),
+            Step(version: 9, logName: "Upgrade 9: empty days",
+                 title: String(localized: "Clearing empty days"),
+                 work: .store { _ = try TimelineDayRepair.removeEmptyDays(in: $0) }),
             // Last, as it always ran: the rebuild leaves imported and reviewed items alone,
             // so it has to see the origins and answers the steps above settle.
             Step(version: 3, logName: "Upgrade 3: long trips",
@@ -463,13 +476,20 @@ enum TimelineSchemaUpgrader {
     /// Only for history from before learned places existed. A visit that already carries an
     /// assignment had a place on the device that wrote it; on a fresh install its place is
     /// still on the way from iCloud, and making one here is how twin places were born.
-    private static func clusterUserLabeledPlaces(in context: ModelContext) throws {
+    ///
+    /// A store that already has learned places was written by a build that kept them, so a
+    /// named stay it left unassigned was left so on purpose: it only joins a place of the
+    /// same name within `NearbyPlaceSuggester.searchRadius`, the rule naming uses, and no
+    /// place is made for it. A reinstall that starts again from version 0 then ends with
+    /// the places the phone had, not one-stay twins beside them.
+    static func clusterUserLabeledPlaces(in context: ModelContext) throws {
         let visits = try context.fetch(FetchDescriptor<VisitPlace>())
         let unlabeled = visits.filter { visit in
             visit.knownPlace == nil
                 && visit.assignmentSource == .none
                 && !(visit.userLabel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         }
+        guard !unlabeled.isEmpty else { return }
 
         var buckets: [String: [VisitPlace]] = [:]
         for visit in unlabeled {
@@ -477,7 +497,10 @@ enum TimelineSchemaUpgrader {
             buckets[key, default: []].append(visit)
         }
 
-        var knownPlaces = try context.fetch(FetchDescriptor<KnownPlace>())
+        let mayCreatePlaces = try context.fetchCount(FetchDescriptor<KnownPlace>()) == 0
+        let repository = SwiftDataTimelineRepository(modelContext: context)
+        var createdPlaces: [KnownPlace] = []
+        var createdIDs = Set<UUID>()
 
         for (_, labeledVisits) in buckets {
             var remaining = labeledVisits
@@ -502,13 +525,19 @@ enum TimelineSchemaUpgrader {
                     .compactMap { $0.userLabel?.trimmingCharacters(in: .whitespacesAndNewlines) }
                     .first { !$0.isEmpty }
                     ?? ""
-                let knownPlace = existingKnownPlace(
-                    named: name,
-                    near: meanCoordinate(of: cluster),
-                    in: knownPlaces
-                ) ?? makeKnownPlace(from: cluster, name: name, context: context)
-                if !knownPlaces.contains(where: { $0.id == knownPlace.id }) {
-                    knownPlaces.append(knownPlace)
+                let center = meanCoordinate(of: cluster)
+                let knownPlace: KnownPlace
+                if let existing = try repository.sameNamedKnownPlace(name, near: center),
+                   !createdIDs.contains(existing.id) {
+                    knownPlace = existing
+                } else if let created = existingKnownPlace(named: name, near: center, in: createdPlaces) {
+                    knownPlace = created
+                } else if mayCreatePlaces {
+                    knownPlace = makeKnownPlace(from: cluster, name: name, context: context)
+                    createdPlaces.append(knownPlace)
+                    createdIDs.insert(knownPlace.id)
+                } else {
+                    continue
                 }
 
                 for visit in cluster {
@@ -550,6 +579,7 @@ enum TimelineSchemaUpgrader {
         }
     }
 
+    /// A place this step made earlier in the same pass: same name within 120 m.
     private static func existingKnownPlace(
         named name: String,
         near coordinate: CLLocationCoordinate2D,
@@ -614,16 +644,40 @@ final class TimelineUpgradeProgress: ObservableObject {
     @Published private(set) var stepTitle: String?
     /// Steps finished out of all of them, from 0 to 1.
     @Published private(set) var fractionCompleted: Double = 0
+    /// How far a long step has got and the time it has left, when the step reports it.
+    @Published private(set) var stepDetail: String?
     private var stepCount = 1
+    private var completedSteps = 0
+    private var stepStartedAt = Date.now
 
     func begin(stepCount: Int) {
         self.stepCount = max(stepCount, 1)
         stepTitle = nil
+        stepDetail = nil
         fractionCompleted = 0
     }
 
     func show(_ title: String?, completed: Int) {
         stepTitle = title
+        stepDetail = nil
+        completedSteps = completed
+        stepStartedAt = .now
         fractionCompleted = min(Double(completed) / Double(stepCount), 1)
+    }
+
+    /// Moves the bar through the running step and says how far it is and how long is left.
+    func showProgressWithinStep(done: Int, of total: Int, now: Date = .now) {
+        guard total > 0 else { return }
+        let fraction = min(max(Double(done) / Double(total), 0), 1)
+        fractionCompleted = min((Double(completedSteps) + fraction) / Double(stepCount), 1)
+        let counted = String(localized: "\(done.formatted()) of \(total.formatted())")
+        let elapsed = now.timeIntervalSince(stepStartedAt)
+        guard fraction > 0.02, elapsed > 1 else {
+            stepDetail = counted
+            return
+        }
+        let left = Duration.seconds(max(elapsed * (1 - fraction) / fraction, 1))
+        let leftText = left.formatted(.units(allowed: [.minutes, .seconds], width: .wide, maximumUnitCount: 1))
+        stepDetail = String(localized: "\(counted) · about \(leftText) left")
     }
 }

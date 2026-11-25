@@ -68,6 +68,9 @@ struct DayTimelinePage: View {
                 // Neighbouring pages render too, so a swipe shows the next day rather than
                 // a blank page. Only the active page hosts a live map.
                 DayTimelinePageContent(dayTimeline: dayTimeline, isActive: isActive)
+                    // Every time on the page, and on the screens it pushes, reads on the
+                    // clock where the day happened.
+                    .timelineClock(dayTimeline.placeTimeZone)
                     // The stored record replacing a stand-in starts the page afresh. The
                     // page holds no map, only its snapshot spot, so this is cheap.
                     .id(ObjectIdentifier(dayTimeline))
@@ -742,6 +745,7 @@ struct DayTimelinePageContent: View {
         case .place(let place):
             NavigationLink {
                 PlaceMapDetailView(place: place)
+                    .timelineClock(place.placeTimeZone)
             } label: {
                 row
             }
@@ -752,6 +756,7 @@ struct DayTimelinePageContent: View {
         case .move(let segment):
             NavigationLink {
                 MoveMapDetailView(segment: segment)
+                    .timelineClock(segment.placeTimeZone)
             } label: {
                 row
             }
@@ -778,6 +783,7 @@ struct DayTimelinePageContent: View {
         case .place(let place):
             NavigationLink {
                 PlaceMapDetailView(place: place)
+                    .timelineClock(place.placeTimeZone)
             } label: {
                 detailChevron
             }
@@ -787,6 +793,7 @@ struct DayTimelinePageContent: View {
         case .move(let move):
             NavigationLink {
                 MoveMapDetailView(segment: move)
+                    .timelineClock(move.placeTimeZone)
             } label: {
                 detailChevron
             }
@@ -824,8 +831,8 @@ struct DayTimelinePageContent: View {
 
     private func applyMomentJumpIfNeeded() {
         guard isActive, let moment = rootController.requestedJumpMoment else { return }
-        let calendar = Calendar.autoupdatingCurrent
-        guard calendar.isDate(moment, inSameDayAs: dayTimeline.dayStart) else { return }
+        // The moment belongs to this day when it falls on the day's date on the day's clock.
+        guard DayTimeline.makeDayKey(for: moment, in: dayTimeline.placeTimeZone) == dayTimeline.dayKey else { return }
 
         let result = TimelineLocator.locate(
             at: moment,
@@ -1617,12 +1624,19 @@ private struct StorylineTimeColumn: View {
     let date: Date
     var isCompact: Bool = false
     @ScaledMetric(relativeTo: .caption2) private var columnWidth: CGFloat = 50
+    @Environment(\.timeZone) private var timeZone
+
+    private var spoken: Date.FormatStyle {
+        var style = Date.FormatStyle.dateTime.hour().minute()
+        style.timeZone = timeZone
+        return style
+    }
 
     var body: some View {
-        let period = isCompact ? nil : StorylineClock.periodText(from: date)
+        let period = isCompact ? nil : StorylineClock.periodText(from: date, timeZone: timeZone)
 
         VStack(alignment: .trailing, spacing: 1) {
-            Text(StorylineClock.hourMinuteText(from: date))
+            Text(StorylineClock.hourMinuteText(from: date, timeZone: timeZone))
                 .font(.system(size: isCompact ? 11 : 12, weight: .semibold, design: .rounded).width(.condensed))
                 .monospacedDigit()
                 .lineLimit(1)
@@ -1641,7 +1655,7 @@ private struct StorylineTimeColumn: View {
         .padding(.trailing, 4)
         .padding(.top, isCompact ? 0 : 6)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text(date, format: .dateTime.hour().minute()))
+        .accessibilityLabel(Text(date, format: spoken))
     }
 }
 

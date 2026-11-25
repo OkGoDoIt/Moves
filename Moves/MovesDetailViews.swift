@@ -177,12 +177,15 @@ struct PlaceMapDetailView: View {
 
     /// "8:15 AM – 8:43 AM · 28m", or "Since 8:15 AM · 3h 2m" while the stay goes on.
     private var stayText: String {
-        let arrival = place.arrivalDate.formatted(date: .omitted, time: .shortened)
+        // On the stay's own clock, wherever the phone is now.
+        var clock = Date.FormatStyle(date: .omitted, time: .shortened)
+        clock.timeZone = place.placeTimeZone
+        let arrival = place.arrivalDate.formatted(clock)
         guard let departure = place.departureDate else {
             let duration = DurationFormatter.text(for: max(Date.now.timeIntervalSince(place.arrivalDate), 0))
             return String(localized: "Since \(arrival) · \(duration)")
         }
-        let left = departure.formatted(date: .omitted, time: .shortened)
+        let left = departure.formatted(clock)
         let duration = DurationFormatter.text(for: max(departure.timeIntervalSince(place.arrivalDate), 0))
         return "\(arrival) – \(left) · \(duration)"
     }
@@ -548,7 +551,7 @@ struct MoveMapDetailView: View {
         }
         .sheet(isPresented: $isShowingRecordedLocations) {
             NavigationStack {
-                RecordedLocationsView(moveID: segment.id)
+                RecordedLocationsView(moveID: segment.id, timeZone: segment.placeTimeZone)
                     .toolbar {
                         ToolbarItem(placement: .confirmationAction) {
                             Button("Done") { isShowingRecordedLocations = false }
@@ -1329,6 +1332,8 @@ struct RecordedLocationFix: Identifiable, Sendable {
 /// Read-only, paginated original fixes, separate from matched or manually drawn paths.
 struct RecordedLocationsView: View {
     let moveID: UUID
+    /// The trip's own clock, for each fix's time.
+    var timeZone: TimeZone = .current
     @Environment(\.modelContext) private var context
     @State private var fixes: [RecordedLocationFix] = []
     @State private var offset = 0
@@ -1338,10 +1343,16 @@ struct RecordedLocationsView: View {
     @State private var error: String?
     private let pageSize = 200
 
+    private func fixClock(_ style: Date.FormatStyle) -> Date.FormatStyle {
+        var style = style
+        style.timeZone = timeZone
+        return style
+    }
+
     private var fixesMap: some View {
             Map(position: $camera, selection: $selected) {
                 ForEach(fixes) { fix in
-                    Marker(fix.timestamp.formatted(date: .omitted, time: .standard), coordinate: fix.coordinate).tag(fix.id)
+                    Marker(fix.timestamp.formatted(fixClock(.dateTime.hour().minute().second())), coordinate: fix.coordinate).tag(fix.id)
                 }
             }
     }
@@ -1356,7 +1367,7 @@ struct RecordedLocationsView: View {
                     } label: {
                         VStack(alignment: .leading, spacing: 4) {
                             HStack {
-                                Text(fix.timestamp, format: .dateTime.hour().minute().second())
+                                Text(fix.timestamp, format: fixClock(.dateTime.hour().minute().second()))
                                 Spacer()
                                 Text(fix.sourceTitle).foregroundStyle(.secondary)
                             }

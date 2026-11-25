@@ -287,18 +287,21 @@ final class MapWindowLoader {
         let period: MovesSharePeriod = selection.granularity == .year || selection.granularity == .allTime
             ? .year
             : .month
-        let timelines = ((try? modelContext.fetch(FetchDescriptor<DayTimeline>())) ?? [])
-            .filter { $0.hasRecordedActivity && $0.dayStart < interval.end && $0.dayStart.addingTimeInterval(86_400) > interval.start }
+        // A day belongs to the range by its own date, read on the range's calendar.
+        let dated = ((try? modelContext.fetch(FetchDescriptor<DayTimeline>())) ?? [])
+            .map { (day: $0, date: $0.calendarDate(in: calendar)) }
+            .filter { $0.day.hasRecordedActivity && $0.date < interval.end && $0.date.addingTimeInterval(86_400) > interval.start }
+        let timelines = dated.map(\.day)
 
         var tracks: [ShareMapAggregateTrack] = []
         if period == .year, selection.granularity == .allTime {
-            let years = Set(timelines.map { calendar.component(.year, from: $0.dayStart) })
+            let years = Set(dated.map { calendar.component(.year, from: $0.date) })
             for year in years.sorted() {
                 guard let yearDate = calendar.date(from: DateComponents(year: year, month: 1, day: 1)) else { continue }
                 if let cached = ShareMapAggregateStore.cachedTracks(
                     for: .year,
                     periodStart: yearDate,
-                    timelines: timelines.filter { calendar.component(.year, from: $0.dayStart) == year },
+                    timelines: dated.filter { calendar.component(.year, from: $0.date) == year }.map(\.day),
                     in: modelContext
                 ) {
                     tracks.append(contentsOf: cached)
@@ -322,7 +325,7 @@ final class MapWindowLoader {
                     id: move.id,
                     transportMode: move.transportMode,
                     coordinates: Self.downsampled(coordinates, maximumCount: period == .year ? 80 : 120),
-                    dayStart: calendar.startOfDay(for: move.startDate),
+                    dayStart: move.dayTimeline?.calendarDate(in: calendar) ?? calendar.startOfDay(for: move.startDate),
                     startDate: move.startDate,
                     endDate: move.endDate,
                     distanceMeters: move.distanceMeters

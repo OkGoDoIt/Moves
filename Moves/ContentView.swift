@@ -536,16 +536,17 @@ struct ContentView: View {
 
     /// Bounded database reads; missing calendar days are navigation values, not new records.
     private func refreshDayIndex() {
-        var firstQuery = FetchDescriptor<DayTimeline>(sortBy: [SortDescriptor(\.dayStart)])
+        var firstQuery = FetchDescriptor<DayTimeline>(sortBy: [SortDescriptor(\.dayKey)])
         firstQuery.fetchLimit = 1
-        var lastQuery = FetchDescriptor<DayTimeline>(sortBy: [SortDescriptor(\.dayStart, order: .reverse)])
+        var lastQuery = FetchDescriptor<DayTimeline>(sortBy: [SortDescriptor(\.dayKey, order: .reverse)])
         lastQuery.fetchLimit = 1
         guard let first = try? modelContext.fetch(firstQuery).first else { dayTimelines = []; return }
-        let last = (try? modelContext.fetch(lastQuery).first)?.dayStart ?? first.dayStart
         // This runs after every save, and the calendar only changes with its first day, its
-        // last day, or the time zone.
+        // last day, or the time zone. Days are read by their own date, not by when they began
+        // on the phone's clock, so a day east of the phone does not open a day early.
         let calendar = Calendar.current
-        let firstStart = calendar.startOfDay(for: first.dayStart)
+        let last = (try? modelContext.fetch(lastQuery).first)?.calendarDate(in: calendar) ?? first.calendarDate(in: calendar)
+        let firstStart = first.calendarDate(in: calendar)
         let lastStart = calendar.startOfDay(for: max(last, .now))
         if dayTimelines.first?.dayStart != firstStart
             || dayTimelines.last?.dayStart != lastStart

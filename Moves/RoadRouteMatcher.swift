@@ -231,7 +231,19 @@ enum RoadRouteMatcher {
                 move.distanceMeters = displayedDistance
             }
         }
+        applyHealthRouteSignal(to: move, routeMeters: displayedDistance)
         return coordinates
+    }
+
+    /// A matched walk Health disagrees with reads as estimated. Runs whenever a path is
+    /// shown, so a Health reading that lands after the match still counts. Only lowers.
+    private static func applyHealthRouteSignal(to move: MoveSegment, routeMeters: CLLocationDistance) {
+        guard let signal = RouteMatchPlausibility.healthSignal(for: move, routeMeters: routeMeters) else { return }
+        let adjusted = RouteMatchPlausibility.confidence(move.routeMatchConfidence, healthSignal: signal)
+        guard adjusted != move.routeMatchConfidence else { return }
+        move.writeDerivedRouteData {
+            move.routeMatchConfidence = adjusted
+        }
     }
 
     private static func resolveDisplayedCoordinates(for move: MoveSegment) async -> [CLLocationCoordinate2D] {
@@ -1289,6 +1301,46 @@ enum RouteMatchSummaries {
 // MARK: - Plausibility
 
 enum RouteMatchPlausibility {
+    /// Health walked well over a matched path (a detour the fixes missed) or well under it
+    /// with steps taken (a detour the match invented): the path is a guess. Agreement, an
+    /// unclear reading, or no reading leaves it as it is, and so does any path that is not
+    /// a match (recorded, drawn, or already estimated).
+    static func confidence(_ confidence: RouteMatchConfidence, healthSignal: HealthRouteSignal?) -> RouteMatchConfidence {
+        switch healthSignal {
+        case .wandered?, .shortfall?:
+            switch confidence {
+            case .high, .medium: return .estimated
+            case .recorded, .estimated, .unknown: return confidence
+            }
+        case .agree?, .inconclusive?, nil:
+            return confidence
+        }
+    }
+
+    /// Health's verdict on a walk or run shown as `routeMeters` long, from the distance
+    /// the Health sync cached for that trip. Nil when Health is off, the trip was never
+    /// read, it is not on foot, or the person drew its path.
+    static func healthSignal(
+        for move: MoveSegment,
+        routeMeters: CLLocationDistance,
+        cache: HealthTimelineCacheStore = .shared,
+        calibration: HealthStrideCalibration = HealthStrideCalibrationStore.load(),
+        isActive: Bool = HealthActivitySettings.isActive
+    ) -> HealthRouteSignal? {
+        guard isActive,
+              move.transportMode == .walking || move.transportMode == .running,
+              move.manualRouteCoordinatesData == nil,
+              move.routeMatchPolicy != .recorded,
+              let entry = cache.data().trips[move.id],
+              let meters = entry.healthMeters
+        else { return nil }
+        return HealthRouteSignal.classify(
+            routeMeters: routeMeters,
+            healthMeters: .value(calibration.k * meters),
+            steps: entry.evidence.steps
+        )
+    }
+
     static func isAcceptable(
         _ matched: [CLLocationCoordinate2D],
         comparedTo recorded: [CLLocationCoordinate2D],
