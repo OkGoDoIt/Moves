@@ -185,7 +185,8 @@ enum ShareMapAggregateStore {
         let digest = SHA256.hash(data: Data(source.utf8))
             .map { String(format: "%02x", $0) }
             .joined()
-        return "tracks-v3:" + digest
+        // Tracks are drawn from `MoveRouteGeometry.rawCoordinates`, so a new fix rule rebuilds them.
+        return "tracks-v3:\(RouteFixAccuracy.ruleVersion):" + digest
     }
 
     static func cachedTracks(

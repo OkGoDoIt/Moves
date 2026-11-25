@@ -36,24 +36,116 @@ enum TimelineSchemaUpgrader {
         defaults: UserDefaults = .standard
     ) {
         let storedVersion = defaults.integer(forKey: userDefaultsKey)
+        LaunchLog.logger.notice("Stored timeline schema version \(storedVersion), current \(currentVersion)")
         guard storedVersion < currentVersion else {
-            mergeDuplicatePlacesIfAny(container: container)
+            LaunchLog.measure("Duplicate place probe") { mergeDuplicatePlacesIfAny(container: container) }
             return
         }
 
+        let plan = steps(from: storedVersion)
+        TimelineUpgradeProgress.shared.begin(stepCount: plan.count)
         running = Task.detached(priority: .userInitiated) {
-            let context = ModelContext(container)
-            context.autosaveEnabled = false
+            let started = ContinuousClock.now
+            defer { LaunchLog.finished("Upgrade total", startedAt: started) }
             do {
-                try upgrade(in: context, from: storedVersion)
-                if storedVersion < 3 {
-                    await repairLongTrips(in: container)
-                }
+                try await run(plan, container: container, defaults: defaults)
                 defaults.set(currentVersion, forKey: userDefaultsKey)
             } catch {
-                print("Timeline schema upgrade failed: \(error.localizedDescription)")
+                LaunchLog.logger.error("Timeline schema upgrade failed: \(error.localizedDescription, privacy: .public)")
             }
         }
+    }
+
+    /// One step of the upgrade: the version it belongs to, its name in the launch log,
+    /// and the line the waiting screen shows while it runs.
+    struct Step {
+        enum Work {
+            case store((ModelContext) throws -> Void)
+            /// Rebuilds trips on the assembler's own context; see `repairLongTrips`.
+            case longTrips
+        }
+
+        let version: Int
+        let logName: StaticString
+        let title: String
+        let work: Work
+    }
+
+    /// The steps a store at `storedVersion` still needs, in the order they run.
+    static func steps(from storedVersion: Int) -> [Step] {
+        let all: [Step] = [
+            Step(version: 1, logName: "Upgrade 1: cluster labeled places",
+                 title: String(localized: "Grouping the places you named"),
+                 work: .store { try clusterUserLabeledPlaces(in: $0) }),
+            Step(version: 1, logName: "Upgrade 1: short stops",
+                 title: String(localized: "Finding short stops"),
+                 work: .store { try backfillShortStops(in: $0) }),
+            Step(version: 1, logName: "Upgrade 1: route policies",
+                 title: String(localized: "Updating routes"),
+                 work: .store { try backfillRouteMatchPolicies(in: $0) }),
+            Step(version: 3, logName: "Upgrade 3: duplicate stays",
+                 title: String(localized: "Combining repeated stops"),
+                 work: .store { try SwiftDataTimelineRepository(modelContext: $0).repairDuplicateStays() }),
+            Step(version: 3, logName: "Upgrade 3: trip labels",
+                 title: String(localized: "Checking how you traveled"),
+                 work: .store { try SwiftDataTimelineRepository(modelContext: $0).repairTripLabels() }),
+            Step(version: 4, logName: "Upgrade 4: tag imported history",
+                 title: String(localized: "Sorting imported history"),
+                 work: .store { _ = try tagImportedHistory(in: $0) }),
+            Step(version: 4, logName: "Upgrade 4: settle review",
+                 title: String(localized: "Updating questions to review"),
+                 work: .store { _ = try settleReviewQuestions(in: $0) }),
+            Step(version: 5, logName: "Upgrade 5: cell-copied addresses",
+                 title: String(localized: "Refreshing addresses"),
+                 work: .store { _ = try clearCellCopiedAddresses(in: $0) }),
+            Step(version: 5, logName: "Upgrade 5: country-named cities",
+                 title: String(localized: "Refreshing addresses"),
+                 work: .store { _ = try clearCountryNamedCities(in: $0) }),
+            Step(version: 6, logName: "Upgrade 6: duplicate places",
+                 title: String(localized: "Merging places with the same name"),
+                 work: .store { _ = try mergeDuplicateKnownPlaces(in: $0) }),
+            Step(version: 7, logName: "Upgrade 7: automatic labels",
+                 title: String(localized: "Giving each place one name"),
+                 work: .store { _ = try unifyAutomaticLabels(in: $0) }),
+            Step(version: 8, logName: "Upgrade 8: implausible photo trips",
+                 title: String(localized: "Removing trips between far-apart photos"),
+                 work: .store { _ = try PhotoHistoryImporter.removeImplausibleTrips(in: $0) }),
+            // Last, as it always ran: the rebuild leaves imported and reviewed items alone,
+            // so it has to see the origins and answers the steps above settle.
+            Step(version: 3, logName: "Upgrade 3: long trips",
+                 title: String(localized: "Splitting trips that missed a stop"),
+                 work: .longTrips),
+        ]
+        return all.filter { $0.version > storedVersion }
+    }
+
+    /// Runs `plan` on contexts of its own. Whenever every step of a version and of the
+    /// versions before it is done, the work is saved and that version recorded, so a
+    /// launch that is cut short resumes there instead of starting over.
+    private static func run(_ plan: [Step], container: ModelContainer, defaults: UserDefaults) async throws {
+        var recorded = defaults.integer(forKey: userDefaultsKey)
+        var context = ModelContext(container)
+        context.autosaveEnabled = false
+        for (index, step) in plan.enumerated() {
+            await TimelineUpgradeProgress.shared.show(step.title, completed: index)
+            switch step.work {
+            case .store(let work):
+                try LaunchLog.measure(step.logName) { try work(context) }
+            case .longTrips:
+                if context.hasChanges { try context.save() }
+                await LaunchLog.measure(step.logName) { await repairLongTrips(in: container) }
+                // The rebuild deleted rows on another context; this one must not hold them.
+                context = ModelContext(container)
+                context.autosaveEnabled = false
+            }
+            let finishedThrough = (plan[(index + 1)...].map(\.version).min() ?? currentVersion + 1) - 1
+            if finishedThrough > recorded {
+                if context.hasChanges { try context.save() }
+                defaults.set(finishedThrough, forKey: userDefaultsKey)
+                recorded = finishedThrough
+            }
+        }
+        await TimelineUpgradeProgress.shared.show(nil, completed: plan.count)
     }
 
     /// Takes out stays a photo import built from photos it has since found are not the
@@ -65,6 +157,9 @@ enum TimelineSchemaUpgrader {
         let earlier = running
         running = Task.detached(priority: .userInitiated) {
             await earlier?.value
+            await TimelineUpgradeProgress.shared.begin(stepCount: 1)
+            await TimelineUpgradeProgress.shared.show(String(localized: "Removing stays from other people’s photos"), completed: 0)
+            defer { Task { @MainActor in TimelineUpgradeProgress.shared.show(nil, completed: 1) } }
             let context = ModelContext(container)
             context.autosaveEnabled = false
             do {
@@ -79,35 +174,12 @@ enum TimelineSchemaUpgrader {
         }
     }
 
-    /// Applies every backfill step. Exposed for tests; calling twice is a no-op
-    /// besides rewriting the same derived values.
+    /// Applies every backfill step but the long-trip rebuild on one context. Exposed for
+    /// tests; calling twice is a no-op besides rewriting the same derived values.
     static func upgrade(in context: ModelContext, from storedVersion: Int = 0) throws {
-        if storedVersion < 1 {
-            try clusterUserLabeledPlaces(in: context)
-            try backfillShortStops(in: context)
-            try backfillRouteMatchPolicies(in: context)
-        }
-        if storedVersion < 3 {
-            let repository = SwiftDataTimelineRepository(modelContext: context)
-            try repository.repairDuplicateStays()
-            try repository.repairTripLabels()
-        }
-        if storedVersion < 4 {
-            try tagImportedHistory(in: context)
-            try settleReviewQuestions(in: context)
-        }
-        if storedVersion < 5 {
-            _ = try clearCellCopiedAddresses(in: context)
-            _ = try clearCountryNamedCities(in: context)
-        }
-        if storedVersion < 6 {
-            _ = try mergeDuplicateKnownPlaces(in: context)
-        }
-        if storedVersion < 7 {
-            _ = try unifyAutomaticLabels(in: context)
-        }
-        if storedVersion < 8 {
-            _ = try PhotoHistoryImporter.removeImplausibleTrips(in: context)
+        for step in steps(from: storedVersion) {
+            guard case .store(let work) = step.work else { continue }
+            try LaunchLog.measure(step.logName) { try work(context) }
         }
         if context.hasChanges {
             try context.save()
@@ -190,7 +262,7 @@ enum TimelineSchemaUpgrader {
         context.undoManager = nil
         defer { context.undoManager = manager }
         do {
-            if try settleReviewQuestions(in: context) > 0 {
+            if try LaunchLog.measureCount("Settle review on view context", { try settleReviewQuestions(in: context) }) > 0 {
                 try context.save()
             }
         } catch {
@@ -209,14 +281,17 @@ enum TimelineSchemaUpgrader {
         guard let places = try? probe.fetch(FetchDescriptor<KnownPlace>()),
               !PlaceLearningEngine.duplicateMerges(places.map(PlaceLearningEngine.DuplicateCandidate.init)).isEmpty
         else { return }
+        TimelineUpgradeProgress.shared.begin(stepCount: 1)
+        TimelineUpgradeProgress.shared.show(String(localized: "Merging places with the same name"), completed: 0)
         running = Task.detached(priority: .userInitiated) {
             let context = ModelContext(container)
             context.autosaveEnabled = false
             do {
-                _ = try mergeDuplicateKnownPlaces(in: context)
+                _ = try LaunchLog.measureCount("Duplicate place merge") { try mergeDuplicateKnownPlaces(in: context) }
             } catch {
-                print("Duplicate place merge failed: \(error.localizedDescription)")
+                LaunchLog.logger.error("Duplicate place merge failed: \(error.localizedDescription, privacy: .public)")
             }
+            await TimelineUpgradeProgress.shared.show(nil, completed: 1)
         }
     }
 
@@ -527,5 +602,28 @@ enum TimelineSchemaUpgrader {
     ) -> CLLocationDistance {
         CLLocation(latitude: start.latitude, longitude: start.longitude)
             .distance(from: CLLocation(latitude: end.latitude, longitude: end.longitude))
+    }
+}
+
+/// What the waiting screen says while a one-time upgrade holds the timeline back.
+@MainActor
+final class TimelineUpgradeProgress: ObservableObject {
+    static let shared = TimelineUpgradeProgress()
+
+    /// The step underway, in plain words; `nil` once the last step is done.
+    @Published private(set) var stepTitle: String?
+    /// Steps finished out of all of them, from 0 to 1.
+    @Published private(set) var fractionCompleted: Double = 0
+    private var stepCount = 1
+
+    func begin(stepCount: Int) {
+        self.stepCount = max(stepCount, 1)
+        stepTitle = nil
+        fractionCompleted = 0
+    }
+
+    func show(_ title: String?, completed: Int) {
+        stepTitle = title
+        fractionCompleted = min(Double(completed) / Double(stepCount), 1)
     }
 }

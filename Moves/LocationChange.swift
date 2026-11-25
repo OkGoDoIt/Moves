@@ -2307,6 +2307,17 @@ extension MovesLocationCaptureManager: @preconcurrency CLLocationManagerDelegate
             return
         }
 
+        // A fix requested at launch can come back cached, minutes old and still at the last
+        // place. Stored as new, it reads as more time spent there and splits a stay in two.
+        var locations = locations
+        if pendingOneShotLocationSource != nil {
+            locations = locations.filter { Date.now.timeIntervalSince($0.timestamp) <= 60 }
+            guard !locations.isEmpty else {
+                Self.captureLog.info("Ignored a cached launch fix")
+                return
+            }
+        }
+
         let idleFor = lastCaptureAt.map { Date.now.timeIntervalSince($0) }
         lastCaptureAt = .now
         let source: LocationSampleSource

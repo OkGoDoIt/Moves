@@ -1528,9 +1528,20 @@ final class SwiftDataTimelineRepository: TimelineRepository {
     /// overlapping in time, and the trips those merges leave behind. Fixes are never
     /// touched, and stops the person named differently stay separate.
     func repairDuplicateStays() throws {
-        let placeIDs = try modelContext.fetch(
+        let sortedPlaces = try modelContext.fetch(
             FetchDescriptor<VisitPlace>(sortBy: [SortDescriptor(\VisitPlace.arrivalDate, order: .forward)])
-        ).map(\.id)
+        )
+        // Collapsing only ever finds stops arriving within the dedupe window of each other,
+        // and it never moves an arrival, so a stop with no neighbour that close is left as
+        // it is without the two fetches per stop that used to make this take most of a minute.
+        let arrivals = sortedPlaces.map(\.arrivalDate)
+        let placeIDs = sortedPlaces.indices.compactMap { index -> UUID? in
+            let hasNeighbor = (index > 0
+                && arrivals[index].timeIntervalSince(arrivals[index - 1]) <= Self.placeDedupeArrivalWindow)
+                || (index + 1 < arrivals.count
+                    && arrivals[index + 1].timeIntervalSince(arrivals[index]) <= Self.placeDedupeArrivalWindow)
+            return hasNeighbor ? sortedPlaces[index].id : nil
+        }
         for placeID in placeIDs {
             guard let place = try findPlace(byID: placeID) else { continue }
             _ = try collapseDuplicatePlaces(around: place)
@@ -5182,6 +5193,10 @@ enum SimulatorDemoDataSeeder {
         }
     }
 
+    /// Main actor, like the context it is handed, and so are the helpers it passes the
+    /// context to: a nonisolated async function runs on the global executor, and SwiftData
+    /// warns when a main-queue context is used off it.
+    @MainActor
     private static func seed(in context: ModelContext) async throws {
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: Date())
@@ -5201,6 +5216,7 @@ enum SimulatorDemoDataSeeder {
 
     /// Unlabeled repeats so the Places tab can show Confirm with distinct street names.
     /// Left off any `DayTimeline` so they do not clutter the storyline.
+    @MainActor
     private static func seedUnconfirmedSuggestions(
         dayStart: Date,
         calendar: Calendar,
@@ -5269,6 +5285,7 @@ enum SimulatorDemoDataSeeder {
         )
     }
 
+    @MainActor
     private static func seed(
         route: RouteBlueprint,
         routeIndex: Int,

@@ -176,7 +176,9 @@ func liveRouteTrackingSnapshot(
     let latestDate = liveSamples.last?.timestamp ?? captureManager.lastCaptureAt ?? startDate
     let anchorCoordinate = liveRouteAnchorCoordinate(for: dayTimeline, startDate: startDate)
 
-    var coordinates = liveSamples.map(\.coordinate)
+    // The line in progress follows the same accuracy rule as a finished trip, so one wild
+    // fix does not spike it; the session's times still count every fix.
+    var coordinates = liveSamples.filter(RouteFixAccuracy.isUsable).map(\.coordinate)
     if let anchorCoordinate {
         coordinates.insert(anchorCoordinate, at: 0)
     }
@@ -393,34 +395,63 @@ enum MapRegionFactory {
     }
 }
 
+/// Which recorded fixes a drawn route may pass through.
+///
+/// The same rule Heat, Fog, and stay inference use: a fix reported worse than 100 m is
+/// kilometres off often enough to draw a detour that never happened. Negative accuracy
+/// means the fix is invalid. Zero stays, because many imports store it when the file
+/// carries no accuracy at all.
+enum RouteFixAccuracy {
+    static let maximumHorizontalAccuracy: CLLocationAccuracy = 100
+
+    /// Part of every route cache signature, so geometry built under an older rule is rebuilt.
+    static let ruleVersion = "fix-accuracy-100m-v1"
+
+    static func isUsable(_ sample: LocationSample) -> Bool {
+        sample.horizontalAccuracy >= 0
+            && sample.horizontalAccuracy <= maximumHorizontalAccuracy
+            && CLLocationCoordinate2DIsValid(sample.coordinate)
+    }
+}
+
 enum MoveRouteGeometry {
     private static let routeMatchingVersion = "route-v10-great-circle"
 
+    /// The path a trip is drawn along before any road matching: its start, the fixes
+    /// `RouteFixAccuracy` accepts, and its end. When that leaves fewer than two points the
+    /// trip's own endpoints are used, so a trip is never drawn as nothing.
     static func rawCoordinates(for move: MoveSegment) -> [CLLocationCoordinate2D] {
-        let sampleCoordinates = move.samples.preferredRouteDisplaySamples
+        let samples = move.samples.preferredRouteDisplaySamples
             .sorted(by: { $0.timestamp < $1.timestamp })
-            .map(\.coordinate)
+        let accurateCoordinates = samples.filter(RouteFixAccuracy.isUsable).map(\.coordinate)
+        let dedupeDistance = rawCoordinateDedupeDistance(for: move)
 
-        if move.usesHealthWorkoutRoute, sampleCoordinates.count > 1 {
+        if move.usesHealthWorkoutRoute, accurateCoordinates.count > 1 {
             return RouteCoordinateOps.dedupeSequentialCoordinates(
-                sampleCoordinates,
-                minimumDistanceMeters: rawCoordinateDedupeDistance(for: move)
+                accurateCoordinates,
+                minimumDistanceMeters: dedupeDistance
             )
         }
 
+        let start = move.startPlace?.coordinate
+        let end = move.endPlace?.coordinate
         var coordinates: [CLLocationCoordinate2D] = []
-        if let start = move.startPlace?.coordinate {
+        if let start {
             coordinates.append(start)
         }
-        coordinates.append(contentsOf: sampleCoordinates)
-        if let end = move.endPlace?.coordinate {
+        coordinates.append(contentsOf: accurateCoordinates)
+        if let end {
             coordinates.append(end)
         }
 
-        return RouteCoordinateOps.dedupeSequentialCoordinates(
+        let deduped = RouteCoordinateOps.dedupeSequentialCoordinates(
             coordinates,
-            minimumDistanceMeters: rawCoordinateDedupeDistance(for: move)
+            minimumDistanceMeters: dedupeDistance
         )
+        guard deduped.count < 2 else { return deduped }
+
+        let endpoints = [start ?? samples.first?.coordinate, end ?? samples.last?.coordinate].compactMap { $0 }
+        return RouteCoordinateOps.dedupeSequentialCoordinates(endpoints, minimumDistanceMeters: dedupeDistance)
     }
 
     static func rawCoordinateDedupeDistance(for move: MoveSegment) -> CLLocationDistance {
@@ -434,6 +465,7 @@ enum MoveRouteGeometry {
     static func cacheSignature(for move: MoveSegment, fallback: [CLLocationCoordinate2D]) -> String {
         var components: [String] = [
             routeMatchingVersion,
+            RouteFixAccuracy.ruleVersion,
             move.id.uuidString,
             move.transportMode.rawValue,
             String(Int(move.timelineStartDate.timeIntervalSince1970.rounded())),
@@ -454,6 +486,7 @@ enum MoveRouteGeometry {
     static func cacheKey(for move: MoveSegment, fallback: [CLLocationCoordinate2D]) -> Int {
         var hasher = Hasher()
         hasher.combine(routeMatchingVersion)
+        hasher.combine(RouteFixAccuracy.ruleVersion)
         hasher.combine(move.id)
         hasher.combine(move.transportMode.rawValue)
         hasher.combine(Int(move.timelineStartDate.timeIntervalSince1970.rounded()))

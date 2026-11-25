@@ -48,7 +48,11 @@ struct MovesApp: App {
     static private(set) var privateMirrorIsActive: Bool?
     @State private var startup: Result<MovesRuntime, Error>
 
-    init() { _startup = State(initialValue: Result { MovesRuntime(container: try Self.sharedContainer()) }) }
+    init() {
+        LaunchLog.mark("App init")
+        if !ProcessInfo.processInfo.isRunningUnitTests { LaunchLog.watchMainThread() }
+        _startup = State(initialValue: Result { MovesRuntime(container: try Self.sharedContainer()) })
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -75,7 +79,7 @@ struct MovesApp: App {
     static func sharedContainer() throws -> ModelContainer {
         if let processContainer { return processContainer }
         _ = MovesMirrorEventBuffer.shared
-        let container = try makeModelContainer()
+        let container = try LaunchLog.measure("Open store") { try makeModelContainer() }
         processContainer = container
         return container
     }
@@ -215,6 +219,8 @@ private final class MovesRuntime: ObservableObject {
     let healthSummaryStore = HealthSummaryStore()
     let healthTimelineSync: HealthTimelineSync
     init(container: ModelContainer) {
+        let started = ContinuousClock.now
+        defer { LaunchLog.finished("Runtime init", startedAt: started) }
         self.container = container
         healthTimelineSync = HealthTimelineSync(container: container, summaryStore: healthSummaryStore)
         captureManager = MovesLocationCaptureManager(modelContainer: container)
@@ -280,6 +286,7 @@ private struct MovesRunningContent: View {
                 // The upgrade deletes duplicate rows, and a view reading a row deleted on
                 // another context aborts the process, so no timeline views exist until it ends.
                 TimelineUpgradeView()
+                    .onAppear { LaunchLog.mark("Upgrade screen shown") }
                     .task {
                         await TimelineSchemaUpgrader.waitUntilFinished()
                         isUpgradingTimeline = false
@@ -296,6 +303,7 @@ private struct MovesRunningContent: View {
                     .environmentObject(calendarSync)
                     .environmentObject(importQueue)
                     .environmentObject(healthSummaryStore)
+                    .onAppear { LaunchLog.mark("Timeline shown") }
             }
         }
         .modelContainer(sharedModelContainer)
@@ -310,37 +318,53 @@ private struct MovesRunningContent: View {
                 PlaceGeocodeBackfill.scheduleNextRun()
                 Task {
                     await TimelineSchemaUpgrader.waitUntilFinished()
-                    await captureManager.start()
-                    await captureManager.refreshHistoricalBackfill()
+                    await LaunchLog.measure("Active: capture start") { await captureManager.start() }
+                    await LaunchLog.measure("Active: historical backfill") { await captureManager.refreshHistoricalBackfill() }
                     healthWorkoutRouteAutoImporter.refreshInterruptedHistoricalImportState()
-                    await healthWorkoutRouteAutoImporter.startIfNeeded()
-                    await cloudDataPresencePublisher.publishNow()
-                    await locationServiceSyncManager.syncNewSamplesIfEnabled()
-                    await photoLibraryController.handleSceneBecameActive()
-                    await webhookSyncManager.syncNewItemsIfEnabled()
+                    await LaunchLog.measure("Active: workout routes") { await healthWorkoutRouteAutoImporter.startIfNeeded() }
+                    await LaunchLog.measure("Active: iCloud status") { await cloudDataPresencePublisher.publishNow() }
+                    await LaunchLog.measure("Active: location sync") { await locationServiceSyncManager.syncNewSamplesIfEnabled() }
+                    await LaunchLog.measure("Active: photos") { await photoLibraryController.handleSceneBecameActive() }
+                    await LaunchLog.measure("Active: webhook") { await webhookSyncManager.syncNewItemsIfEnabled() }
                     calendarSync.schedule()
                 }
                 // Reads Health on its own task, after any timeline upgrade.
                 healthTimelineSync.sceneBecameActive()
                 Task(priority: .utility) {
-                    await ShareMapAggregateBuilder.refreshAll(in: sharedModelContainer)
+                    await LaunchLog.measure("Active: map aggregates") {
+                        await ShareMapAggregateBuilder.refreshAll(in: sharedModelContainer)
+                    }
                 }
                 Task(priority: .utility) {
                     await TimelineSchemaUpgrader.waitUntilFinished()
-                    await PlaceGeocodeBackfill.runForegroundTrickle(in: sharedModelContainer)
+                    await LaunchLog.measure("Active: geocode trickle") {
+                        await PlaceGeocodeBackfill.runForegroundTrickle(in: sharedModelContainer)
+                    }
                 }
             }
         }
     }
 }
 
+/// Shown only while a one-time upgrade deletes or rewrites history the timeline would read.
 private struct TimelineUpgradeView: View {
+    @ObservedObject private var progress = TimelineUpgradeProgress.shared
+
     var body: some View {
-        VStack(spacing: 16) {
-            ProgressView()
+        VStack(spacing: 12) {
             Text("Updating your timeline")
                 .font(.headline)
+            Text(progress.stepTitle ?? String(localized: "Almost done"))
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            ProgressView(value: progress.fractionCompleted)
+                .frame(maxWidth: 240)
+                .padding(.top, 4)
+                .animation(.default, value: progress.fractionCompleted)
+                .accessibilityLabel(Text("Updating your timeline"))
         }
+        .padding(.horizontal, 32)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
