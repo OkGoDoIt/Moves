@@ -911,6 +911,13 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         applyTrackingConfiguration()
     }
 
+    /// Fixes from photos taken with this phone's camera. They are stored like any other
+    /// fix, and stops and trips are rebuilt with them.
+    func ingestPhotoFixes(_ locations: [CLLocation]) async {
+        guard !locations.isEmpty else { return }
+        await assembler.ingestLocations(locations, source: .cameraPhoto)
+    }
+
     func refreshHistoricalBackfill() async {
         guard !shouldSkipLiveTracking else { return }
 

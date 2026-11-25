@@ -443,6 +443,25 @@ final class SampleStayReconciliationTests: XCTestCase {
         XCTAssertEqual(try ModelContext(container).fetchCount(FetchDescriptor<VisitPlace>()), 0)
     }
 
+    func testPhotosTakenWithThePhoneBecomeStops() async throws {
+        let container = try makeContainer()
+        let repository = SwiftDataTimelineRepository(modelContainer: container)
+        let assembler = DefaultTimelineAssembler(
+            repository: repository,
+            motionClassifier: FixedMotionClassifier(mode: .automotive, steps: 0),
+            placeNameResolver: EmptyPlaceNameResolver()
+        )
+        let start = Date().addingTimeInterval(-6 * 60 * 60)
+        let paris = CLLocationCoordinate2D(latitude: 48.85, longitude: 2.35)
+
+        await assembler.ingestLocations(
+            (0...6).map { location(paris, at: start.addingTimeInterval(Double($0) * 10 * 60)) },
+            source: .cameraPhoto
+        )
+
+        XCTAssertEqual(try ModelContext(container).fetchCount(FetchDescriptor<VisitPlace>()), 1)
+    }
+
     func testRepairMergesReportedTwiceStopsAndKeepsWhatTheyCarried() throws {
         let container = try makeContainer()
         let context = ModelContext(container)

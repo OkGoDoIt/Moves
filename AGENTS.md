@@ -102,7 +102,7 @@ Optional: `DEVICE_UDID=... ./Scripts/install-iphone.sh`.
 | Route matching / path policy | `Moves/RoadRouteMatcher.swift` (`RoadRouteMatcher`, `RouteMatchPlausibility`, `DirectionsProvider`); Path control in `MovesDetailViews.swift`; Settings → Map Appearance Path level |
 | Models + repository | `Moves/VisitedLocation.swift` (`DayTimeline`, `VisitPlace`, `MoveSegment`, `LocationSample`, `KnownPlace`, `PhotoAttachment`, `PlaceCorrectionEvent`, `VisitedCell`, `NamedTrip`) |
 | Place learning | `Moves/PlaceLearningEngine.swift` (resolve / learn / negatives / merge / clampRadius); hooked from `DefaultTimelineAssembler.ingestVisit` and `SwiftDataTimelineRepository`. Places tab occupancy, merge, and shrink consume these APIs. |
-| Photos | `Moves/Photos/` (`PhotoLibraryService`, `PhotoHistoryImporter`, `PhotoAttachmentQuery`, storyline + range thumbnail strips, Settings → Photos). Read-only PhotoKit; Limited Library explained in Settings. Never modifies the library. Named trips (WS9b) lens `PhotoAttachment` rows in a date range — they do not copy photos. |
+| Photos | `Moves/Photos/` (`PhotoLibraryService`, `PhotoHistoryImporter`, `PhotoHistoryImportJob`, `PhotoFixes`, `PhotoAttachmentQuery`, storyline + range thumbnail strips, Settings → Photos). Read-only PhotoKit; Limited Library explained in Settings. Never modifies the library. Named trips (WS9b) lens `PhotoAttachment` rows in a date range — they do not copy photos. See "Photos as location" below. |
 | Timeline lookup / schema upgrade | `Moves/TimelineLocator.swift`, `Moves/TimelineSchemaUpgrader.swift` |
 | Route rendering / speed shading | `Moves/RouteRendering.swift`, `Moves/SpeedProfileBuilder.swift` |
 | Settings, export, integrations | `Moves/MovesSettingsView.swift`, `Moves/DawarichSync.swift`, `Moves/WebhookSync.swift` (generic webhook), `Moves/MovesZipArchive.swift` (zip export/import) |
@@ -145,6 +145,31 @@ precedence. See `docs/VISUAL-QA.md` for the current coverage record.
 Never hold a model across a delete on another context: touching a row another context deleted aborts the process (`SwiftData/BackingData.swift: This model instance was invalidated`), and nothing can catch it. Long background reads copy values out of a prefetched fetch (see `ShareMapAggregateBuilder`). Use `MovesApp.sharedContainer()`; a second container means a second CloudKit mirror on one file. Anything that deletes rows in bulk at launch goes in `TimelineSchemaUpgrader`, which holds back the timeline UI and background work until it finishes.
 
 To check a change against real history before it reaches a phone, back up the device (`xcrun devicectl device copy from --domain-type appGroupDataContainer --domain-identifier group.<bundle id> --source / --destination import-staging/device-backup-<date>/group-container`, which is gitignored). `StoreResilienceTests` then runs against that copy. Launching the simulator with `SIMCTL_CHILD_MOVES_SIMULATOR_STORE=<path to a copy of default.store>` opens that copy instead of demo data.
+
+## Photos as location
+
+`PhotoCaptureClassifier` tells a photo taken with the library owner's camera from one that
+was saved, received, or imported: a camera photo's `addedDate` matches its capture time.
+PhotoKit has no "taken on this device" flag, and screenshots and shared albums are dropped
+at the fetch.
+
+- **History.** `PhotoHistoryJob` (UserDefaults, never the timeline store) records the range
+  and how far back the import has got. `PhotoHistoryImportRunner` runs it newest photo
+  first, about 1,500 photos per step, one save per step; a step grows until it ends between
+  outings so no stay is cut in two. `PhotoLibraryController` runs steps only while a scene
+  is active, each under a background-task assertion (a suspended write in the App Group
+  container is a `0xdead10cc` kill), resumes a running job on the next activation, and
+  pauses a job whose step was interrupted twice. `PhotoHistoryImporter.importStep` reads a
+  step's visits, attachments, and removal tombstones once; do not reintroduce per-photo
+  fetches or per-stay saves, which made the first importer take minutes per thousand
+  photos. History samples are `.photoLibrary` and still never feed stay inference.
+- **New photos.** Each look at the library (scene active, a PhotoKit change, or a new
+  location batch, at most every three minutes) passes recent camera photos through
+  `PhotoFixPlausibility`, which checks them against the phone's own fixes, and hands the
+  accepted ones to `MovesLocationCaptureManager.ingestPhotoFixes` as `.cameraPhoto`
+  samples. Those do feed stay inference, and are never uploaded automatically. A shared
+  iCloud library or another device on the account can still pass the camera test; the
+  plausibility check is the only guard.
 
 ## Git hygiene
 

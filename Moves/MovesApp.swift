@@ -219,6 +219,9 @@ private final class MovesRuntime: ObservableObject {
         cloudDataPresencePublisher = MovesCloudDataPresencePublisher(modelContainer: container)
         locationServiceSyncManager = LocationServiceSyncManager(modelContainer: container)
         photoLibraryController = PhotoLibraryController(modelContainer: container)
+        photoLibraryController.ingestFixes = { [captureManager] fixes in
+            await captureManager.ingestPhotoFixes(fixes)
+        }
         webhookSyncManager = WebhookSyncManager(modelContainer: container)
         calendarSync = MovesCalendarSync(container: container)
         importQueue = DurableImportQueue(container: container)
@@ -285,6 +288,7 @@ private struct MovesRunningContent: View {
         .modelContainer(sharedModelContainer)
         .onChange(of: scenePhase) { _, newPhase in
             importQueue.sceneChanged(newPhase)
+            photoLibraryController.sceneChanged(isActive: newPhase == .active)
             if newPhase == .active {
                 DailyTimelineBackup.scheduleNextRun()
                 ShareMapAggregateBackgroundTask.scheduleNextRun()
