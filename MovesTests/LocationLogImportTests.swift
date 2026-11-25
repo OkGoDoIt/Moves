@@ -217,6 +217,10 @@ final class LocationLogImportTests: XCTestCase {
             userLabel: "Home"
         )
         context.insert(existing)
+        // On its day, as the app always files a stay: one with no day is retired.
+        let day = DayTimeline(dayStart: existing.arrivalDate)
+        context.insert(day)
+        existing.dayTimeline = day
         try context.save()
 
         let repository = SwiftDataTimelineRepository(modelContainer: container)
@@ -225,7 +229,7 @@ final class LocationLogImportTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(report.placeCount, timeline.stays.count - 1)
         XCTAssertLessThanOrEqual(report.placeCount, timeline.stays.count + 1)
 
-        let places = try context.fetch(FetchDescriptor<VisitPlace>())
+        let places = try context.fetch(FetchDescriptor<VisitPlace>.live())
         let homePlaces = places.filter { LocationLogGeometry.distance(from: $0.coordinate, to: home) <= 150 }
         XCTAssertGreaterThan(homePlaces.count, 60)
         XCTAssertTrue(homePlaces.allSatisfy { $0.userLabel == "Home" }, "the user label should propagate to every stay at home")
