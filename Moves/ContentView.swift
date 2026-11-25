@@ -1904,6 +1904,7 @@ struct ContentView_Previews: PreviewProvider {
             .environmentObject(AppUndoController())
             .environmentObject(MovesCloudDataPresencePublisher(modelContainer: container))
             .environmentObject(MovesRootController())
+            .environmentObject(HealthSummaryStore())
     }
 }
 

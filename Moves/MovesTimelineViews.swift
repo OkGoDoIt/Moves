@@ -2223,6 +2223,16 @@ private struct StorylineRail: View {
 private struct StorylineRowBody: View {
     let entry: TimelineEntry
     @Environment(\.timelineItemActions) private var actions
+    @EnvironmentObject private var health: HealthSummaryStore
+
+    /// "Stayed 3h 12m · walked 0.4 mi" when Apple Health shows a real walk inside the stay.
+    private var subtitleText: String {
+        guard case .place(let place) = entry,
+              let meters = health.walkedHereMeters(stayID: place.id) else {
+            return entry.subtitleText
+        }
+        return "\(entry.subtitleText) · \(HealthSummaryText.walkedHere(meters))"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -2265,7 +2275,7 @@ private struct StorylineRowBody: View {
                 }
             } else if case .place(let place) = entry, let actions, TimelinePlaceNaming.needsName(place) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(entry.subtitleText)
+                    Text(subtitleText)
                         .font(.system(size: 12, weight: .medium, design: .rounded))
                         .foregroundStyle(Color.primary.opacity(0.68))
                     NameThisPlaceChip {
@@ -2273,7 +2283,7 @@ private struct StorylineRowBody: View {
                     }
                 }
             } else {
-                Text(entry.subtitleText)
+                Text(subtitleText)
                     .font(.system(size: 12, weight: .medium, design: .rounded))
                     .foregroundStyle(Color.primary.opacity(0.68))
             }

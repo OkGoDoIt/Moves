@@ -94,9 +94,15 @@ struct DayHeaderView: View {
     let onOlder: () -> Void
     let onNewer: () -> Void
     let onJumpToDate: () -> Void
+    @EnvironmentObject private var health: HealthSummaryStore
 
     private var isToday: Bool {
         Calendar.autoupdatingCurrent.isDateInToday(day.dayStart)
+    }
+
+    /// "8,412 steps" from Apple Health, when the person has turned that on and the day is known.
+    private var stepsText: String? {
+        health.daySummary(forDayKey: day.dayKey)?.steps.map(HealthSummaryText.steps)
     }
 
     private var totalDistanceMeters: CLLocationDistance {
@@ -141,16 +147,22 @@ struct DayHeaderView: View {
                         if isToday {
                             liveNowBadge
                         }
-                        Text(statsText)
-                            .font(.system(size: 12, weight: .medium, design: .rounded))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.85)
+                        // Steps are the first thing to go when the line is tight.
+                        ViewThatFits(in: .horizontal) {
+                            if let stepsText {
+                                statsLine("\(statsText) · \(stepsText)")
+                            }
+                            statsLine(statsText)
+                                .minimumScaleFactor(0.85)
+                        }
                     }
                 }
                 .frame(maxWidth: .infinity)
             }
             .buttonStyle(.plain)
+            .task(id: day.dayKey) {
+                health.requestDay(day.dayStart)
+            }
             .accessibilityLabel(String(localized: "Jump to Date & Time"))
             .accessibilityHint(String(localized: "Opens the date and time picker"))
 
@@ -165,6 +177,13 @@ struct DayHeaderView: View {
             .disabled(!canGoNewer)
             .accessibilityLabel(String(localized: "Next day"))
         }
+    }
+
+    private func statsLine(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 12, weight: .medium, design: .rounded))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
     }
 
     private func dateText(_ format: Date.FormatStyle) -> some View {
