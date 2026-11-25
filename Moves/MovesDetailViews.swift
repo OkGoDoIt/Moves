@@ -102,8 +102,14 @@ struct PlaceMapDetailView: View {
             if focusedField != .name { draftLabel = name ?? "" }
         }
         .onDisappear {
-            if focusedField == .remarks { saveComment() }
-            if focusedField == .name { saveLabel() }
+            // A draft still being typed is kept, after the pop rather than during it.
+            let field = focusedField
+            guard field != nil else { return }
+            Task { @MainActor in
+                guard !place.isDeleted, place.modelContext != nil else { return }
+                if field == .remarks { saveComment() }
+                if field == .name { saveLabel() }
+            }
         }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -389,6 +395,7 @@ struct MoveMapDetailView: View {
     @State private var manualRouteWaypointCoordinates: [CLLocationCoordinate2D] = []
     @State private var activeManualRouteWaypointIndex: Int?
     @State private var liveManualRouteMatchTask: Task<Void, Never>?
+    @State private var routeWorkTask: Task<Void, Never>?
     @State private var manualRouteDragRevision = 0
     @State private var isIgnoringCurrentManualRouteGesture = false
     @State private var isSavingManualRoute = false
@@ -553,6 +560,11 @@ struct MoveMapDetailView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text("Apple Health could not be opened from this device.")
+        }
+        // Popping never waits on route work: it is cancelled and checks before each write.
+        .onDisappear {
+            routeWorkTask?.cancel()
+            liveManualRouteMatchTask?.cancel()
         }
         .task(id: routeRefreshKey) {
             refreshMoveGPXShareFile()
@@ -806,9 +818,7 @@ struct MoveMapDetailView: View {
         do {
             try SwiftDataTimelineRepository(modelContext: modelContext)
                 .setRouteMatchPolicy(policy, for: segment)
-            Task { @MainActor in
-                await refreshRouteCoordinates()
-            }
+            startRouteWork { await refreshRouteCoordinates() }
         } catch {
             print("Failed to change path: \(error.localizedDescription)")
         }
@@ -967,9 +977,7 @@ struct MoveMapDetailView: View {
 
         do {
             try modelContext.save()
-            Task { @MainActor in
-                await refreshRouteCoordinates()
-            }
+            startRouteWork { await refreshRouteCoordinates() }
         } catch {
             segment.transportMode = previousMode
             segment.transportModeSource = previousModeSource
@@ -983,10 +991,30 @@ struct MoveMapDetailView: View {
         }
     }
 
+    /// The trip as it is in the store now, or nil once it is gone. Looked up again after
+    /// every await, so work that outlives a delete or a pop never touches a dead row.
+    private func liveSegment(_ id: UUID) -> MoveSegment? {
+        var descriptor = FetchDescriptor<MoveSegment>(predicate: #Predicate { $0.id == id })
+        descriptor.fetchLimit = 1
+        return try? modelContext.fetch(descriptor).first
+    }
+
+    /// Route work started from a button. Cancelled when the screen goes away.
+    private func startRouteWork(_ work: @escaping @MainActor () async -> Void) {
+        routeWorkTask?.cancel()
+        routeWorkTask = Task { @MainActor in
+            await work()
+        }
+    }
+
     @MainActor
     private func refreshRouteCoordinates() async {
-        routeCoordinates = await RoadRouteMatcher.matchedCoordinates(for: segment)
-        _ = await SpeedProfileBuilder.buildAndCache(for: segment, coordinates: routeCoordinates)
+        let id = segment.id
+        let matched = await RoadRouteMatcher.matchedCoordinates(for: segment)
+        guard !Task.isCancelled, let current = liveSegment(id) else { return }
+        routeCoordinates = matched
+        _ = await SpeedProfileBuilder.buildAndCache(for: current, coordinates: matched)
+        guard !Task.isCancelled, liveSegment(id) != nil else { return }
         refreshMoveGPXShareFile()
         if isEditingManualRoute, manualRouteDrag == nil {
             manualRouteWaypointCoordinates = ManualRouteGeometry.waypoints(
@@ -1068,15 +1096,18 @@ struct MoveMapDetailView: View {
         liveManualRouteMatchTask = nil
         isSavingManualRoute = true
 
+        let segmentID = segment.id
+        let transportMode = segment.transportMode
         Task { @MainActor in
             let committed = await ManualRouteGeometry.committedCoordinates(
                 currentRoute: baseRoute,
                 draggedCoordinate: draggedCoordinate,
-                transportMode: segment.transportMode,
+                transportMode: transportMode,
                 closestIndex: drag.closestRouteIndex
             )
 
-            guard committed.count > 1 else {
+            // The trip can be deleted while the path is matched.
+            guard committed.count > 1, let segment = liveSegment(segmentID) else {
                 isSavingManualRoute = false
                 return
             }
@@ -1176,7 +1207,7 @@ struct MoveMapDetailView: View {
         do {
             try SwiftDataTimelineRepository(modelContext: modelContext)
                 .setRouteMatchPolicy(.auto, for: segment)
-            Task { @MainActor in
+            startRouteWork {
                 await refreshRouteCoordinates()
                 if isEditingManualRoute {
                     manualRouteWaypointCoordinates = ManualRouteGeometry.waypoints(

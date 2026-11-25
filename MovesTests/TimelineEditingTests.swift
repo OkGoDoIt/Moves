@@ -1084,6 +1084,121 @@ final class TimelineEditingTests: XCTestCase {
         XCTAssertTrue(LocationSampleSource.routeTracking.isRouteTrack)
     }
 
+    // MARK: Review inbox rows after an edit
+
+    /// The inbox's `@Query` kept returning a stay that "Not a Stop" had deleted, so the row
+    /// stayed and the capsule kept counting it. A zero-length pause between two walks.
+    func testNotAStopRemovesTheRowEvenFromAListHoldingTheDeletedStay() throws {
+        let (_, context, _) = try makeRepository()
+        let start = insertPlace(in: context, arrival: date(10, 0), departure: date(10, 30), latitude: 52.50, longitude: 13.40)
+        let blip = insertPlace(in: context, arrival: date(10, 40), departure: date(10, 40), latitude: 52.505, longitude: 13.405)
+        let end = insertPlace(in: context, arrival: date(10, 50), departure: date(11, 0), latitude: 52.51, longitude: 13.41)
+        _ = insertMove(in: context, from: start, to: blip, start: date(10, 30), end: date(10, 40), mode: .walking, distance: 700)
+        _ = insertMove(in: context, from: blip, to: end, start: date(10, 40), end: date(10, 50), mode: .walking, distance: 700)
+        blip.reviewState = .pending
+        try context.save()
+        let blipID = blip.id
+        let now = date(12, 0)
+        XCTAssertEqual(ReviewInboxBuilder.items(visits: [start, blip, end], moves: [], now: now).map(\.itemID), [blipID])
+
+        let (controller, _) = makeEditController(for: context)
+        controller.markNotAStop(blip)
+        XCTAssertFalse(controller.isShowingError)
+
+        // The list still holds the old reference, as `@Query` did.
+        let stale = [start, blip, end]
+        XCTAssertTrue(ReviewInboxBuilder.items(visits: stale, moves: [], now: now).isEmpty)
+        XCTAssertEqual(ReviewInboxBuilder.count(visits: stale, moves: [], now: now), 0)
+        XCTAssertNil(controller.visit(id: blipID))
+
+        controller.toast?.undo()
+        let restored = try context.fetch(FetchDescriptor<VisitPlace>())
+        XCTAssertEqual(ReviewInboxBuilder.items(visits: restored, moves: [], now: now).map(\.itemID), [blipID])
+        XCTAssertEqual(ReviewInboxBuilder.count(visits: restored, moves: [], now: now), 1)
+    }
+
+    // MARK: Edit times and Split restore from a copy
+
+    func testEditTimesUndoFromThePillRestoresTimesAndLeavesALaterWriteAlone() throws {
+        let (_, context, _) = try makeRepository()
+        let home = insertPlace(in: context, arrival: date(8, 0), departure: date(10, 0), latitude: 52.50, longitude: 13.40)
+        let cafe = insertPlace(in: context, arrival: date(10, 30), departure: date(11, 0), latitude: 52.51, longitude: 13.41)
+        let office = insertPlace(in: context, arrival: date(11, 30), departure: nil, latitude: 52.52, longitude: 13.42)
+        let walk = insertMove(in: context, from: home, to: cafe, start: date(10, 0), end: date(10, 30), mode: .walking, distance: 900)
+        let ride = insertMove(in: context, from: cafe, to: office, start: date(11, 0), end: date(11, 30), mode: .cycling, distance: 3_000)
+        try context.save()
+        let (controller, _) = makeEditController(for: context)
+
+        controller.applyTimes(to: cafe, arrival: date(10, 20), departure: date(11, 10))
+        XCTAssertEqual(cafe.arrivalDate, date(10, 20))
+        XCTAssertEqual(walk.endDate, date(10, 20))
+        XCTAssertEqual(ride.startDate, date(11, 10))
+
+        // A background write lands before the person taps Undo (capture writes outside undo).
+        let manager = context.undoManager
+        context.undoManager = nil
+        let fix = insertSample(in: context, at: date(11, 20), latitude: 52.515, longitude: 13.415, move: ride)
+        try context.save()
+        context.undoManager = manager
+
+        controller.toast?.undo()
+
+        XCTAssertEqual(cafe.arrivalDate, date(10, 30))
+        XCTAssertEqual(cafe.departureDate, date(11, 0))
+        XCTAssertEqual(walk.endDate, date(10, 30))
+        XCTAssertEqual(ride.startDate, date(11, 0))
+        XCTAssertFalse(fix.isDeleted)
+        XCTAssertEqual(fix.moveSegment?.id, ride.id)
+        XCTAssertFalse(context.hasChanges)
+    }
+
+    func testSplitStayUndoRemovesTheNewStayAndReconnectsTheTrip() throws {
+        let (_, context, _) = try makeRepository()
+        let home = insertPlace(in: context, arrival: date(8, 0), departure: date(10, 0), latitude: 52.50, longitude: 13.40)
+        let office = insertPlace(in: context, arrival: date(11, 0), departure: nil, latitude: 52.52, longitude: 13.42)
+        let walk = insertMove(in: context, from: home, to: office, start: date(10, 0), end: date(11, 0), mode: .walking, distance: 900)
+        try context.save()
+        let before = try context.fetchCount(FetchDescriptor<VisitPlace>())
+        let (controller, _) = makeEditController(for: context)
+
+        controller.applySplitVisit(home, at: date(9, 0))
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<VisitPlace>()), before + 1)
+        XCTAssertNotEqual(walk.startPlace?.id, home.id)
+
+        controller.toast?.undo()
+
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<VisitPlace>()), before)
+        XCTAssertEqual(walk.startPlace?.id, home.id)
+        XCTAssertEqual(home.departureDate, date(10, 0))
+    }
+
+    func testSplitTripUndoPutsTheTripAndItsFixesBack() throws {
+        let (_, context, _) = try makeRepository()
+        let home = insertPlace(in: context, arrival: date(8, 0), departure: date(10, 0), latitude: 52.50, longitude: 13.40)
+        let office = insertPlace(in: context, arrival: date(10, 30), departure: nil, latitude: 52.53, longitude: 13.43)
+        let walk = insertMove(in: context, from: home, to: office, start: date(10, 0), end: date(10, 30), mode: .walking, distance: 2_000)
+        let fixes = [date(10, 5), date(10, 15), date(10, 25)].enumerated().map { index, time in
+            insertSample(in: context, at: time, latitude: 52.50 + Double(index + 1) * 0.008, longitude: 13.40 + Double(index + 1) * 0.008, move: walk)
+        }
+        try context.save()
+        let visitsBefore = try context.fetchCount(FetchDescriptor<VisitPlace>())
+        let movesBefore = try context.fetchCount(FetchDescriptor<MoveSegment>())
+        let (controller, _) = makeEditController(for: context)
+
+        controller.applySplitMove(walk, at: date(10, 12))
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<MoveSegment>()), movesBefore + 1)
+        XCTAssertEqual(walk.endDate, date(10, 12))
+
+        controller.toast?.undo()
+
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<VisitPlace>()), visitsBefore)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<MoveSegment>()), movesBefore)
+        XCTAssertEqual(walk.endDate, date(10, 30))
+        XCTAssertEqual(walk.endPlace?.id, office.id)
+        XCTAssertEqual(walk.distanceMeters, 2_000)
+        XCTAssertEqual(Set(walk.samples.map(\.persistentModelID)), Set(fixes.map(\.persistentModelID)))
+    }
+
     private func makeEditController(for context: ModelContext) -> (TimelineEditController, AppUndoController) {
         let controller = TimelineEditController()
         let undoController = AppUndoController()

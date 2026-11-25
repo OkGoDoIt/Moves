@@ -5,6 +5,7 @@
 //  Timeline, map strip, and row rendering extracted from ContentView.
 //
 
+import Combine
 import Foundation
 import MapKit
 import SwiftData
@@ -54,6 +55,7 @@ enum TimelineMapSelection: Equatable {
 struct DayTimelinePage: View {
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var captureManager: MovesLocationCaptureManager
+    @Environment(\.timelinePageSideInsets) private var sideInsets
     let dayKey: String
     let isActive: Bool
 
@@ -66,6 +68,11 @@ struct DayTimelinePage: View {
                 // Neighbouring pages render too, so a swipe shows the next day rather than
                 // a blank page. Only the active page hosts a live map.
                 DayTimelinePageContent(dayTimeline: dayTimeline, isActive: isActive)
+                    // The stored record replacing a stand-in starts the page afresh. The
+                    // page holds no map, only its snapshot spot, so this is cheap.
+                    .id(ObjectIdentifier(dayTimeline))
+                    .padding(.leading, sideInsets.leading)
+                    .padding(.trailing, sideInsets.trailing)
             } else if isActive {
                 loadingState
             } else {
@@ -82,7 +89,22 @@ struct DayTimelinePage: View {
             guard isActive else { return }
             Task { await loadDayTimeline() }
         }
+        // A day shown before it had a record (demo data still seeding, an import, the day's
+        // first fix) picks the record up once a save lands, from any context.
+        .onReceive(Self.storeChanges) { _ in
+            guard isPlaceholder else { return }
+            Task { await loadDayTimeline() }
+        }
     }
+
+    private static var storeChanges: AnyPublisher<Notification, Never> {
+        NotificationCenter.default.publisher(for: ModelContext.didSave)
+            .merge(with: NotificationCenter.default.publisher(for: .NSPersistentStoreRemoteChange))
+            .debounce(for: .milliseconds(300), scheduler: DispatchQueue.main)
+            .eraseToAnyPublisher()
+    }
+
+    @State private var isPlaceholder = false
 
     private var pageLoadKey: String {
         "\(dayKey)|\(isActive ? "active" : "inactive")"
@@ -113,27 +135,36 @@ struct DayTimelinePage: View {
 
     @MainActor
     private func loadDayTimeline() async {
-        var descriptor = FetchDescriptor<DayTimeline>(
-            predicate: #Predicate { timeline in
-                timeline.dayKey == dayKey
-            },
-            sortBy: [SortDescriptor(\DayTimeline.dayStart, order: .forward)]
-        )
-
         do {
-            descriptor.fetchLimit = 1
-            dayTimeline = try modelContext.fetch(descriptor).first
-            if dayTimeline == nil {
-                let formatter = DateFormatter()
-                formatter.locale = Locale(identifier: "en_US_POSIX")
-                formatter.dateFormat = "yyyy-MM-dd"
-                if let date = formatter.date(from: dayKey) { dayTimeline = DayTimeline(dayStart: date) }
-            }
+            let loaded = try DayTimelinePageLoader.load(dayKey: dayKey, in: modelContext)
+            dayTimeline = loaded?.day
+            isPlaceholder = loaded?.isPlaceholder ?? false
             loadErrorMessage = dayTimeline == nil ? "Day not found" : nil
         } catch {
             dayTimeline = nil
+            isPlaceholder = false
             loadErrorMessage = "Could not load day"
         }
+    }
+}
+
+/// The stored day for a page, or an unsaved stand-in while the day has no record yet.
+enum DayTimelinePageLoader {
+    @MainActor
+    static func load(dayKey: String, in context: ModelContext) throws -> (day: DayTimeline, isPlaceholder: Bool)? {
+        var descriptor = FetchDescriptor<DayTimeline>(
+            predicate: #Predicate { $0.dayKey == dayKey },
+            sortBy: [SortDescriptor(\DayTimeline.dayStart, order: .forward)]
+        )
+        descriptor.fetchLimit = 1
+        if let stored = try context.fetch(descriptor).first {
+            return (stored, false)
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        guard let date = formatter.date(from: dayKey) else { return nil }
+        return (DayTimeline(dayStart: date), true)
     }
 }
 
@@ -166,21 +197,77 @@ struct DayTimelinePageContent: View {
 
     @State private var provisionalSampleResolvedTitle: String?
     @State private var provisionalSampleResolvedKey: String?
-    @State private var presentationCache: DayTimelinePresentationCache
-    @State private var mapSelection: TimelineMapSelection?
+    @Environment(TimelineDayMapModel.self) private var dayMap: TimelineDayMapModel?
+    #if DEBUG
+    @ObservedObject private var followedTripPreview = TimelineFollowedTripPreview.shared
+    #endif
+    /// Built on first use rather than in `init`, which runs on every parent redraw.
+    @State private var cacheBox = DayTimelinePresentationCacheBox()
+    @State private var cacheRevision = 0
     @State private var filteredModes: Set<TransportMode> = []
     @State private var expandedHiddenStopIDs: Set<String> = []
     @State private var highlightedEntryID: String?
-    @State private var isMapExpanded = false
 
     init(dayTimeline: DayTimeline, isActive: Bool) {
         self.dayTimeline = dayTimeline
         self.isActive = isActive
-        _presentationCache = State(initialValue: Self.makePresentationCache(for: dayTimeline))
+    }
+
+    private var presentationCache: DayTimelinePresentationCache {
+        let _ = cacheRevision
+        if let cache = cacheBox.cache { return cache }
+        let cache = Self.makePresentationCache(for: dayTimeline)
+        cacheBox.cache = cache
+        return cache
+    }
+
+    private func rebuildPresentationCache() {
+        cacheBox.cache = Self.makePresentationCache(for: dayTimeline)
+        cacheRevision += 1
+    }
+
+    /// The live map's selection belongs to the active page only.
+    private var mapSelection: TimelineMapSelection? {
+        isActive ? dayMap?.selection : nil
+    }
+
+    private func setMapSelection(_ selection: TimelineMapSelection?) {
+        guard isActive else { return }
+        dayMap?.select(selection)
+    }
+
+    private var isMapExpanded: Bool {
+        isActive && dayMap?.isExpanded == true
     }
 
     private var liveRouteSnapshot: LiveRouteTrackingSnapshot? {
-        liveRouteTrackingSnapshot(for: dayTimeline, captureManager: captureManager)
+        timelineLiveRouteSnapshot(for: dayTimeline, captureManager: captureManager)
+    }
+
+    private var followedTripStart: Date? {
+        timelineFollowedTripStart(for: dayTimeline, captureManager: captureManager)
+    }
+
+    /// Changes as fixes arrive on a trip in progress.
+    private var liveRouteKey: String {
+        guard let snapshot = liveRouteSnapshot else { return "none" }
+        return "\(Int(snapshot.startDate.timeIntervalSince1970))|\(snapshot.coordinates.count)|\(Int(snapshot.latestDate.timeIntervalSince1970))"
+    }
+
+    private var liveRouteEntryID: String? {
+        liveRouteSnapshot.map { TimelineEntry.liveRoute($0).id }
+    }
+
+    /// What the map shows: trips (times, modes, distances), stay names, and photos.
+    private var mapContentKey: String {
+        "\(transportSummaryRefreshKey)|\(placeNamesKey)|\(photoStripRefreshKey)"
+    }
+
+    private var placeNamesKey: String {
+        dayTimeline.places
+            .map { "\($0.id.uuidString)|\($0.userLabel ?? "")|\($0.knownPlace?.name ?? "")|\(Int($0.arrivalDate.timeIntervalSince1970))|\(Int(($0.departureDate ?? $0.arrivalDate).timeIntervalSince1970))" }
+            .sorted()
+            .joined(separator: ",")
     }
 
     private var timelineEntries: [TimelineEntry] {
@@ -208,6 +295,7 @@ struct DayTimelinePageContent: View {
         let moves = dayTimeline.moves.map(TimelineEntry.move)
         let samples = dayTimeline.samples.sorted(by: { $0.timestamp < $1.timestamp })
         var entries = (places + moves).sorted { $0.startDate < $1.startDate }
+        let repeats = TimelineRepeatedStays.fold(&entries)
         entries = collapseHiddenStops(in: entries)
 
         if let firstMove = dayTimeline.moves.min(by: { $0.timelineStartDate < $1.timelineStartDate }),
@@ -239,6 +327,7 @@ struct DayTimelinePageContent: View {
 
         return DayTimelinePresentationCache(
             timelineEntries: entries,
+            repeatedStays: repeats,
             transportSummaryMetrics: transportSummaryMetrics(for: dayTimeline),
             activityBubbleMetrics: ActivityBubbleMetrics.make(from: dayTimeline),
             sortedSamples: samples
@@ -365,21 +454,42 @@ struct DayTimelinePageContent: View {
         .task(id: momentJumpTaskID) {
             applyMomentJumpIfNeeded()
         }
+        .environment(\.timelineFollowedTripStart, followedTripStart)
+        .environment(\.timelineRepeatedStays, presentationCache.repeatedStays)
         .onChange(of: dayTimeline.dayKey) { _, _ in
-            presentationCache = Self.makePresentationCache(for: dayTimeline)
-            mapSelection = nil
+            rebuildPresentationCache()
             filteredModes = []
             expandedHiddenStopIDs = []
             highlightedEntryID = nil
-            isMapExpanded = false
         }
         .onChange(of: transportSummaryRefreshKey) { _, _ in
-            presentationCache = Self.makePresentationCache(for: dayTimeline)
+            rebuildPresentationCache()
             // A corrected move can remove the last of a mode, and its chip with it.
             filteredModes.formIntersection(presentationCache.activityBubbleMetrics.map(\.mode))
         }
         .onChange(of: photoStripRefreshKey) { _, _ in
-            presentationCache = Self.makePresentationCache(for: dayTimeline)
+            rebuildPresentationCache()
+        }
+        .onChange(of: placeNamesKey) { _, _ in
+            rebuildPresentationCache()
+        }
+        // The one live map follows whichever page is active.
+        .onChange(of: isActive, initial: true) { _, active in
+            guard active else { return }
+            dayMap?.show(dayTimeline, filteredModes: filteredModes, liveRoute: liveRouteSnapshot)
+            applyScreenshotAgentFlagsIfNeeded()
+        }
+        .onChange(of: mapContentKey) { _, _ in
+            guard isActive else { return }
+            dayMap?.refresh(dayTimeline)
+        }
+        .onChange(of: filteredModes) { _, modes in
+            guard isActive else { return }
+            dayMap?.setFilteredModes(modes, for: dayTimeline.dayKey)
+        }
+        .onChange(of: liveRouteKey) { _, _ in
+            guard isActive else { return }
+            dayMap?.updateLiveRoute(liveRouteSnapshot, for: dayTimeline.dayKey)
         }
         .onChange(of: mapSelection) { _, selection in
             guard let selection else {
@@ -389,9 +499,6 @@ struct DayTimelinePageContent: View {
             if let match = displayedTimelineEntries.first(where: { $0.mapSelection == selection }) {
                 highlightedEntryID = match.id
             }
-        }
-        .onAppear {
-            applyScreenshotAgentFlagsIfNeeded()
         }
     }
 
@@ -406,7 +513,7 @@ struct DayTimelinePageContent: View {
         guard isActive else { return }
         let env = ProcessInfo.processInfo.environment
         if env["MOVES_EXPAND_MAP"] == "1" {
-            isMapExpanded = true
+            dayMap?.setExpanded(true)
         }
 
     }
@@ -428,10 +535,10 @@ struct DayTimelinePageContent: View {
                     DayMapStrip(
                         dayTimeline: dayTimeline,
                         isActive: isActive,
-                        selection: $mapSelection,
+                        style: .collapsed,
                         collapsedMapHeight: heroHeight,
                         filteredModes: filteredModes,
-                        isExpanded: $isMapExpanded
+                        contentKey: mapContentKey
                     )
                     .padding(.horizontal, 14)
 
@@ -454,12 +561,10 @@ struct DayTimelinePageContent: View {
                 DayMapStrip(
                     dayTimeline: dayTimeline,
                     isActive: isActive,
-                    selection: $mapSelection,
-                    fillsAvailableSpace: true,
+                    style: .expanded,
                     collapsedMapHeight: heroHeight,
                     filteredModes: filteredModes,
-                    showsCollapseControl: true,
-                    isExpanded: $isMapExpanded
+                    contentKey: mapContentKey
                 )
                 .padding(.horizontal, 10)
                 .padding(.bottom, 8)
@@ -473,10 +578,9 @@ struct DayTimelinePageContent: View {
             DayMapStrip(
                 dayTimeline: dayTimeline,
                 isActive: isActive,
-                selection: $mapSelection,
-                fillsAvailableSpace: true,
+                style: .landscape,
                 filteredModes: filteredModes,
-                isExpanded: .constant(true)
+                contentKey: mapContentKey
             )
         } controlPane: {
             VStack(spacing: 8) {
@@ -550,6 +654,15 @@ struct DayTimelinePageContent: View {
                 guard let entryID else { return }
                 withAnimation(.easeInOut(duration: 0.28)) {
                     proxy.scrollTo(entryID, anchor: .center)
+                }
+            }
+            // A trip that has just set off is the newest row: bring it into view once.
+            .onChange(of: liveRouteEntryID, initial: true) { _, entryID in
+                guard let entryID, highlightedEntryID == nil else { return }
+                Task { @MainActor in
+                    withAnimation(.easeInOut(duration: 0.28)) {
+                        proxy.scrollTo(entryID, anchor: .bottom)
+                    }
                 }
             }
         }
@@ -704,7 +817,7 @@ struct DayTimelinePageContent: View {
                 }
                 return
             }
-            mapSelection = entry.mapSelection
+            setMapSelection(entry.mapSelection)
             highlightedEntryID = entry.id
         }
     }
@@ -733,7 +846,7 @@ struct DayTimelinePageContent: View {
             }
         }
 
-        mapSelection = target.mapSelection
+        setMapSelection(target.mapSelection)
         highlightedEntryID = target.entryID
         rootController.requestedJumpMoment = nil
     }
@@ -777,8 +890,13 @@ struct DayTimelinePageContent: View {
     }
 }
 
+private final class DayTimelinePresentationCacheBox {
+    var cache: DayTimelinePresentationCache?
+}
+
 private struct DayTimelinePresentationCache {
     let timelineEntries: [TimelineEntry]
+    let repeatedStays: [UUID: TimelineRepeatedStay]
     let transportSummaryMetrics: [DayTransportSummaryMetric]
     let activityBubbleMetrics: [ActivityBubbleMetric]
     let sortedSamples: [LocationSample]
@@ -966,374 +1084,94 @@ struct DayTransportSummaryView: View {
     }
 }
 
-private struct DayMapPresentationCache {
-    let placeMarkers: [PlaceMarker]
-    let latestSampleCoordinate: CLLocationCoordinate2D?
-    let routeRefreshKey: String
-    let placeRefreshKey: String
-    let latestSampleKey: String
+/// Last measured spot of a page's map, kept outside view state so a swipe does not
+/// re-evaluate the page.
+private final class DayMapSlotFrameBox {
+    var frame: CGRect?
 }
 
-private struct DayMapRouteCacheEntry {
-    let routes: [RenderedRoute]
-    let isFullyMatched: Bool
-}
-
-@MainActor
-private enum DayMapRouteCache {
-    private static var entries: [String: DayMapRouteCacheEntry] = [:]
-    private static var keysInUseOrder: [String] = []
-    private static let maximumEntryCount = 18
-
-    static func routes(for key: String) -> DayMapRouteCacheEntry? {
-        guard let entry = entries[key] else { return nil }
-        markRecentlyUsed(key)
-        return entry
-    }
-
-    static func store(_ routes: [RenderedRoute], for key: String, isFullyMatched: Bool) {
-        if let existing = entries[key], existing.isFullyMatched, !isFullyMatched {
-            markRecentlyUsed(key)
-            return
-        }
-
-        entries[key] = DayMapRouteCacheEntry(routes: routes, isFullyMatched: isFullyMatched)
-        markRecentlyUsed(key)
-        trimIfNeeded()
-    }
-
-    private static func markRecentlyUsed(_ key: String) {
-        keysInUseOrder.removeAll { $0 == key }
-        keysInUseOrder.append(key)
-    }
-
-    private static func trimIfNeeded() {
-        while keysInUseOrder.count > maximumEntryCount {
-            let oldest = keysInUseOrder.removeFirst()
-            entries.removeValue(forKey: oldest)
-        }
-    }
-}
-
+/// A day page's map spot: a snapshot of the day, and on the active page the place where
+/// the Timeline's one live map (`TimelineDayMapModel`) is laid over it.
 struct DayMapStrip: View {
-    @Environment(\.modelContext) private var modelContext
-    @EnvironmentObject private var captureManager: MovesLocationCaptureManager
+    @Environment(TimelineDayMapModel.self) private var liveMap: TimelineDayMapModel?
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.colorScheme) private var colorScheme
     @AppStorage(MapMarkerDisplaySettings.showsBigMarkersKey) private var showsBigMarkers = false
-    @AppStorage(MapRouteShadingSettings.shadeRoutesBySpeedKey) private var shadeRoutesBySpeed = true
     let dayTimeline: DayTimeline
     let isActive: Bool
-    @Binding var selection: TimelineMapSelection?
-    let fillsAvailableSpace: Bool
+    let style: TimelineDayMapSlot.Style
     let collapsedMapHeight: CGFloat
     let filteredModes: Set<TransportMode>
-    let showsCollapseControl: Bool
-    @Binding var isExpanded: Bool
-    private static let collapsedMapCornerRadius: CGFloat = 20
-    private static let fullScreenMapAnimation = Animation.spring(response: 0.42, dampingFraction: 0.86)
+    /// Changes when the day's stays, trips, names, or modes change.
+    let contentKey: String
+    private static let cornerRadius: CGFloat = 20
 
-    @State private var camera: MapCameraPosition
-    @State private var mapRegion: MKCoordinateRegion
-    @State private var historicalRoutes: [RenderedRoute]
-    @State private var presentationCache: DayMapPresentationCache
-    @State private var collapsedSnapshotImage: UIImage?
-    /// The live map has had a moment to draw after the page became active, so the
-    /// snapshot that stood in for it can fade away.
-    @State private var isLiveMapSettled: Bool
-    /// Whether the live map is in the hierarchy. Creating and tearing down a map is the
-    /// costliest part of changing pages, so it happens a beat after a page settles rather
-    /// than in the same frame, which keeps the next swipe responsive.
-    @State private var isLiveMapInserted: Bool
-
-    private var placeMarkers: [PlaceMarker] {
-        presentationCache.placeMarkers
-    }
-
-    private var liveRouteSnapshot: LiveRouteTrackingSnapshot? {
-        liveRouteTrackingSnapshot(for: dayTimeline, captureManager: captureManager)
-    }
-
-    private var latestSampleCoordinate: CLLocationCoordinate2D? {
-        presentationCache.latestSampleCoordinate
-    }
-
-    private var displayedRoutes: [RenderedRoute] {
-        guard !filteredModes.isEmpty else { return historicalRoutes }
-        return historicalRoutes.filter { filteredModes.contains(ActivityBubbleMetrics.chipMode(for: $0.transportMode)) }
-    }
-
-    private var historicalRouteCoordinates: [CLLocationCoordinate2D] {
-        displayedRoutes.flatMap { $0.coordinates }
-    }
-
-    /// Only the active page hosts a live map; neighbouring pages show a snapshot of the
-    /// same region, which keeps swiping between days cheap.
-    private var showsLiveMap: Bool {
-        isLiveMapInserted
-    }
-
-    /// The snapshot stands in while the page is inactive, and stays on top of the live map
-    /// for a moment after activation so the swap is a cross-fade rather than a flash.
-    private var showsSnapshot: Bool {
-        !isActive || !isLiveMapInserted || (!isLiveMapSettled && collapsedSnapshotImage != nil)
-    }
-
-    /// Expanded / landscape live map may shade by speed when the Map setting
-    /// is on. The collapsed hero stays solid mode color, matching its snapshot.
-    private var allowsSpeedShading: Bool {
-        (fillsAvailableSpace || isExpanded) && shadeRoutesBySpeed
-    }
-
-    /// The camera no longer shows the whole day: the person moved it, or it zoomed to a
-    /// selected stay or trip.
-    private var hasMovedCamera: Bool {
-        isActive && (camera.positionedByUser || selection != nil)
-    }
-
-    private var historicalRouteRefreshKey: String {
-        presentationCache.routeRefreshKey
-    }
-
-    private var cameraRefreshKey: String {
-        let liveKey = liveRouteSnapshot?.id ?? "none"
-        return [presentationCache.routeRefreshKey, presentationCache.placeRefreshKey, liveKey, presentationCache.latestSampleKey].joined(separator: "|")
-    }
+    @State private var content: TimelineDayMapContent?
+    @State private var snapshotImage: UIImage?
+    @State private var token = UUID()
+    @State private var frameBox = DayMapSlotFrameBox()
 
     init(
         dayTimeline: DayTimeline,
         isActive: Bool,
-        selection: Binding<TimelineMapSelection?> = .constant(nil),
-        fillsAvailableSpace: Bool = false,
+        style: TimelineDayMapSlot.Style,
         collapsedMapHeight: CGFloat = 260,
         filteredModes: Set<TransportMode> = [],
-        showsCollapseControl: Bool = false,
-        isExpanded: Binding<Bool> = .constant(false)
+        contentKey: String = ""
     ) {
         self.dayTimeline = dayTimeline
         self.isActive = isActive
-        _selection = selection
-        self.fillsAvailableSpace = fillsAvailableSpace
+        self.style = style
         self.collapsedMapHeight = collapsedMapHeight
         self.filteredModes = filteredModes
-        self.showsCollapseControl = showsCollapseControl
-        _isExpanded = isExpanded
-
-        let cache = Self.makePresentationCache(for: dayTimeline)
-        let cachedRoutes = DayMapRouteCache.routes(for: cache.routeRefreshKey)
-        let renderedRoutes = cachedRoutes?.routes ?? Self.renderedRoutes(for: dayTimeline)
-        let allCoordinates = Self.allCoordinates(
-            for: dayTimeline,
-            routeCoordinates: renderedRoutes.flatMap { $0.coordinates },
-            liveRouteCoordinates: []
-        )
-        let cameraCoordinates = allCoordinates.isEmpty
-            ? cache.latestSampleCoordinate.map { [$0] } ?? []
-            : allCoordinates
-        let initialRegion = MapRegionFactory.region(for: cameraCoordinates)
-        _camera = State(initialValue: .region(initialRegion))
-        _mapRegion = State(initialValue: initialRegion)
-        _historicalRoutes = State(initialValue: renderedRoutes)
-        _presentationCache = State(initialValue: cache)
-        _isLiveMapSettled = State(initialValue: isActive)
-        _isLiveMapInserted = State(initialValue: isActive)
+        self.contentKey = contentKey
     }
+
+    private var fillsAvailableSpace: Bool { style != .collapsed }
 
     var body: some View {
-        activeMapView
-            .frame(
-                maxWidth: .infinity,
-                maxHeight: fillsAvailableSpace ? .infinity : nil
-            )
+        snapshotView
+            .frame(maxWidth: .infinity, maxHeight: fillsAvailableSpace ? .infinity : nil)
             .frame(height: fillsAvailableSpace ? nil : collapsedMapHeight)
-            .clipShape(RoundedRectangle(cornerRadius: Self.collapsedMapCornerRadius, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
             .overlay {
-                RoundedRectangle(cornerRadius: Self.collapsedMapCornerRadius, style: .continuous)
+                RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
                     .stroke(MovesPalette.border.opacity(0.8), lineWidth: 1)
             }
-            .overlay(alignment: .topLeading) {
-                if let callout {
-                    TimelineMapCallout(title: callout.title, subtitle: callout.subtitle, tint: callout.tint)
-                        .padding(12)
-                }
+            .accessibilityHidden(isActive)
+            .onGeometryChange(for: CGRect.self) { proxy in
+                proxy.frame(in: .named(TimelineDayMapModel.coordinateSpaceName))
+            } action: { frame in
+                frameBox.frame = frame
+                reportSlot()
             }
-            .overlay(alignment: .bottomTrailing) {
-                mapControls
-                    .padding(showsCollapseControl ? 16 : 10)
+            .onAppear {
+                if content == nil { content = TimelineDayMapContent.make(for: dayTimeline) }
+                reportSlot()
             }
-            .shadow(color: .black.opacity(fillsAvailableSpace && showsCollapseControl ? 0.12 : 0), radius: 18, x: 0, y: 8)
-            .animation(Self.fullScreenMapAnimation, value: isExpanded)
-            .animation(.easeInOut(duration: 0.2), value: hasMovedCamera)
-            .task(id: isActive) {
-                await settleLiveMapAfterActivation()
+            .onDisappear { liveMap?.clearSlot(token: token) }
+            .onChange(of: isActive) { _, active in
+                if active { reportSlot() } else { liveMap?.clearSlot(token: token) }
             }
-            .task(id: "\(historicalRouteRefreshKey)|\(isActive ? 1 : 0)") {
+            .onChange(of: style) { _, _ in reportSlot() }
+            .onChange(of: contentKey) { _, _ in
+                content = TimelineDayMapContent.make(for: dayTimeline)
+            }
+            .onChange(of: liveMap?.routesRevision ?? 0) { _, _ in
+                // Matched routes for this day landed in the shared cache.
                 guard isActive else { return }
-                await refreshHistoricalRouteCoordinates()
-            }
-            .task(id: cameraRefreshKey) {
-                refreshCamera()
-            }
-            .onChange(of: selection) { _, newSelection in
-                refreshCamera(for: newSelection)
-            }
-            .onChange(of: dayTimeline.dayKey) { _, _ in
-                presentationCache = Self.makePresentationCache(for: dayTimeline)
-            }
-            .onChange(of: moveModesKey) { _, _ in
-                presentationCache = Self.makePresentationCache(for: dayTimeline)
-            }
-            .onChange(of: placeNamesKey) { _, _ in
-                presentationCache = Self.makePresentationCache(for: dayTimeline)
+                content = TimelineDayMapContent.make(for: dayTimeline)
             }
     }
 
-    /// Changes when a stay is named, so its marker shows the new name.
-    private var placeNamesKey: String {
-        dayTimeline.places
-            .map { "\($0.id.uuidString)|\($0.userLabel ?? "")|\($0.knownPlace?.name ?? "")" }
-            .sorted()
-            .joined(separator: ",")
+    private func reportSlot() {
+        guard isActive, let liveMap, let frame = frameBox.frame, frame.width > 1, frame.height > 1 else { return }
+        liveMap.reportSlot(TimelineDayMapSlot(dayKey: dayTimeline.dayKey, token: token, frame: frame, style: style))
     }
+}
 
-    /// Changes when a move's mode is corrected, so the map redraws it in the new color.
-    private var moveModesKey: String {
-        dayTimeline.moves
-            .map { "\($0.id.uuidString)|\($0.transportModeRawValue)" }
-            .sorted()
-            .joined(separator: ",")
-    }
-
-    private var activeMapView: some View {
-        ZStack {
-            if showsLiveMap {
-                mapView
-            }
-            if showsSnapshot {
-                collapsedMapSnapshotView
-                    .allowsHitTesting(!isActive)
-                    .transition(.opacity)
-            }
-        }
-    }
-
-    private var mapView: some View {
-        MapReader { proxy in
-            Map(position: $camera, interactionModes: [.pan, .zoom]) {
-                mapContent
-            }
-            .mapStyle(.standard(elevation: .flat, emphasis: .muted))
-            .onTapGesture(coordinateSpace: .local) { point in
-                selectRoute(near: point, proxy: proxy)
-            }
-        }
-        .accessibilityLabel(String(localized: "Day map"))
-        .accessibilityHint(String(localized: "Shows the day’s places and how you moved"))
-    }
-
-    /// Bottom-trailing map buttons: refit the day once the camera has moved, and
-    /// expand or shrink the map.
-    @ViewBuilder
-    private var mapControls: some View {
-        if isActive {
-            HStack(spacing: 10) {
-                if hasMovedCamera {
-                    recentreButton
-                        .transition(.scale(scale: 0.6).combined(with: .opacity))
-                }
-                if !fillsAvailableSpace || showsCollapseControl {
-                    fullScreenToggleButton(isFullScreen: showsCollapseControl)
-                }
-            }
-        }
-    }
-
-    private var recentreButton: some View {
-        Button {
-            withAnimation(.easeInOut(duration: 0.35)) {
-                if selection != nil {
-                    selection = nil
-                } else {
-                    refreshCamera(for: nil)
-                }
-            }
-        } label: {
-            Image(systemName: "scope")
-                .font(.system(size: 15, weight: .bold, design: .rounded))
-                .frame(width: 40, height: 40)
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .frostedCircle(enabled: true)
-        .accessibilityLabel(String(localized: "Show the whole day"))
-        .help(String(localized: "Show the whole day"))
-    }
-
-    /// Lets the live map draw under the snapshot before the snapshot fades out.
-    @MainActor
-    private func settleLiveMapAfterActivation() async {
-        guard isActive else {
-            isLiveMapSettled = false
-            // A neighbour's snapshot shows the fitted day, so the live map starts there too.
-            if camera.positionedByUser {
-                refreshCamera(for: selection)
-            }
-            guard isLiveMapInserted else { return }
-            try? await Task.sleep(for: .milliseconds(600))
-            guard !Task.isCancelled else { return }
-            isLiveMapInserted = false
-            return
-        }
-        guard !isLiveMapSettled else { return }
-        if !isLiveMapInserted {
-            try? await Task.sleep(for: .milliseconds(300))
-            guard !Task.isCancelled else { return }
-            isLiveMapInserted = true
-        }
-        try? await Task.sleep(for: .milliseconds(400))
-        guard !Task.isCancelled else { return }
-        withAnimation(.easeOut(duration: 0.25)) {
-            isLiveMapSettled = true
-        }
-    }
-
-    /// A tap on a drawn route selects that trip, the way a tap on a marker selects a stay.
-    private func selectRoute(near point: CGPoint, proxy: MapProxy) {
-        let tolerance: CGFloat = 22
-        // Markers handle their own taps.
-        for marker in placeMarkers {
-            if let markerPoint = proxy.convert(marker.coordinate, to: .local),
-               hypot(markerPoint.x - point.x, markerPoint.y - point.y) < 16 {
-                return
-            }
-        }
-
-        var best: (id: String, distance: CGFloat)?
-        for route in displayedRoutes where route.coordinates.count > 1 {
-            let points = route.coordinates.compactMap { proxy.convert($0, to: .local) }
-            guard points.count > 1 else { continue }
-            for (start, end) in zip(points, points.dropFirst()) {
-                let distance = Self.distance(from: point, toSegment: start, end)
-                if distance < tolerance, distance < (best?.distance ?? .greatestFiniteMagnitude) {
-                    best = (route.id, distance)
-                }
-            }
-        }
-
-        guard let best, let id = UUID(uuidString: best.id) else { return }
-        withAnimation(.easeInOut(duration: 0.2)) {
-            selection = .move(id)
-        }
-    }
-
-    private static func distance(from point: CGPoint, toSegment start: CGPoint, _ end: CGPoint) -> CGFloat {
-        let dx = end.x - start.x
-        let dy = end.y - start.y
-        let lengthSquared = dx * dx + dy * dy
-        guard lengthSquared > 0 else { return hypot(point.x - start.x, point.y - start.y) }
-        let t = max(0, min(1, ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared))
-        return hypot(point.x - (start.x + t * dx), point.y - (start.y + t * dy))
-    }
-
-    private var collapsedMapSnapshotView: some View {
+private extension DayMapStrip {
+    var snapshotView: some View {
         GeometryReader { proxy in
             let size = CGSize(
                 width: max(proxy.size.width, 1),
@@ -1341,8 +1179,8 @@ struct DayMapStrip: View {
             )
 
             ZStack {
-                if let collapsedSnapshotImage {
-                    Image(uiImage: collapsedSnapshotImage)
+                if let snapshotImage {
+                    Image(uiImage: snapshotImage)
                         .resizable()
                         .scaledToFill()
                         .frame(width: size.width, height: size.height)
@@ -1352,173 +1190,14 @@ struct DayMapStrip: View {
                         .fill(MovesPalette.card.opacity(0.72))
                 }
             }
-            .task(id: collapsedSnapshotRefreshKey(for: size)) {
-                await refreshCollapsedSnapshot(size: size)
+            .task(id: snapshotKey(for: size)) {
+                await refreshSnapshot(size: size)
             }
         }
     }
 
-    @MapContentBuilder
-    private var mapContent: some MapContent {
-        ForEach(displayedRoutes) { route in
-            let isSelected = isSelectedRoute(route)
-            let dimsForOtherSelection = selection != nil && !isSelected
-
-            if route.shadowCoordinates.count > 1 {
-                ForEach(Array(RouteCoordinateOps.mapPolylineSegments(route.shadowCoordinates).enumerated()), id: \.offset) { _, coordinates in
-                    MapPolyline(coordinates: coordinates)
-                        .stroke(
-                            route.shadowTint,
-                            lineWidth: isSelected ? route.shadowLineWidth + 4 : route.shadowLineWidth
-                        )
-                }
-            }
-
-            if route.coordinates.count > 1 {
-                let emphasis = dimsForOtherSelection ? 0.28 : 1.0
-                let width = isSelected ? route.lineWidth + 4 : route.lineWidth
-                ForEach(Array(RouteCoordinateOps.mapPolylineSegments(route.coordinates).enumerated()), id: \.offset) { _, coordinates in
-                    MapPolyline(coordinates: coordinates)
-                        .stroke(
-                            route.strokeGradient(shadeBySpeed: allowsSpeedShading, emphasis: emphasis),
-                            style: RouteStrokeStyle.make(for: route, lineWidth: width)
-                        )
-                }
-                if let overlayTint = route.recordedOverlayTint {
-                    ForEach(Array(RouteCoordinateOps.mapPolylineSegments(route.coordinates).enumerated()), id: \.offset) { _, coordinates in
-                        MapPolyline(coordinates: coordinates)
-                            .stroke(
-                                MovesPalette.opaqueRouteColor(overlayTint, opacity: emphasis),
-                                style: RouteStrokeStyle.make(
-                                    for: route,
-                                    lineWidth: max(width - 2.25, 1.25)
-                                )
-                            )
-                    }
-                }
-            }
-        }
-
-        if let liveRouteSnapshot,
-           liveRouteSnapshot.coordinates.count > 1 {
-            ForEach(Array(RouteCoordinateOps.mapPolylineSegments(liveRouteSnapshot.coordinates).enumerated()), id: \.offset) { _, coordinates in
-                MapPolyline(coordinates: coordinates)
-                    .stroke(
-                        MovesPalette.opaqueRouteColor(
-                            MovesPalette.routeTracking,
-                            opacity: selection != nil && !isLiveRouteSelected ? 0.28 : 1
-                        ),
-                        lineWidth: isLiveRouteSelected ? 9 : 5
-                    )
-            }
-        }
-
-        ForEach(placeMarkers) { marker in
-            let isSelected = selection == .place(marker.id)
-
-            if showsBigMarkers && !isSelected {
-                Marker(marker.title, coordinate: marker.coordinate)
-                    .tint(MovesPalette.place)
-            } else {
-                Annotation(marker.title, coordinate: marker.coordinate, anchor: .center) {
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            selection = .place(marker.id)
-                        }
-                    } label: {
-                        MapLocationDot(tint: MovesPalette.place, isSelected: isSelected)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(marker.title)
-                }
-            }
-        }
-
-        // Where the person is now, for orientation. It is never part of the fitted camera,
-        // so a past day abroad stays framed on that day.
-        UserAnnotation()
-
-        if placeMarkers.isEmpty,
-           historicalRouteCoordinates.isEmpty,
-           (liveRouteSnapshot?.coordinates.isEmpty ?? true),
-           let latestSampleCoordinate {
-            if showsBigMarkers {
-                Marker("Captured location", coordinate: latestSampleCoordinate)
-                    .tint(liveRouteSnapshot == nil ? MovesPalette.start : MovesPalette.routeTracking)
-            } else {
-                Annotation("Captured location", coordinate: latestSampleCoordinate, anchor: .center) {
-                    MapLocationDot(
-                        tint: liveRouteSnapshot == nil ? MovesPalette.start : MovesPalette.routeTracking,
-                        isSelected: isSampleSelected
-                    )
-                    .accessibilityLabel(String(localized: "Captured location"))
-                }
-            }
-        }
-    }
-
-    private var callout: (title: String, subtitle: String, tint: Color)? {
-        switch selection {
-        case .place(let id):
-            guard let marker = placeMarkers.first(where: { $0.id == id }) else { return nil }
-            let place = dayTimeline.places.first(where: { $0.id == id })
-            let subtitle = place.map { Self.timeString(from: $0.arrivalDate) } ?? marker.title
-            return (marker.title, subtitle, MovesPalette.place)
-        case .move(let id):
-            guard let route = displayedRoutes.first(where: { $0.id == id.uuidString }) else { return nil }
-            let move = dayTimeline.moves.first(where: { $0.id == id })
-            let subtitle = move.map { DurationFormatter.text(for: $0.timelineDuration) } ?? route.transportMode.title
-            return (route.transportMode.title, subtitle, route.tint)
-        case .liveRoute:
-            let title = liveRouteSnapshot?.isFollowedTrip == true
-                ? String(localized: "Trip in progress")
-                : String(localized: "Route tracking")
-            return (title, String(localized: "Now"), MovesPalette.routeTracking)
-        case .sample:
-            return (String(localized: "Captured location"), String(localized: "Now"), MovesPalette.start)
-        case nil:
-            return nil
-        }
-    }
-
-    private static func timeString(from date: Date) -> String {
-        date.formatted(.dateTime.hour().minute())
-    }
-
-    private func isSelectedRoute(_ route: RenderedRoute) -> Bool {
-        guard case .move(let id) = selection else { return false }
-        return route.id == id.uuidString
-    }
-
-    private var isLiveRouteSelected: Bool {
-        guard case .liveRoute = selection else { return false }
-        return true
-    }
-
-    private var isSampleSelected: Bool {
-        guard case .sample = selection else { return false }
-        return true
-    }
-
-    private func fullScreenToggleButton(isFullScreen: Bool) -> some View {
-        Button {
-            withAnimation(Self.fullScreenMapAnimation) {
-                isExpanded = !isFullScreen
-            }
-        } label: {
-            Image(systemName: isFullScreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-                .font(.system(size: 15, weight: .bold, design: .rounded))
-                .frame(width: 40, height: 40)
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .frostedCircle(enabled: true)
-        .accessibilityLabel(isFullScreen ? "Shrink map" : "Expand map")
-        .help(isFullScreen ? "Shrink map" : "Expand map")
-    }
-
-    private var collapsedSnapshotRouteKey: String {
-        displayedRoutes.map { route in
+    func routeSignature(_ routes: [RenderedRoute]) -> String {
+        routes.map { route in
             let first = route.coordinates.first
             let last = route.coordinates.last
             let firstKey = first.map { "\(Int(($0.latitude * 10_000).rounded())):\(Int(($0.longitude * 10_000).rounded()))" } ?? "none"
@@ -1529,77 +1208,74 @@ struct DayMapStrip: View {
         .joined(separator: ",")
     }
 
-    private func collapsedSnapshotRefreshKey(for size: CGSize) -> String {
-        [
+    func snapshotKey(for size: CGSize) -> String {
+        guard let content else { return "pending" }
+        return [
+            content.dayKey,
             "\(Int(size.width.rounded()))x\(Int(size.height.rounded()))@\(Int(Self.screenScale.rounded()))",
-            presentationCache.routeRefreshKey,
-            presentationCache.placeRefreshKey,
-            presentationCache.latestSampleKey,
-            liveRouteSnapshot?.id ?? "none",
+            colorScheme == .dark ? "dark" : "light",
+            content.placeKey,
+            content.latestSampleKey,
             showsBigMarkers ? "big" : "small",
             filteredModes.map(\.rawValue).sorted().joined(separator: ","),
-            collapsedSnapshotRouteKey
+            routeSignature(content.displayedRoutes(filteredModes: filteredModes)),
+            scenePhase == .active ? "on" : "away"
         ]
         .joined(separator: "|")
     }
 
+    /// Cached per day, size, and content. Never runs while the app is away: leaving the
+    /// foreground changes the key, which cancels the request in flight.
     @MainActor
-    private func refreshCollapsedSnapshot(size: CGSize) async {
-        guard size.width > 1, size.height > 1 else { return }
-
-        do {
-            let image = try await Self.makeCollapsedSnapshot(
-                region: mapRegion,
-                size: size,
-                scale: Self.screenScale,
-                routes: displayedRoutes,
-                liveRouteSnapshot: liveRouteSnapshot,
-                placeMarkers: placeMarkers,
-                latestSampleCoordinate: latestSampleCoordinate,
-                showsBigMarkers: showsBigMarkers
-            )
-
-            guard !Task.isCancelled else { return }
-            collapsedSnapshotImage = image
-        } catch {
-            guard !Task.isCancelled else { return }
-            collapsedSnapshotImage = nil
+    func refreshSnapshot(size: CGSize) async {
+        guard scenePhase == .active, let content, size.width > 1, size.height > 1 else { return }
+        let key = snapshotKey(for: size)
+        if let cached = TimelineMapSnapshotPool.shared.image(forKey: key) {
+            snapshotImage = cached
+            return
         }
-    }
+        guard let region = content.fittedRegion(filteredModes: filteredModes, liveRouteCoordinates: []) else { return }
 
-    private static func makeCollapsedSnapshot(
-        region: MKCoordinateRegion,
-        size: CGSize,
-        scale: CGFloat,
-        routes: [RenderedRoute],
-        liveRouteSnapshot: LiveRouteTrackingSnapshot?,
-        placeMarkers: [PlaceMarker],
-        latestSampleCoordinate: CLLocationCoordinate2D?,
-        showsBigMarkers: Bool
-    ) async throws -> UIImage {
         let options = MKMapSnapshotter.Options()
         // `setRegion:` raises NSException (not a Swift Error) for NaN, Inf,
         // zero span, or a center latitude outside ±90. Always sanitize first.
         options.region = MapRegionFactory.snapshotSafe(region)
         options.size = size
-        options.scale = scale
+        options.scale = Self.screenScale
+        options.traitCollection = UITraitCollection(userInterfaceStyle: colorScheme == .dark ? .dark : .light)
+        options.preferredConfiguration = MKStandardMapConfiguration(elevationStyle: .flat, emphasisStyle: .muted)
 
-        let snapshot = try await TimelineMapSnapshotPool.shared.snapshot(options: options)
-
-        return renderCollapsedSnapshotOverlay(
-            snapshot: snapshot,
-            routes: routes,
-            liveRouteSnapshot: liveRouteSnapshot,
-            placeMarkers: placeMarkers,
-            latestSampleCoordinate: latestSampleCoordinate,
-            showsBigMarkers: showsBigMarkers
-        )
+        do {
+            let base = try await TimelineMapSnapshotPool.shared.snapshot(
+                options: options,
+                styleKey: colorScheme == .dark ? 2 : 1
+            )
+            guard !Task.isCancelled else { return }
+            let routes = content.displayedRoutes(filteredModes: filteredModes)
+            let markers = content.placeMarkers
+            let latest = content.latestSampleCoordinate
+            let big = showsBigMarkers
+            // Drawing the routes over the base map stays off the main thread.
+            let image = await Task.detached(priority: .userInitiated) {
+                Self.renderOverlay(
+                    snapshot: base,
+                    routes: routes,
+                    placeMarkers: markers,
+                    latestSampleCoordinate: latest,
+                    showsBigMarkers: big
+                )
+            }.value
+            guard !Task.isCancelled else { return }
+            TimelineMapSnapshotPool.shared.store(image, forKey: key)
+            snapshotImage = image
+        } catch {
+            // Keep the last image; a cancelled request is asked again when the key changes.
+        }
     }
 
-    private static func renderCollapsedSnapshotOverlay(
+    nonisolated static func renderOverlay(
         snapshot: MKMapSnapshotter.Snapshot,
         routes: [RenderedRoute],
-        liveRouteSnapshot: LiveRouteTrackingSnapshot?,
         placeMarkers: [PlaceMarker],
         latestSampleCoordinate: CLLocationCoordinate2D?,
         showsBigMarkers: Bool
@@ -1620,16 +1296,6 @@ struct DayMapStrip: View {
                 )
             }
 
-            if let liveRouteSnapshot {
-                RouteSnapshotStroke.strokePath(
-                    coordinates: liveRouteSnapshot.coordinates,
-                    in: snapshot,
-                    color: UIColor(MovesPalette.routeTracking),
-                    lineWidth: 5,
-                    dash: []
-                )
-            }
-
             for marker in placeMarkers {
                 drawMarker(
                     at: snapshot.point(for: marker.coordinate),
@@ -1641,19 +1307,18 @@ struct DayMapStrip: View {
 
             if placeMarkers.isEmpty,
                routes.flatMap(\.coordinates).isEmpty,
-               (liveRouteSnapshot?.coordinates.isEmpty ?? true),
                let latestSampleCoordinate {
                 drawMarker(
                     at: snapshot.point(for: latestSampleCoordinate),
                     in: snapshot.image.size,
-                    tint: UIColor(liveRouteSnapshot == nil ? MovesPalette.start : MovesPalette.routeTracking),
+                    tint: UIColor(MovesPalette.start),
                     isLarge: showsBigMarkers
                 )
             }
         }
     }
 
-    private static func drawMarker(
+    nonisolated static func drawMarker(
         at point: CGPoint,
         in size: CGSize,
         tint: UIColor,
@@ -1684,17 +1349,7 @@ struct DayMapStrip: View {
         path.stroke()
     }
 
-    private static var screenBounds: CGRect {
-        let windowScenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-
-        if let windowScene = windowScenes.first(where: { $0.activationState == .foregroundActive }) {
-            return windowScene.screen.bounds
-        }
-
-        return windowScenes.first?.screen.bounds ?? CGRect(x: 0, y: 0, width: 393, height: 852)
-    }
-
-    private static var screenScale: CGFloat {
+    static var screenScale: CGFloat {
         let windowScenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
 
         if let windowScene = windowScenes.first(where: { $0.activationState == .foregroundActive }) {
@@ -1702,197 +1357,6 @@ struct DayMapStrip: View {
         }
 
         return windowScenes.first?.screen.scale ?? 2
-    }
-
-    @MainActor
-    private func refreshHistoricalRouteCoordinates() async {
-        if let cached = DayMapRouteCache.routes(for: historicalRouteRefreshKey), cached.isFullyMatched {
-            historicalRoutes = cached.routes
-            refreshCamera(for: selection)
-            return
-        }
-
-        let sortedMoves = dayTimeline.moves.sorted(by: { $0.timelineStartDate < $1.timelineStartDate })
-        var renderedRoutes: [RenderedRoute] = []
-        renderedRoutes.reserveCapacity(sortedMoves.count)
-
-        for move in sortedMoves {
-            let matched = await RoadRouteMatcher.matchedCoordinates(for: move)
-            let fractions = await SpeedProfileBuilder.buildAndCache(for: move, coordinates: matched)
-            renderedRoutes.append(
-                RenderedRoute.make(from: move, coordinates: matched, speedFractions: fractions)
-            )
-        }
-
-        historicalRoutes = renderedRoutes
-        DayMapRouteCache.store(renderedRoutes, for: historicalRouteRefreshKey, isFullyMatched: true)
-        if modelContext.hasChanges {
-            do {
-                try modelContext.save()
-            } catch {
-                print("Failed to persist matched route cache: \(error.localizedDescription)")
-            }
-        }
-        refreshCamera(for: selection)
-    }
-
-    @MainActor
-    private func refreshCamera() {
-        let liveCoordinates = liveRouteSnapshot?.coordinates ?? []
-        let allCoordinates = Self.allCoordinates(
-            for: dayTimeline,
-            routeCoordinates: historicalRouteCoordinates,
-            liveRouteCoordinates: liveCoordinates
-        )
-        let cameraCoordinates = allCoordinates.isEmpty
-            ? presentationCache.latestSampleCoordinate.map { [$0] } ?? []
-            : allCoordinates
-
-        if !cameraCoordinates.isEmpty {
-            let region = MapRegionFactory.region(for: cameraCoordinates)
-            mapRegion = region
-            camera = .region(region)
-        }
-    }
-
-    @MainActor
-    private func refreshCamera(for selection: TimelineMapSelection?) {
-        let coordinates: [CLLocationCoordinate2D]
-
-        switch selection {
-        case .place(let id):
-            coordinates = placeMarkers.first(where: { $0.id == id }).map { [$0.coordinate] } ?? []
-        case .move(let id):
-            coordinates = historicalRoutes.first(where: { $0.id == id.uuidString })?.coordinates ?? []
-        case .liveRoute:
-            coordinates = liveRouteSnapshot?.coordinates ?? []
-        case .sample:
-            coordinates = latestSampleCoordinate.map { [$0] } ?? []
-        case nil:
-            refreshCamera()
-            return
-        }
-
-        guard !coordinates.isEmpty else { return }
-        let region = MapRegionFactory.region(for: coordinates)
-        mapRegion = region
-        camera = .region(region)
-    }
-
-    private static func renderedRoutes(for dayTimeline: DayTimeline) -> [RenderedRoute] {
-        let renderedRoutes = dayTimeline.moves
-            .sorted(by: { $0.timelineStartDate < $1.timelineStartDate })
-            .map { move in
-                let fallback = MoveRouteGeometry.rawCoordinates(for: move)
-                let signature = MoveRouteGeometry.cacheSignature(for: move, fallback: fallback)
-
-                return RenderedRoute.make(
-                    from: move,
-                    coordinates: move.manualRouteCoordinates ?? move.cachedRouteCoordinates(for: signature) ?? fallback
-                )
-            }
-        DayMapRouteCache.store(
-            renderedRoutes,
-            for: routeRefreshKey(for: dayTimeline),
-            isFullyMatched: false
-        )
-        return renderedRoutes
-    }
-
-    private static func allCoordinates(
-        for dayTimeline: DayTimeline,
-        routeCoordinates: [CLLocationCoordinate2D],
-        liveRouteCoordinates: [CLLocationCoordinate2D]
-    ) -> [CLLocationCoordinate2D] {
-        let placeCoordinates = mapPlaces(for: dayTimeline).map(\.coordinate)
-        return routeCoordinates + liveRouteCoordinates + placeCoordinates
-    }
-
-    private static func latestSampleCoordinate(for dayTimeline: DayTimeline) -> CLLocationCoordinate2D? {
-        dayTimeline.samples
-            .sorted(by: { $0.timestamp < $1.timestamp })
-            .last?
-            .coordinate
-    }
-
-    private static func makePresentationCache(for dayTimeline: DayTimeline) -> DayMapPresentationCache {
-        let sortedPlaces = mapPlaces(for: dayTimeline)
-        let placeMarkers = sortedPlaces.map { place in
-            let knownName = place.knownPlace?.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let title = knownName.isEmpty ? place.displayTitle : knownName
-            return PlaceMarker(id: place.id, title: title, coordinate: place.coordinate)
-        }
-        let placeRefreshKey = sortedPlaces.map { place in
-            let arrival = Int(place.arrivalDate.timeIntervalSince1970.rounded())
-            let departure = Int((place.departureDate ?? place.arrivalDate).timeIntervalSince1970.rounded())
-            return "\(place.id.uuidString)|\(arrival)|\(departure)"
-        }
-        .joined(separator: ",")
-
-        let sortedSamples = dayTimeline.samples.sorted(by: { $0.timestamp < $1.timestamp })
-        let latestSample = sortedSamples.last
-        let latestSampleKey = latestSample.map { sample in
-            "\(Int(sample.timestamp.timeIntervalSince1970.rounded()))|\(sample.sourceRawValue)|\(Int((sample.latitude * 10_000).rounded()))|\(Int((sample.longitude * 10_000).rounded()))"
-        } ?? "none"
-
-        return DayMapPresentationCache(
-            placeMarkers: placeMarkers,
-            latestSampleCoordinate: latestSample?.coordinate,
-            routeRefreshKey: routeRefreshKey(for: dayTimeline),
-            placeRefreshKey: placeRefreshKey,
-            latestSampleKey: latestSampleKey
-        )
-    }
-
-    private static func mapPlaces(for dayTimeline: DayTimeline) -> [VisitPlace] {
-        let routePlaces = dayTimeline.moves.flatMap { move in
-            [move.startPlace, move.endPlace].compactMap { $0 }
-        }
-        var placesByID: [UUID: VisitPlace] = [:]
-
-        for place in dayTimeline.displayPlaces + routePlaces {
-            placesByID[place.id] = place
-        }
-
-        return placesByID.values.sorted(by: { $0.arrivalDate < $1.arrivalDate })
-    }
-
-    private static func routeRefreshKey(for dayTimeline: DayTimeline) -> String {
-        let sortedMoves = dayTimeline.moves.sorted(by: { $0.timelineStartDate < $1.timelineStartDate })
-        return sortedMoves.map { move in
-            let start = Int(move.timelineStartDate.timeIntervalSince1970.rounded())
-            let end = Int(move.endDate.timeIntervalSince1970.rounded())
-            let sampleKey = Self.refreshSampleKey(for: move.samples)
-
-            return "\(move.id.uuidString)|\(move.transportMode.rawValue)|\(start)|\(end)|\(sampleKey)|\(routeStateKey(for: move))"
-        }
-        .joined(separator: ",")
-    }
-
-    private static func routeStateKey(for move: MoveSegment) -> String {
-        if let manualData = move.manualRouteCoordinatesData {
-            var hasher = Hasher()
-            hasher.combine(manualData.count)
-            hasher.combine(manualData)
-            return "manual:\(hasher.finalize())"
-        }
-
-        return "calculated:\(move.routeCacheSignature ?? "none")"
-    }
-
-    private static func refreshSampleKey(for samples: [LocationSample]) -> String {
-        samples
-            .sorted(by: { lhs, rhs in
-                if lhs.timestamp != rhs.timestamp { return lhs.timestamp < rhs.timestamp }
-                if lhs.dedupeKey != rhs.dedupeKey { return lhs.dedupeKey < rhs.dedupeKey }
-                if lhs.sourceRawValue != rhs.sourceRawValue { return lhs.sourceRawValue < rhs.sourceRawValue }
-                if lhs.latitude != rhs.latitude { return lhs.latitude < rhs.latitude }
-                return lhs.longitude < rhs.longitude
-            })
-            .map { sample in
-                "\(Int(sample.timestamp.timeIntervalSince1970.rounded()))|\(sample.sourceRawValue)|\(Int((sample.latitude * 10_000).rounded()))|\(Int((sample.longitude * 10_000).rounded()))"
-            }
-            .joined(separator: ",")
     }
 }
 
@@ -2233,15 +1697,21 @@ private struct StorylineRail: View {
 private struct StorylineRowBody: View {
     let entry: TimelineEntry
     @Environment(\.timelineItemActions) private var actions
+    @Environment(\.timelineFollowedTripStart) private var followedTripStart
+    @Environment(\.timelineRepeatedStays) private var repeatedStays
     @EnvironmentObject private var health: HealthSummaryStore
 
     /// "Stayed 3h 12m · walked 0.4 mi" when Apple Health shows a real walk inside the stay.
     private var subtitleText: String {
-        guard case .place(let place) = entry,
-              let meters = health.walkedHereMeters(stayID: place.id) else {
-            return entry.subtitleText
-        }
-        return "\(entry.subtitleText) · \(HealthSummaryText.walkedHere(meters))"
+        guard case .place(let place) = entry else { return entry.subtitleText }
+        let stayed = TimelineStayPresentation.subtitle(
+            arrival: place.arrivalDate,
+            departure: place.departureDate,
+            followedTripStart: followedTripStart,
+            repeated: repeatedStays[place.id]
+        )
+        guard let meters = health.walkedHereMeters(stayID: place.id) else { return stayed }
+        return "\(stayed) · \(HealthSummaryText.walkedHere(meters))"
     }
 
     private var isHealthEstimatedDistance: Bool {
@@ -2297,6 +1767,14 @@ private struct StorylineRowBody: View {
                         actions.requestRename(place)
                     }
                 }
+            } else if case .liveRoute(let snapshot) = entry, snapshot.isFollowedTrip, snapshot.sampleCount > 0 {
+                // Keeps counting between fixes; only this text redraws.
+                TimelineView(.periodic(from: .now, by: 30)) { context in
+                    Text(TimelineLiveTrip.progressText(for: snapshot, now: context.date))
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .foregroundStyle(Color.primary.opacity(0.68))
+                        .monospacedDigit()
+                }
             } else {
                 Text(subtitleText)
                     .font(.system(size: 12, weight: .medium, design: .rounded))
@@ -2325,6 +1803,82 @@ private struct StorylineRowBody: View {
             .foregroundStyle(Color.primary.opacity(0.68))
             .fixedSize(horizontal: false, vertical: true)
     }
+}
+
+/// A later stay at the same place with nothing in between, shown as part of the first row.
+struct TimelineRepeatedStay: Equatable {
+    /// How many stored stays the row stands for, the first included.
+    var count: Int
+    /// The last of them; nil while it is still open.
+    var departure: Date?
+    var lastArrival: Date
+}
+
+enum TimelineRepeatedStays {
+    /// Folds a stay that directly follows a stay at the same place (no trip between) into
+    /// the first one's row, and returns what each kept row stands for. Nothing is deleted:
+    /// the row says how many stays it covers.
+    static func fold(_ entries: inout [TimelineEntry]) -> [UUID: TimelineRepeatedStay] {
+        var result: [TimelineEntry] = []
+        var repeats: [UUID: TimelineRepeatedStay] = [:]
+        for entry in entries {
+            if case .place(let next) = entry,
+               case .place(let kept)? = result.last,
+               isSamePlace(kept, next) {
+                var repeated = repeats[kept.id] ?? TimelineRepeatedStay(count: 1, departure: kept.departureDate, lastArrival: kept.arrivalDate)
+                repeated.count += 1
+                repeated.departure = next.departureDate
+                repeated.lastArrival = next.arrivalDate
+                repeats[kept.id] = repeated
+                continue
+            }
+            result.append(entry)
+        }
+        entries = result
+        return repeats
+    }
+
+    static func isSamePlace(_ a: VisitPlace, _ b: VisitPlace) -> Bool {
+        guard !a.appearsAsShortStop, !b.appearsAsShortStop else { return false }
+        // A stay the person split, or made, stays two rows.
+        guard a.origin != .manual, b.origin != .manual else { return false }
+        if let left = a.knownPlace?.id, let right = b.knownPlace?.id { return left == right }
+        // Same name on the row, and close enough that the name is not a coincidence.
+        let distance = CLLocation(latitude: a.latitude, longitude: a.longitude)
+            .distance(from: CLLocation(latitude: b.latitude, longitude: b.longitude))
+        return distance < 500 && rowTitle(a) == rowTitle(b)
+    }
+
+    private static func rowTitle(_ place: VisitPlace) -> String {
+        let known = place.knownPlace?.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return known.isEmpty ? place.displayTitle : known
+    }
+}
+
+/// How a stay row reads its length.
+enum TimelineStayPresentation {
+    /// "Stayed 2h 2m", or "In progress" for an open stay. While a trip is being followed,
+    /// an open stay that began before it reads as ended when the trip set off.
+    static func subtitle(
+        arrival: Date,
+        departure: Date?,
+        followedTripStart: Date?,
+        repeated: TimelineRepeatedStay?
+    ) -> String {
+        let end = repeated.map { $0.departure } ?? departure
+        let closedAt = end ?? followedTripStart.flatMap { $0 > arrival ? $0 : nil }
+        guard let closedAt else { return String(localized: "In progress") }
+        let stayed = String(localized: "Stayed \(DurationFormatter.text(for: closedAt.timeIntervalSince(arrival)))")
+        guard let repeated, repeated.count > 1 else { return stayed }
+        return String(localized: "\(stayed) · \(repeated.count) stays recorded")
+    }
+}
+
+extension EnvironmentValues {
+    /// When today's followed trip began, while one is under way.
+    @Entry var timelineFollowedTripStart: Date? = nil
+    /// Rows that stand for several back-to-back stays at one place.
+    @Entry var timelineRepeatedStays: [UUID: TimelineRepeatedStay] = [:]
 }
 
 /// When a stay still goes by a street address or coordinates.
@@ -2382,7 +1936,8 @@ enum TimelineEntry: Identifiable {
         case .move(let segment):
             return "move-\(segment.id.uuidString)"
         case .liveRoute(let snapshot):
-            return "live-\(snapshot.id)"
+            // Stable while fixes arrive, so the row and its selection survive each one.
+            return "live-\(Int(snapshot.startDate.timeIntervalSince1970))"
         case .start(let place, let timestamp):
             return "start-\(place.id.uuidString)-\(timestamp.timeIntervalSince1970)"
         case .sample(let location, _, _):
@@ -2421,7 +1976,7 @@ enum TimelineEntry: Identifiable {
         case .move(let segment):
             return .move(segment.id)
         case .liveRoute(let snapshot):
-            return .liveRoute(snapshot.id)
+            return .liveRoute("live-\(Int(snapshot.startDate.timeIntervalSince1970))")
         case .start(let place, _):
             return .place(place.id)
         case .sample(let location, _, _):
@@ -2441,7 +1996,7 @@ enum TimelineEntry: Identifiable {
         case .move(let segment):
             return segment.timelineStartDate
         case .liveRoute(let snapshot):
-            return snapshot.latestDate
+            return snapshot.startDate
         case .start(_, let timestamp):
             return timestamp
         case .sample(let location, _, _):
@@ -2458,7 +2013,7 @@ enum TimelineEntry: Identifiable {
         case .move(let segment):
             return Self.timeString(from: segment.timelineStartDate)
         case .liveRoute(let snapshot):
-            return Self.timeString(from: snapshot.latestDate)
+            return Self.timeString(from: snapshot.startDate)
         case .start(_, let timestamp):
             return Self.timeString(from: timestamp)
         case .sample(let location, _, _):
@@ -2474,8 +2029,8 @@ enum TimelineEntry: Identifiable {
             return place.origin == .photoInferred ? "camera.fill" : "mappin.circle.fill"
         case .move(let segment):
             return segment.transportMode.symbolName
-        case .liveRoute:
-            return "location.fill.viewfinder"
+        case .liveRoute(let snapshot):
+            return TimelineLiveTrip.iconName(for: snapshot)
         case .start:
             return "sunrise.fill"
         case .sample:
@@ -2491,8 +2046,8 @@ enum TimelineEntry: Identifiable {
             return MovesPalette.place
         case .move(let segment):
             return segment.routeDisplayTint
-        case .liveRoute:
-            return MovesPalette.routeTracking
+        case .liveRoute(let snapshot):
+            return TimelineLiveTrip.tint(for: snapshot)
         case .start:
             return MovesPalette.start
         case .sample:
@@ -2610,7 +2165,7 @@ enum TimelineEntry: Identifiable {
             if snapshot.isFollowedTrip {
                 return snapshot.sampleCount == 0
                     ? String(localized: "Just set off")
-                    : "\(duration)   \(distance)"
+                    : TimelineLiveTrip.progressText(for: snapshot, now: snapshot.latestDate)
             }
 
             if snapshot.sampleCount == 0 {
@@ -2662,10 +2217,9 @@ enum TimelineEntry: Identifiable {
 
             return details.isEmpty ? nil : details.joined(separator: "   ")
         case .liveRoute(let snapshot):
+            if snapshot.isFollowedTrip { return nil }
             if snapshot.sampleCount == 0 {
-                return snapshot.isFollowedTrip
-                    ? nil
-                    : String(localized: "Tracking will start as soon as GPS provides the first fix.")
+                return String(localized: "Tracking will start as soon as GPS provides the first fix.")
             }
             return String(localized: "Last update \(snapshot.latestDate.formatted(date: .omitted, time: .shortened))")
         case .sample(_, let sampleCount, _):
@@ -2716,54 +2270,3 @@ struct PlaceMarker: Identifiable {
     let coordinate: CLLocationCoordinate2D
 }
 
-/// Shares bounded base-map snapshots across views. Route overlays are drawn fresh, so an edit
-/// cannot return a stale route. The last cancelled consumer stops MapKit's outstanding work.
-@MainActor
-private final class TimelineMapSnapshotPool {
-    static let shared = TimelineMapSnapshotPool()
-    private struct Pending {
-        let task: Task<MKMapSnapshotter.Snapshot, Error>
-        var consumers: Set<UUID>
-    }
-    private var pending: [String: Pending] = [:]
-    private let cache = NSCache<NSString, MKMapSnapshotter.Snapshot>()
-    private init() { cache.countLimit = 16; cache.totalCostLimit = 40 * 1024 * 1024 }
-    func snapshot(options: MKMapSnapshotter.Options) async throws -> MKMapSnapshotter.Snapshot {
-        let r = options.region
-        let style = UITraitCollection.current.userInterfaceStyle.rawValue
-        let key = "\(r.center.latitude)|\(r.center.longitude)|\(r.span.latitudeDelta)|\(r.span.longitudeDelta)|\(options.size.width)|\(options.size.height)|\(options.scale)|\(style)"
-        if let cached = cache.object(forKey: key as NSString) { return cached }
-        let consumer = UUID()
-        let task: Task<MKMapSnapshotter.Snapshot, Error>
-        if var work = pending[key] {
-            work.consumers.insert(consumer)
-            pending[key] = work
-            task = work.task
-        } else {
-            task = Task {
-                try Task.checkCancellation()
-                let snapshotter = MKMapSnapshotter(options: options)
-                return try await withTaskCancellationHandler {
-                    try Task.checkCancellation()
-                    return try await snapshotter.start()
-                } onCancel: { snapshotter.cancel() }
-            }
-            pending[key] = Pending(task: task, consumers: [consumer])
-        }
-        defer { release(key, consumer) }
-        return try await withTaskCancellationHandler {
-            let snapshot = try await task.value
-            try Task.checkCancellation()
-            let cost = Int(snapshot.image.size.width * snapshot.image.size.height * snapshot.image.scale * snapshot.image.scale * 4)
-            cache.setObject(snapshot, forKey: key as NSString, cost: cost)
-            return snapshot
-        } onCancel: {
-            Task { @MainActor in self.release(key, consumer) }
-        }
-    }
-    private func release(_ key: String, _ consumer: UUID) {
-        guard var work = pending[key], work.consumers.remove(consumer) != nil else { return }
-        if work.consumers.isEmpty { pending[key] = nil; work.task.cancel() }
-        else { pending[key] = work }
-    }
-}

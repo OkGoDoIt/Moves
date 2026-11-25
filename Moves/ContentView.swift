@@ -3,6 +3,7 @@ import CoreData
 import CoreLocation
 import CoreTransferable
 import Foundation
+import OSLog
 import SwiftData
 import SwiftUI
 import UniformTypeIdentifiers
@@ -379,10 +380,57 @@ struct ContentView: View {
     /// The page width is changing (rotation, a resize); positions reported meanwhile are not swipes.
     @State private var isPagerResizing = false
     @State private var pagerWidth = 0
+    @State private var pagerRest = PagerRest()
 
     /// Every calendar day, keyed by its stable day key. The set of pages never changes
     /// while a swipe is in flight, so the pager always settles on exactly one page.
     private var dayPager: some View {
+        ScrollViewReader { proxy in
+            dayPagerScrollView
+                .onScrollPhaseChange { _, phase in
+                    isPagerMoving = phase != .idle
+                    if phase == .idle {
+                        // A swipe interrupted part-way (a redraw landing mid-swipe) can leave
+                        // the pager resting between two days. It never stays there.
+                        if settlePagerIfBetweenPages(proxy) { return }
+                        commitPagerPosition()
+                        returnToTodayIfRequested()
+                    }
+                }
+        }
+    }
+
+    /// Where the pager rests. A plain object, so following the scroll redraws nothing.
+    private final class PagerRest {
+        var offset: CGFloat = 0
+        var pageWidth: CGFloat = 0
+    }
+
+    private struct PagerOffset: Equatable {
+        var offset: CGFloat
+        var pageWidth: CGFloat
+    }
+
+    /// Scrolls to the nearest day when the pager has stopped between two. Returns whether it did.
+    private func settlePagerIfBetweenPages(_ proxy: ScrollViewProxy) -> Bool {
+        let width = pagerRest.pageWidth
+        guard isPagerPositioned, !isPagerResizing, width > 0 else { return false }
+        let position = pagerRest.offset / width
+        let nearest = position.rounded()
+        guard abs(position - nearest) > 0.02 else { return false }
+        let index = Int(nearest)
+        guard dayTimelines.indices.contains(index) else { return false }
+        Self.pagerLog.notice("Pager rested between days at \(position, format: .fixed(precision: 2)); settling on the nearest")
+        let key = dayTimelines[index].dayKey
+        withAnimation(.snappy(duration: 0.25)) {
+            proxy.scrollTo(key, anchor: .center)
+        }
+        return true
+    }
+
+    private static let pagerLog = Logger(subsystem: MovesAppIdentity.bundleIdentifier, category: "Timeline")
+
+    private var dayPagerScrollView: some View {
         ScrollView(.horizontal) {
             LazyHStack(spacing: 0) {
                 ForEach(dayTimelines, id: \.dayKey) { day in
@@ -396,6 +444,19 @@ struct ContentView: View {
             }
             .scrollTargetLayout()
         }
+        .onScrollGeometryChange(for: PagerOffset.self) { geometry in
+            PagerOffset(
+                offset: geometry.contentOffset.x + geometry.contentInsets.leading,
+                pageWidth: geometry.containerSize.width
+            )
+        } action: { _, rest in
+            pagerRest.offset = rest.offset
+            pagerRest.pageWidth = rest.pageWidth
+        }
+        // In landscape the side safe areas made each page narrower than the pager, so the
+        // next day showed in the margins. Pages span the full width; each page pads its own
+        // content inside the safe area.
+        .ignoresSafeArea(.container, edges: .horizontal)
         // Days added before the first one (demo seeding, an import) would leave the scroll
         // view unable to page back to them, so it is rebuilt on the selected day instead.
         // A new width (rotation) rebuilds it too: the old offset would leave it between
@@ -408,13 +469,6 @@ struct ContentView: View {
         .scrollTargetBehavior(.viewAligned(limitBehavior: .alwaysByOne))
         .scrollPosition(id: $pagerDayKey, anchor: .center)
         .scrollIndicators(.hidden)
-        .onScrollPhaseChange { _, phase in
-            isPagerMoving = phase != .idle
-            if phase == .idle {
-                commitPagerPosition()
-                returnToTodayIfRequested()
-            }
-        }
         .onChange(of: pagerDayKey) { _, _ in
             // The position can arrive just after the pager reports that it is idle.
             if !isPagerMoving { commitPagerPosition() }
@@ -538,6 +592,7 @@ struct ContentView: View {
 
                     if !dayTimelines.isEmpty {
                         dayPager
+                            .timelineDayMapHost()
                     }
                 }
                 

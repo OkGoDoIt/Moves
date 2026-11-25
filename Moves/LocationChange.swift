@@ -1686,7 +1686,9 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         lastHeartbeatAt = now
         let lastFix = lastDeliveredFixAt.map { "\(Int(now.timeIntervalSince($0))) s ago" } ?? "none yet"
         let appState = UIApplication.shared.applicationState == .active ? "open" : "background"
-        let gap = sinceLast.map { "\(Int($0)) s" } ?? "first"
+        // Memory is here because a large app is the first one iOS ends in the background.
+        let gap = (sinceLast.map { "\(Int($0)) s" } ?? "first")
+            + ", memory \(Int(MapPerformanceProbe.memoryMegabytes())) MB"
         if isMoving {
             Self.captureLog.notice(
                 "Trip heartbeat: \(self.deliveredFixesSinceHeartbeat) fixes from iOS, \(self.fixFilter.acceptedCount) kept this trip, last \(lastFix, privacy: .public), \(self.pendingContinuousFixes.count) buffered, motion \(self.captureMachine.motion.rawValue, privacy: .public), app \(appState, privacy: .public), writes \(self.pipeline.statusDescription, privacy: .public), since last heartbeat \(gap, privacy: .public)"

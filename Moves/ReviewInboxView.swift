@@ -54,7 +54,8 @@ struct ReviewInboxItem: Identifiable {
 }
 
 /// Builds inbox rows from visits and moves. Never a separate queue, and the only count
-/// of what needs a look: anything that shows a number uses `items(...).count`.
+/// of what needs a look: anything that shows a number uses `count(...)`, which always equals
+/// `items(...).count`.
 enum ReviewInboxBuilder {
     static func items(
         visits: [VisitPlace],
@@ -64,7 +65,9 @@ enum ReviewInboxBuilder {
         var items: [ReviewInboxItem] = []
         var seen = Set<UUID>()
 
-        for visit in visits where seen.insert(visit.id).inserted {
+        // `@Query` can keep handing back a stay or trip that an edit just deleted ("Not a
+        // Stop" removes the stay), so the row stayed and the capsule kept counting it.
+        for visit in visits where isLive(visit) && seen.insert(visit.id).inserted {
             switch TimelineReviewHeuristics.question(for: visit, now: now) {
             case .whichPlace:
                 items.append(item(for: visit, section: .places, title: placeTitle(visit),
@@ -77,7 +80,7 @@ enum ReviewInboxBuilder {
             }
         }
 
-        for move in moves where seen.insert(move.id).inserted {
+        for move in moves where isLive(move) && seen.insert(move.id).inserted {
             guard TimelineReviewHeuristics.question(for: move, now: now) == .mode else { continue }
             items.append(
                 ReviewInboxItem(
@@ -97,6 +100,32 @@ enum ReviewInboxBuilder {
         }
 
         return items.sorted { $0.date > $1.date }
+    }
+
+    /// `items(...).count` without building rows (titles, map paths), for the capsule, which
+    /// redraws with the Timeline on every day change.
+    static func count(
+        visits: [VisitPlace],
+        moves: [MoveSegment],
+        now: Date = .now
+    ) -> Int {
+        var seen = Set<UUID>()
+        var count = 0
+        for visit in visits where isLive(visit) && seen.insert(visit.id).inserted {
+            switch TimelineReviewHeuristics.question(for: visit, now: now) {
+            case .whichPlace, .notAStop: count += 1
+            case .mode, nil: break
+            }
+        }
+        for move in moves where isLive(move) && seen.insert(move.id).inserted {
+            if TimelineReviewHeuristics.question(for: move, now: now) == .mode { count += 1 }
+        }
+        return count
+    }
+
+    /// Still in the store: not deleted, and still attached to a context.
+    static func isLive(_ model: some PersistentModel) -> Bool {
+        !model.isDeleted && model.modelContext != nil
     }
 
     /// Two likely modes for a trip, the current guess first when it has one.
@@ -218,7 +247,7 @@ struct ReviewEntryButton: View {
     @Query(ReviewInboxQuery.moves) private var moves: [MoveSegment]
 
     private var count: Int {
-        ReviewInboxBuilder.items(visits: visits, moves: moves).count
+        ReviewInboxBuilder.count(visits: visits, moves: moves)
     }
 
     var body: some View {
