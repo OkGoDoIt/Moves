@@ -22,6 +22,7 @@ struct PlaceMapDetailView: View {
     @State private var camera: MapCameraPosition
     @State private var draftLabel: String
     @State private var draftComment: String
+    @State private var namingModel = PlaceNamingModel()
     @FocusState private var focusedField: Field?
 
     private enum Field: Hashable {
@@ -197,9 +198,22 @@ struct PlaceMapDetailView: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(MovesPalette.place)
             }
-            PlaceNamingSuggestions(visit: place) { candidate in
-                editController?.applyCandidate(candidate, to: place)
-            }
+            PlaceNamingChipRow(
+                model: namingModel,
+                coordinate: place.coordinate,
+                accuracy: place.horizontalAccuracy,
+                onPick: { candidate in
+                    // The pick is the name now, so leaving the field has nothing left to save.
+                    draftLabel = candidate.name
+                    editController?.applyCandidate(candidate, to: place)
+                    focusedField = nil
+                },
+                onUseTyped: { text in
+                    draftLabel = text
+                    saveLabel()
+                    focusedField = nil
+                }
+            )
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .panelSurface()
@@ -237,6 +251,10 @@ struct PlaceMapDetailView: View {
                             .fill(MovesPalette.textFieldBackground.opacity(0.92))
                     )
                     .onSubmit { focusedField = nil }
+                    .onChange(of: draftLabel) { _, text in
+                        // While naming, what is typed narrows the nearby chips above.
+                        if needsName, focusedField == .name { namingModel.fieldQuery = text }
+                    }
                     .accessibilityLabel(String(localized: "Place name"))
 
                 HStack(spacing: 8) {

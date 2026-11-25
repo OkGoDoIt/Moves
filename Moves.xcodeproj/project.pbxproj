@@ -165,6 +165,9 @@
 		F2100001305000010000000B /* ReviewInboxView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2100001305000010000000A /* ReviewInboxView.swift */; };
 		F2100001305000010000000D /* UndoToast.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2100001305000010000000C /* UndoToast.swift */; };
 		F2100001305000010000000F /* NearbyPlaceSuggester.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2100001305000010000000E /* NearbyPlaceSuggester.swift */; };
+		FB00000130500001000000A2 /* PlaceNamingModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB00000130500001000000A1 /* PlaceNamingModel.swift */; };
+		FB00000130500001000000A4 /* PlaceNamingRanking.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB00000130500001000000A3 /* PlaceNamingRanking.swift */; };
+		FB00000130500001000000A6 /* PlaceNamingViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB00000130500001000000A5 /* PlaceNamingViews.swift */; };
 		F21000013050000100000011 /* NearbyPlaceSuggesterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F21000013050000100000010 /* NearbyPlaceSuggesterTests.swift */; };
 		F21100013051000100000001 /* TimelineTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F21100013051000100000000 /* TimelineTabView.swift */; };
 		F21100013051000100000003 /* TimelineTabTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F21100013051000100000002 /* TimelineTabTests.swift */; };
@@ -482,6 +485,9 @@
 		F2100001305000010000000A /* ReviewInboxView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewInboxView.swift; sourceTree = "<group>"; };
 		F2100001305000010000000C /* UndoToast.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UndoToast.swift; sourceTree = "<group>"; };
 		F2100001305000010000000E /* NearbyPlaceSuggester.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NearbyPlaceSuggester.swift; sourceTree = "<group>"; };
+		FB00000130500001000000A1 /* PlaceNamingModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaceNaming/PlaceNamingModel.swift; sourceTree = "<group>"; };
+		FB00000130500001000000A3 /* PlaceNamingRanking.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaceNaming/PlaceNamingRanking.swift; sourceTree = "<group>"; };
+		FB00000130500001000000A5 /* PlaceNamingViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaceNaming/PlaceNamingViews.swift; sourceTree = "<group>"; };
 		F21000013050000100000010 /* NearbyPlaceSuggesterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NearbyPlaceSuggesterTests.swift; sourceTree = "<group>"; };
 		F21100013051000100000000 /* TimelineTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineTabView.swift; sourceTree = "<group>"; };
 		F21100013051000100000002 /* TimelineTabTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineTabTests.swift; sourceTree = "<group>"; };
@@ -690,6 +696,9 @@
 				F2100001305000010000000A /* ReviewInboxView.swift */,
 				F2100001305000010000000C /* UndoToast.swift */,
 				F2100001305000010000000E /* NearbyPlaceSuggester.swift */,
+				FB00000130500001000000A1 /* PlaceNamingModel.swift */,
+				FB00000130500001000000A3 /* PlaceNamingRanking.swift */,
+				FB00000130500001000000A5 /* PlaceNamingViews.swift */,
 				A70000012FF0000100000000 /* MovesShareViews.swift */,
 				A80000012FF0000100000000 /* MovesJumpToDateView.swift */,
 				A90000012FF0000100000000 /* ShareMapAggregate.swift */,
@@ -1405,6 +1414,9 @@
 				F2100001305000010000000B /* ReviewInboxView.swift in Sources */,
 				F2100001305000010000000D /* UndoToast.swift in Sources */,
 				F2100001305000010000000F /* NearbyPlaceSuggester.swift in Sources */,
+				FB00000130500001000000A2 /* PlaceNamingModel.swift in Sources */,
+				FB00000130500001000000A4 /* PlaceNamingRanking.swift in Sources */,
+				FB00000130500001000000A6 /* PlaceNamingViews.swift in Sources */,
 				A70000012FF0000100000001 /* MovesShareViews.swift in Sources */,
 				A80000012FF0000100000001 /* MovesJumpToDateView.swift in Sources */,
 				A90000012FF0000100000001 /* ShareMapAggregate.swift in Sources */,

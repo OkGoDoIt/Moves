@@ -3,7 +3,7 @@ import Foundation
 import MapKit
 import SwiftData
 
-/// A nearby name the user can pick in the rename sheet.
+/// A nearby name the person can pick when naming a stay.
 struct NearbyPlaceCandidate: Identifiable, Equatable {
     /// Whether the candidate is already a learned place or an Apple search hit.
     enum Source: Equatable {
@@ -19,6 +19,9 @@ struct NearbyPlaceCandidate: Identifiable, Equatable {
     var longitude: Double
     var source: Source
     var confirmedVisitCount: Int
+    /// Apple's point-of-interest category (`MKPointOfInterestCategory.rawValue`) for a
+    /// search hit, or the stored `KnownPlace.category` for a learned place.
+    var category: String? = nil
 }
 
 /// A map search result that tests can inject without calling `MKLocalSearch`.
@@ -27,36 +30,102 @@ struct NearbySearchHit: Equatable, Sendable {
     var subtitle: String?
     var latitude: Double
     var longitude: Double
+    /// `MKPointOfInterestCategory.rawValue`, when Apple gave one.
+    var category: String? = nil
+}
+
+/// What naming needs from a `KnownPlace`, copied out so a lookup never holds a model
+/// across an await (see Store safety in `CLAUDE.md`).
+struct NearbyKnownPlace: Equatable, Sendable {
+    var id: UUID
+    var name: String
+    var latitude: Double
+    var longitude: Double
+    var footprintRadius: Double
+    var confirmedVisitCount: Int
+    var locality: String?
+    var category: String?
+    var rejectedAutoLabels: [String]
+
+    init(_ place: KnownPlace) {
+        id = place.id
+        name = place.name
+        latitude = place.centerLatitude
+        longitude = place.centerLongitude
+        footprintRadius = place.footprintRadius
+        confirmedVisitCount = place.confirmedVisitCount
+        locality = place.locality
+        category = place.category
+        rejectedAutoLabels = place.rejectedAutoLabels
+    }
 }
 
 /// Looks up Apple Places / addresses around a coordinate.
 protocol LocalPlaceSearching: Sendable {
     func search(near coordinate: CLLocationCoordinate2D, query: String?) async throws -> [NearbySearchHit]
+    /// The same lookup with an explicit reach: the points-of-interest radius when there
+    /// is no query, the region a typed query is biased to when there is one.
+    func search(
+        near coordinate: CLLocationCoordinate2D,
+        query: String?,
+        radius: CLLocationDistance
+    ) async throws -> [NearbySearchHit]
+}
+
+extension LocalPlaceSearching {
+    func search(
+        near coordinate: CLLocationCoordinate2D,
+        query: String?,
+        radius: CLLocationDistance
+    ) async throws -> [NearbySearchHit] {
+        try await search(near: coordinate, query: query)
+    }
 }
 
 /// Production searcher wrapping `MKLocalSearch` / points-of-interest requests.
 struct MapKitLocalPlaceSearcher: LocalPlaceSearching {
+    /// A typed result farther than this is another town, never this stay.
+    static let farthestTypedResult: CLLocationDistance = 25_000
+
+    /// The background name fill's lookup: 250 m, nothing past 1.25× that.
     func search(near coordinate: CLLocationCoordinate2D, query: String?) async throws -> [NearbySearchHit] {
+        let reach = NearbyPlaceSuggester.searchRadius
+        let hits = try await search(near: coordinate, query: query, radius: reach)
+        let origin = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+        return hits.filter {
+            origin.distance(from: CLLocation(latitude: $0.latitude, longitude: $0.longitude)) <= reach * 1.25
+        }
+    }
+
+    func search(
+        near coordinate: CLLocationCoordinate2D,
+        query: String?,
+        radius: CLLocationDistance
+    ) async throws -> [NearbySearchHit] {
         let trimmed = query?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let response: MKLocalSearch.Response
+        let search: MKLocalSearch
         if trimmed.isEmpty {
-            let request = MKLocalPointsOfInterestRequest(
-                center: coordinate,
-                radius: NearbyPlaceSuggester.searchRadius
-            )
-            response = try await MKLocalSearch(request: request).start()
+            search = MKLocalSearch(request: MKLocalPointsOfInterestRequest(center: coordinate, radius: radius))
         } else {
             let request = MKLocalSearch.Request()
             request.naturalLanguageQuery = trimmed
-            request.resultTypes = [.pointOfInterest, .address]
+            request.resultTypes = [.pointOfInterest]
             request.region = MKCoordinateRegion(
                 center: coordinate,
-                latitudinalMeters: NearbyPlaceSuggester.searchRadius * 2,
-                longitudinalMeters: NearbyPlaceSuggester.searchRadius * 2
+                latitudinalMeters: radius * 2,
+                longitudinalMeters: radius * 2
             )
-            response = try await MKLocalSearch(request: request).start()
+            search = MKLocalSearch(request: request)
         }
+        let handle = LocalSearchHandle(search: search)
+        let response = try await withTaskCancellationHandler {
+            try await handle.search.start()
+        } onCancel: {
+            handle.search.cancel()
+        }
+        try Task.checkCancellation()
 
+        let reach = trimmed.isEmpty ? radius * 1.25 : Self.farthestTypedResult
         let origin = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
         return response.mapItems.compactMap { item in
             let name = item.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -65,12 +134,13 @@ struct MapKitLocalPlaceSearcher: LocalPlaceSearching {
             let distance = origin.distance(
                 from: CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
             )
-            guard distance <= NearbyPlaceSuggester.searchRadius * 1.25 else { return nil }
+            guard distance <= reach else { return nil }
             return NearbySearchHit(
                 name: name,
                 subtitle: Self.subtitle(of: item),
                 latitude: coordinate.latitude,
-                longitude: coordinate.longitude
+                longitude: coordinate.longitude,
+                category: item.pointOfInterestCategory?.rawValue
             )
         }
     }
@@ -88,14 +158,33 @@ struct MapKitLocalPlaceSearcher: LocalPlaceSearching {
     }
 }
 
-/// Merges learned places with Apple search hits for the rename sheet.
+/// Lets a cancellation handler reach the search it has to stop.
+private final class LocalSearchHandle: @unchecked Sendable {
+    let search: MKLocalSearch
+
+    init(search: MKLocalSearch) {
+        self.search = search
+    }
+}
+
+/// Merges learned places with Apple search hits into a handful of best guesses.
 ///
-/// Known places within 250 m come first (most confirmed visits, then nearest).
-/// Apple POIs fill the remaining slots. Names the user has rejected at nearby
-/// learned places are omitted.
+/// Learned places within 250 m come first: ones whose footprint holds the stay, then
+/// most confirmed visits, then nearest. Apple places fill the remaining slots, ranked by
+/// `PlaceNamingRanking.score`: close relative to how precise the stay is, and of a kind
+/// people name stays after. Near-identical names appear once, and names the person
+/// rejected at a nearby learned place are left out.
 struct NearbyPlaceSuggester {
+    /// Reach for learned places; also used by the background name fill and same-name lookups.
     static let searchRadius: CLLocationDistance = 250
     static let maximumCandidates = 5
+    /// The Choose a Place list asks Apple for everything this far out first…
+    static let listRadius: CLLocationDistance = 300
+    /// …and this far when the first pass found fewer than `listTarget` places.
+    static let widenedListRadius: CLLocationDistance = 600
+    static let listTarget = 15
+    /// A typed search is biased to this radius around the stay.
+    static let typedSearchRadius: CLLocationDistance = 2_000
 
     var searcher: any LocalPlaceSearching
 
@@ -134,82 +223,66 @@ struct NearbyPlaceSuggester {
         )
     }
 
-    /// Pure merge used by tests and by the sheet's two-phase load (known places first).
+    /// Pure merge used by tests and by the two-phase load (known places first).
     static func merge(
         visitCoordinate: CLLocationCoordinate2D,
         knownPlaces: [KnownPlace],
         searchHits: [NearbySearchHit],
         query: String?,
-        limit: Int = maximumCandidates
+        limit: Int = maximumCandidates,
+        accuracy: CLLocationDistance = 0
     ) -> [NearbyPlaceCandidate] {
-        let origin = CLLocation(latitude: visitCoordinate.latitude, longitude: visitCoordinate.longitude)
-        let trimmedQuery = query?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-
-        let nearbyKnown = knownPlaces.filter { place in
-            origin.distance(
-                from: CLLocation(latitude: place.centerLatitude, longitude: place.centerLongitude)
-            ) <= searchRadius
-        }
-
-        let rejected = Set(
-            nearbyKnown
-                .flatMap(\.rejectedAutoLabels)
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
-                .filter { !$0.isEmpty }
+        merge(
+            visitCoordinate: visitCoordinate,
+            known: knownPlaces.map(NearbyKnownPlace.init),
+            searchHits: searchHits,
+            query: query,
+            limit: limit,
+            accuracy: accuracy
         )
+    }
 
-        func matchesQuery(_ name: String) -> Bool {
-            guard !trimmedQuery.isEmpty else { return true }
-            return name.localizedCaseInsensitiveContains(trimmedQuery)
-        }
-
-        let knownCandidates: [NearbyPlaceCandidate] = nearbyKnown.compactMap { place in
-            let name = place.name.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !name.isEmpty, matchesQuery(name) else { return nil }
-            let distance = origin.distance(
-                from: CLLocation(latitude: place.centerLatitude, longitude: place.centerLongitude)
-            )
-            return NearbyPlaceCandidate(
-                id: "known-\(place.id.uuidString)",
-                name: name,
-                subtitle: place.locality,
-                distanceMeters: distance,
-                latitude: place.centerLatitude,
-                longitude: place.centerLongitude,
-                source: .knownPlace(id: place.id),
-                confirmedVisitCount: place.confirmedVisitCount
-            )
-        }
+    static func merge(
+        visitCoordinate: CLLocationCoordinate2D,
+        known: [NearbyKnownPlace],
+        searchHits: [NearbySearchHit],
+        query: String?,
+        limit: Int = maximumCandidates,
+        accuracy: CLLocationDistance = 0
+    ) -> [NearbyPlaceCandidate] {
+        let reach = PlaceNamingRanking.stayReach(accuracy: accuracy)
+        let knownCandidates = PlaceNamingRanking.knownCandidates(
+            known,
+            origin: visitCoordinate,
+            within: searchRadius,
+            query: query
+        )
         .sorted { lhs, rhs in
-            if lhs.confirmedVisitCount != rhs.confirmedVisitCount {
-                return lhs.confirmedVisitCount > rhs.confirmedVisitCount
+            let lhsHolds = lhs.distanceMeters <= (lhs.footprint ?? 0) + reach
+            let rhsHolds = rhs.distanceMeters <= (rhs.footprint ?? 0) + reach
+            if lhsHolds != rhsHolds { return lhsHolds }
+            if lhs.candidate.confirmedVisitCount != rhs.candidate.confirmedVisitCount {
+                return lhs.candidate.confirmedVisitCount > rhs.candidate.confirmedVisitCount
             }
             return lhs.distanceMeters < rhs.distanceMeters
         }
+        .map(\.candidate)
 
-        let knownNames = Set(knownCandidates.map { $0.name.lowercased() })
-
-        let searchCandidates: [NearbyPlaceCandidate] = searchHits.compactMap { hit in
-            let name = hit.name.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !name.isEmpty, matchesQuery(name) else { return nil }
-            let lowered = name.lowercased()
-            guard !knownNames.contains(lowered), !rejected.contains(lowered) else { return nil }
-            let distance = origin.distance(
-                from: CLLocation(latitude: hit.latitude, longitude: hit.longitude)
-            )
-            guard distance <= searchRadius * 1.25 else { return nil }
-            return NearbyPlaceCandidate(
-                id: "search-\(String(format: "%.5f", hit.latitude))-\(String(format: "%.5f", hit.longitude))-\(lowered)",
-                name: name,
-                subtitle: hit.subtitle,
-                distanceMeters: distance,
-                latitude: hit.latitude,
-                longitude: hit.longitude,
-                source: .search,
-                confirmedVisitCount: 0
-            )
+        let searchCandidates = PlaceNamingRanking.searchCandidates(
+            searchHits,
+            origin: visitCoordinate,
+            within: searchRadius * 1.25,
+            query: query,
+            known: known,
+            excludingNames: knownCandidates.map(\.name)
+        )
+        .sorted { lhs, rhs in
+            let lhsScore = PlaceNamingRanking.score(lhs, accuracy: accuracy)
+            let rhsScore = PlaceNamingRanking.score(rhs, accuracy: accuracy)
+            if lhsScore != rhsScore { return lhsScore < rhsScore }
+            if lhs.distanceMeters != rhs.distanceMeters { return lhs.distanceMeters < rhs.distanceMeters }
+            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
         }
-        .sorted { $0.distanceMeters < $1.distanceMeters }
 
         var combined = Array(knownCandidates.prefix(limit))
         if combined.count < limit {

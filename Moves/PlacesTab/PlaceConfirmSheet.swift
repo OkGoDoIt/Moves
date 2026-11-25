@@ -19,12 +19,11 @@ struct PlaceConfirmForm: View {
 
     @State private var address: String
     @State private var camera: MapCameraPosition
-    @State private var chips: [NearbyPlaceCandidate] = []
+    @State private var namingModel: PlaceNamingModel
     @State private var chipCategories: [String: String] = [:]
     @State private var existingPlaceID: UUID?
     @State private var nameSource: NameSource = .guess
     @State private var guessedName: String
-    @State private var isLookingUp = false
     @State private var extraCategories: [String] = []
     @State private var confirmCount = 0
     @FocusState private var isNameFocused: Bool
@@ -48,6 +47,7 @@ struct PlaceConfirmForm: View {
         self.onConfirmed = onConfirmed
         self.onNameFocusChange = onNameFocusChange
         self.searcher = searcher
+        _namingModel = State(initialValue: PlaceNamingModel(searcher: searcher))
         _guessedName = State(initialValue: name.wrappedValue)
         _address = State(initialValue: cluster.formattedAddress ?? cluster.address ?? "")
         let meters = max(cluster.spreadRadius * 6, 280)
@@ -153,31 +153,19 @@ struct PlaceConfirmForm: View {
         }
     }
 
-    @ViewBuilder
     private var nearbyChips: some View {
-        if !chips.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
-                Text(String(localized: "Nearby"))
-                    .font(.system(.caption, design: .rounded).weight(.semibold))
-                    .foregroundStyle(.secondary)
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(chips) { chip in
-                            PlaceChip(
-                                title: chip.name,
-                                systemImage: nil,
-                                isSelected: nameSource == .chip(chip.id)
-                            ) {
-                                applyChip(chip)
-                            }
-                        }
-                    }
-                }
-                .scrollClipDisabled()
-            }
-        } else if isLookingUp {
-            ProgressView()
-                .frame(maxWidth: .infinity)
+        VStack(alignment: .leading, spacing: 8) {
+            Text(String(localized: "Nearby"))
+                .font(.system(.caption, design: .rounded).weight(.semibold))
+                .foregroundStyle(.secondary)
+            PlaceNamingChipRow(
+                model: namingModel,
+                coordinate: cluster.coordinate,
+                accuracy: cluster.spreadRadius,
+                selectedID: { if case .chip(let id) = nameSource { return id } else { return nil } }(),
+                onPick: applyChip,
+                onUseTyped: useTypedName
+            )
         }
     }
 
@@ -205,6 +193,7 @@ struct PlaceConfirmForm: View {
                 name = newValue
                 nameSource = .typed
                 existingPlaceID = nil
+                namingModel.fieldQuery = newValue
             }
         )
     }
@@ -256,12 +245,18 @@ struct PlaceConfirmForm: View {
         }
     }
 
+    /// "Use “…”" in Choose a Place: the text exactly as typed is the person's own name.
+    private func useTypedName(_ text: String) {
+        name = text
+        nameSource = .typed
+        existingPlaceID = nil
+        isNameFocused = false
+    }
+
     private func refreshLookup() async {
-        isLookingUp = true
-        defer { isLookingUp = false }
         let coordinate = cluster.coordinate
         let known = (try? SwiftDataTimelineRepository(modelContext: modelContext)
-            .knownPlaces(near: coordinate, within: NearbyPlaceSuggester.searchRadius)) ?? []
+            .knownPlaces(near: coordinate, within: NearbyPlaceSuggester.listRadius)) ?? []
         // Copy what the chips need now; the rows may change while the lookups run.
         var categories: [String: String] = [:]
         var extras = Set<String>()
@@ -285,16 +280,9 @@ struct PlaceConfirmForm: View {
             }
         }
 
-        let suggester = NearbyPlaceSuggester(searcher: searcher)
-        let merged = await suggester.suggestions(
-            near: coordinate,
-            knownPlaces: known,
-            query: nil,
-            limit: 8
-        )
+        await namingModel.prepare(near: coordinate, accuracy: cluster.spreadRadius, modelContext: modelContext)
         guard !Task.isCancelled else { return }
-        chips = merged
-        if nameSource == .guess, PlaceDisplayNamer.meaningful(name) == nil, let first = merged.first {
+        if nameSource == .guess, PlaceDisplayNamer.meaningful(name) == nil, let first = namingModel.defaultChips.first {
             applyChip(first)
             nameSource = .guess
             guessedName = first.name

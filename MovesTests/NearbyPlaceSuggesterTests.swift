@@ -1,5 +1,7 @@
 import CoreLocation
+import MapKit
 import SwiftData
+import UIKit
 import XCTest
 @testable import Moves
 
@@ -95,6 +97,257 @@ final class NearbyPlaceSuggesterTests: XCTestCase {
         )
 
         XCTAssertEqual(candidates.map(\.name), ["Near"])
+    }
+}
+
+/// Choose a Place, the narrowed chips, and the better default guesses.
+@MainActor
+final class PlaceNamingTests: XCTestCase {
+    private let origin = CLLocationCoordinate2D(latitude: 52.5200, longitude: 13.4050)
+
+    /// About `meters` north of the origin.
+    private func north(_ meters: Double) -> Double {
+        origin.latitude + meters / 111_320
+    }
+
+    func testDefaultsPreferAPlaceThatHoldsTheStayAndAKindPeopleNameStaysAfter() {
+        let hits = [
+            NearbySearchHit(name: "Cash Point", subtitle: nil, latitude: north(5), longitude: origin.longitude, category: MKPointOfInterestCategory.atm.rawValue),
+            NearbySearchHit(name: "Garage Level 2", subtitle: nil, latitude: north(8), longitude: origin.longitude, category: MKPointOfInterestCategory.parking.rawValue),
+            NearbySearchHit(name: "Pasta & Pizza", subtitle: nil, latitude: north(30), longitude: origin.longitude, category: MKPointOfInterestCategory.restaurant.rawValue),
+            NearbySearchHit(name: "Bookshop", subtitle: nil, latitude: north(120), longitude: origin.longitude, category: MKPointOfInterestCategory.store.rawValue),
+            NearbySearchHit(name: "PASTA & PIZZA", subtitle: nil, latitude: north(40), longitude: origin.longitude, category: MKPointOfInterestCategory.restaurant.rawValue),
+        ]
+
+        let chips = NearbyPlaceSuggester.merge(
+            visitCoordinate: origin,
+            known: [],
+            searchHits: hits,
+            query: nil,
+            accuracy: 25
+        )
+
+        // Before: nearest first, so the ATM and the car park led and the restaurant showed twice.
+        XCTAssertEqual(chips.map(\.name), ["Pasta & Pizza", "Bookshop", "Cash Point", "Garage Level 2"])
+    }
+
+    func testListingFiltersAnywhereIgnoringCaseAndAccentsWithOwnPlacesFirst() throws {
+        let (context, _) = try makeContext()
+        let office = insertKnownPlace(in: context, name: "Café Office", latitude: north(60), longitude: origin.longitude, visits: 3)
+        office.rejectedAutoLabels = ["Wrong Cafe"]
+        let home = insertKnownPlace(in: context, name: "Home", latitude: north(10), longitude: origin.longitude, visits: 30)
+        try context.save()
+
+        let nearby = [
+            NearbySearchHit(name: "Blue Cafe", subtitle: "Main St", latitude: north(90), longitude: origin.longitude),
+            NearbySearchHit(name: "CAFÉ OFFICE", subtitle: nil, latitude: north(61), longitude: origin.longitude),
+            NearbySearchHit(name: "Wrong Café", subtitle: nil, latitude: north(20), longitude: origin.longitude),
+            NearbySearchHit(name: "Bakery", subtitle: nil, latitude: north(15), longitude: origin.longitude),
+        ]
+        // Apple's answer for "cafe" may include places whose names lack the word.
+        let typed = [
+            NearbySearchHit(name: "Blue Bottle", subtitle: nil, latitude: north(1_500), longitude: origin.longitude, category: MKPointOfInterestCategory.cafe.rawValue),
+        ]
+        let known = [office, home].map(NearbyKnownPlace.init)
+
+        let everything = PlaceChoiceListing.build(origin: origin, query: "", known: known, nearbyHits: nearby, typedHits: [])
+        XCTAssertEqual(everything.known.map(\.name), ["Home", "Café Office"])
+        XCTAssertEqual(everything.places.map(\.name), ["Bakery", "Blue Cafe"])
+
+        let filtered = PlaceChoiceListing.build(origin: origin, query: "cafe", known: known, nearbyHits: nearby, typedHits: typed)
+        XCTAssertEqual(filtered.known.map(\.name), ["Café Office"])
+        XCTAssertEqual(filtered.places.map(\.name), ["Blue Cafe", "Blue Bottle"])
+        XCTAssertEqual(filtered.narrowedChips(query: "cafe", limit: 5).map(\.name), ["Café Office", "Blue Cafe", "Blue Bottle"])
+
+        let none = PlaceChoiceListing.build(origin: origin, query: "zzz", known: known, nearbyHits: nearby, typedHits: [])
+        XCTAssertTrue(none.isEmpty)
+    }
+
+    func testNarrowedChipsPutWordPrefixesBeforeOtherMatchesAndSameNamesAcrossTownStay() {
+        let nearby = [
+            NearbySearchHit(name: "Costa", subtitle: nil, latitude: north(10), longitude: origin.longitude),
+            NearbySearchHit(name: "Starbucks", subtitle: nil, latitude: north(200), longitude: origin.longitude),
+        ]
+        let typed = [
+            NearbySearchHit(name: "Starbucks", subtitle: nil, latitude: north(2_400), longitude: origin.longitude),
+            NearbySearchHit(name: "Starbucks", subtitle: nil, latitude: north(230), longitude: origin.longitude),
+        ]
+        let listing = PlaceChoiceListing.build(origin: origin, query: "sta", known: [], nearbyHits: nearby, typedHits: typed)
+
+        // The duplicate 30 m away folds away; the one across town stays, with its distance.
+        XCTAssertEqual(listing.places.map(\.name), ["Costa", "Starbucks", "Starbucks"])
+        XCTAssertEqual(listing.places.map { Int(($0.distanceMeters / 100).rounded()) }, [0, 2, 24])
+        XCTAssertEqual(listing.narrowedChips(query: "sta", limit: 2).map(\.name), ["Starbucks", "Starbucks"])
+    }
+
+    func testDistancesReadInThePersonsUnits() {
+        let us = Locale(identifier: "en_US")
+        XCTAssertEqual(PlaceNamingRanking.distanceText(37, locale: us), "120 ft")
+        XCTAssertEqual(PlaceNamingRanking.distanceText(1_200, locale: us), "0.7 mi")
+        let metric = Locale(identifier: "en_AU")
+        XCTAssertEqual(PlaceNamingRanking.distanceText(37, locale: metric), "40 m")
+        XCTAssertEqual(PlaceNamingRanking.distanceText(1_520, locale: metric), "1.5 km")
+    }
+
+    func testEveryCategoryGlyphExists() {
+        let categories: [MKPointOfInterestCategory] = [
+            .restaurant, .cafe, .bakery, .brewery, .winery, .foodMarket, .hotel, .campground, .store, .pharmacy,
+            .hospital, .spa, .laundry, .publicTransport, .airport, .park, .beach, .marina, .fitnessCenter, .swimming,
+            .tennis, .school, .library, .museum, .theater, .movieTheater, .musicVenue, .bank, .gasStation, .evCharger,
+            .parking, .carRental, .postOffice, .police, .zoo, .aquarium, .amusementPark, .hiking,
+        ]
+        for category in categories {
+            let name = PlaceNamingRanking.symbolName(forCategory: category.rawValue)
+            XCTAssertNotNil(UIImage(systemName: name), name)
+        }
+        XCTAssertNotNil(UIImage(systemName: "character.cursor.ibeam"))
+    }
+
+    func testTypedSearchWaitsForAPauseSkipsOneLetterAndReusesEarlierAnswers() async throws {
+        let searcher = ScriptedPlaceSearcher()
+        searcher.answers["starbucks"] = [NearbySearchHit(name: "Starbucks", subtitle: nil, latitude: north(150), longitude: origin.longitude)]
+        let model = makeModel(searcher)
+        await model.prepare(near: origin, accuracy: 20, knownPlaces: [])
+
+        model.fieldQuery = "S"
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertEqual(searcher.typedQueries, [], "one letter never asks Apple")
+
+        model.fieldQuery = "St"
+        model.fieldQuery = "Starbucks"
+        try await waitUntil { model.chips.map(\.name) == ["Starbucks"] }
+        XCTAssertEqual(searcher.typedQueries, ["Starbucks"], "only the text after the pause is searched")
+
+        model.fieldQuery = ""
+        XCTAssertEqual(model.chips, model.defaultChips, "clearing the field restores the guesses")
+
+        model.fieldQuery = "starbucks "
+        XCTAssertEqual(model.chips.map(\.name), ["Starbucks"], "an answer already in hand shows at once")
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertEqual(searcher.typedQueries, ["Starbucks"])
+    }
+
+    func testASlowEarlierAnswerNeverReplacesANewerOne() async throws {
+        let searcher = ScriptedPlaceSearcher()
+        searcher.answers["st"] = [NearbySearchHit(name: "Stale Corner", subtitle: nil, latitude: north(50), longitude: origin.longitude)]
+        searcher.delays["st"] = .milliseconds(400)
+        searcher.answers["sta"] = [NearbySearchHit(name: "Starbucks", subtitle: nil, latitude: north(60), longitude: origin.longitude)]
+        let model = makeModel(searcher)
+        await model.prepare(near: origin, accuracy: 20, knownPlaces: [])
+
+        model.sheetQuery = "St"
+        try await waitUntil { searcher.queries.contains("St") }
+        model.sheetQuery = "Sta"
+        try await waitUntil { model.listing(for: "Sta").places.map(\.name) == ["Starbucks"] }
+
+        // Let the slow "St" answer land; it must not change what "Sta" shows.
+        try await Task.sleep(for: .milliseconds(600))
+        XCTAssertEqual(model.listing(for: model.sheetQuery).places.map(\.name), ["Starbucks"])
+        XCTAssertFalse(model.isSearching("Sta"))
+        XCTAssertFalse(model.isSearching("St"))
+    }
+
+    func testDefaultChipsHoldStillOnceShownAndOwnPlacesLead() async throws {
+        let (context, _) = try makeContext()
+        let gym = insertKnownPlace(in: context, name: "My Gym", latitude: north(20), longitude: origin.longitude, visits: 12)
+        try context.save()
+
+        let searcher = ScriptedPlaceSearcher()
+        searcher.nearby = [NearbySearchHit(name: "Noodle Bar", subtitle: nil, latitude: north(25), longitude: origin.longitude, category: MKPointOfInterestCategory.restaurant.rawValue)]
+        searcher.widened = [NearbySearchHit(name: "Pizza Place", subtitle: nil, latitude: north(10), longitude: origin.longitude, category: MKPointOfInterestCategory.restaurant.rawValue)]
+        let model = makeModel(searcher)
+
+        await model.prepare(near: origin, accuracy: 20, knownPlaces: [gym])
+        let shown = model.defaultChips.map(\.name)
+        XCTAssertEqual(shown, ["My Gym", "Noodle Bar"])
+
+        // Too few nearby, so the list widens; the chips the person is reading do not move.
+        try await waitUntil { model.listing(for: "").places.count == 2 }
+        XCTAssertEqual(model.defaultChips.map(\.name), shown)
+        XCTAssertEqual(searcher.radii, [NearbyPlaceSuggester.listRadius, NearbyPlaceSuggester.widenedListRadius])
+    }
+
+    func testOfflineStillFiltersWhatIsAlreadyKnown() async throws {
+        let (context, _) = try makeContext()
+        let home = insertKnownPlace(in: context, name: "Studio", latitude: north(20), longitude: origin.longitude, visits: 2)
+        try context.save()
+        let searcher = ScriptedPlaceSearcher()
+        searcher.fails = true
+        let model = makeModel(searcher)
+        await model.prepare(near: origin, accuracy: 20, knownPlaces: [home])
+
+        model.sheetQuery = "stu"
+        try await waitUntil { !model.isSearching("stu") && searcher.queries.contains("stu") }
+        XCTAssertEqual(model.listing(for: "stu").known.map(\.name), ["Studio"])
+        XCTAssertEqual(model.chips.map(\.name), ["Studio"])
+    }
+
+    private func makeModel(_ searcher: ScriptedPlaceSearcher) -> PlaceNamingModel {
+        PlaceNamingModel(
+            searcher: searcher,
+            debounce: .milliseconds(60),
+            pacer: PlaceSearchPacer(interval: .zero),
+            cache: PlaceSearchCache()
+        )
+    }
+
+    private func waitUntil(
+        timeout: Duration = .seconds(3),
+        _ condition: () -> Bool,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while !condition() {
+            guard ContinuousClock.now < deadline else {
+                XCTFail("Timed out waiting", file: file, line: line)
+                return
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+}
+
+/// Answers by folded query, after an optional delay it does not cut short when cancelled,
+/// like a network reply already on its way.
+private final class ScriptedPlaceSearcher: LocalPlaceSearching, @unchecked Sendable {
+    private let lock = NSLock()
+    var nearby: [NearbySearchHit] = []
+    var widened: [NearbySearchHit] = []
+    var answers: [String: [NearbySearchHit]] = [:]
+    var delays: [String: Duration] = [:]
+    var fails = false
+    private var recordedQueries: [String?] = []
+    private var recordedRadii: [CLLocationDistance] = []
+
+    var queries: [String?] { lock.withLock { recordedQueries } }
+    var typedQueries: [String] { queries.compactMap { $0 } }
+    var radii: [CLLocationDistance] { lock.withLock { recordedRadii } }
+
+    func search(near coordinate: CLLocationCoordinate2D, query: String?) async throws -> [NearbySearchHit] {
+        try await search(near: coordinate, query: query, radius: NearbyPlaceSuggester.searchRadius)
+    }
+
+    func search(near coordinate: CLLocationCoordinate2D, query: String?, radius: CLLocationDistance) async throws -> [NearbySearchHit] {
+        let key = PlaceNamingRanking.folded(query ?? "")
+        let (delay, answer, shouldFail): (Duration?, [NearbySearchHit], Bool) = lock.withLock {
+            recordedQueries.append(query)
+            if query == nil { recordedRadii.append(radius) }
+            let answer = query == nil
+                ? (radius > NearbyPlaceSuggester.listRadius ? widened : nearby)
+                : answers[key] ?? []
+            return (delays[key], answer, fails && query != nil)
+        }
+        if let delay {
+            let nanoseconds = UInt64(delay.components.attoseconds / 1_000_000_000) + UInt64(delay.components.seconds) * 1_000_000_000
+            await withCheckedContinuation { continuation in
+                DispatchQueue.global().asyncAfter(deadline: .now() + .nanoseconds(Int(nanoseconds))) {
+                    continuation.resume()
+                }
+            }
+        }
+        if shouldFail { throw URLError(.notConnectedToInternet) }
+        return answer
     }
 }
 
