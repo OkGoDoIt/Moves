@@ -1,6 +1,54 @@
-# Moves
+# Moves: Roger Pincombe’s Version
 
-Moves can optionally upload recorded location samples to [Dawarich](https://dawarich.app), [Reitti](https://github.com/dedicatedcode/reitti), [GeoPulse](https://geopulse.cc), [OwnTracks Recorder](https://github.com/owntracks/recorder), and [Traccar](https://www.traccar.org). Configure each destination independently in Settings → Integrations. Cloud and self-hosted URLs are supported, secrets are stored in the iOS Keychain, and local-network HTTP is allowed while remote servers require HTTPS. Automatic uploads only include newly recorded points; uploading existing local history requires a separate confirmation for each destination.
+Moves builds a private, day-by-day timeline of where you were and how you got there, on iPhone, iPad, and Apple Watch.
+
+This is [Roger Pincombe](https://rogerpincombe.com)’s version. It is a fork of the original [Moves](https://github.com/holgerkrupp/Moves) by [Holger Krupp](https://github.com/holgerkrupp) of [Extremely Successful Apps](https://extremelysuccessfulapps.com).
+
+| | This version | The original |
+|---|---|---|
+| By | [Roger Pincombe](https://rogerpincombe.com) | [Holger Krupp](https://github.com/holgerkrupp), [Extremely Successful Apps](https://extremelysuccessfulapps.com) |
+| Source code | [OkGoDoIt/Moves](https://github.com/OkGoDoIt/Moves) | [holgerkrupp/Moves](https://github.com/holgerkrupp/Moves) |
+| Get the app | Build it from source, below | [App Store](https://apps.apple.com/app/id6762114616) · [Website](https://extremelysuccessfulapps.com/moves/) |
+
+The two are developed separately. Please don’t report problems with this version to the original project.
+
+## What This Version Adds
+
+This fork branched from the original in September 2026. Its main additions since then:
+
+- **Four tabs:** Timeline, Map, Places, and Insights
+- **Corrections:** pick a nearby place, edit times, or split and merge items, with Undo and a Review inbox
+- **Places:** names learned from confirmed visits, with visit history and place merging
+- **Trips:** save a date range as a named trip
+- **Photos:** see photos alongside your visits, and fill in past history from photo locations, without changing your library
+- **Imports:** Google Timeline, logs from other tracking apps rebuilt as places and trips, and exploration coverage from Fog of World
+- **Calendar:** copy visit names and times to a dedicated calendar (off by default)
+- **Privacy zones:** hide Home and Work on share cards and exports
+
+The original has also continued to develop, and some of its later work is adapted here. [UPSTREAM.md](UPSTREAM.md) records what has been reviewed and adopted.
+
+## Features
+
+- Daily timeline with places and move segments
+- Transport mode detection (`walking`, `running`, `cycling`, `automotive`, etc.)
+- Automatic place naming (reverse geocoding) plus manual place labels
+- Map previews for places and routes
+- Spotlight search for visited places with deep links back to their timeline day
+- AppIntent-configurable Home Screen, Lock Screen, and accessory widgets
+- A route-tracking Live Activity for the Lock Screen and Dynamic Island
+- Siri, Shortcuts, Spotlight suggestions, and iPhone Action button support through App Intents
+- Apple Watch companion that can record routes
+- Export from Settings:
+  - GPX (`.gpx`)
+  - GeoJSON (`.geojson`)
+  - KML (`.kml`)
+  - CSV (`.csv`, places + moves)
+  - Everything (`.zip`)
+- Background tracking support (visit monitoring + significant location changes)
+
+## Integrations
+
+Moves can optionally upload recorded location samples to [Dawarich](https://dawarich.app), [Reitti](https://github.com/dedicatedcode/reitti), [GeoPulse](https://geopulse.cc), [OwnTracks Recorder](https://github.com/owntracks/recorder), [Traccar](https://www.traccar.org), or your own webhook. Configure each destination independently in Settings → Integrations. Cloud and self-hosted URLs are supported, secrets are stored in the iOS Keychain, and local-network HTTP is allowed while remote servers require HTTPS. Automatic uploads only include newly recorded points; uploading existing local history requires a separate confirmation for each destination.
 
 ## Siri and Shortcuts
 
@@ -23,26 +71,6 @@ result opens the matching day in Moves. The index includes the place name and vi
 but deliberately excludes coordinates and comments. On iOS 27, `IndexedEntityQuery`
 allows Spotlight to request targeted or full reindexing.
 
-Moves is an iOS app that builds a private day-by-day timeline of where you were and how you moved between places.
-
-It uses on-device location + motion signals and stores timeline data locally with SwiftData, with private iCloud sync through CloudKit enabled for backup and device transfer.
-
-## Features
-
-- Daily timeline with places and move segments
-- Transport mode detection (`walking`, `running`, `cycling`, `automotive`, etc.)
-- Automatic place naming (reverse geocoding) plus manual place labels
-- Map previews for places and routes
-- Spotlight search for visited places with deep links back to their timeline day
-- AppIntent-configurable Home Screen, Lock Screen, and accessory widgets
-- A route-tracking Live Activity for the Lock Screen and Dynamic Island
-- Siri, Shortcuts, Spotlight suggestions, and iPhone Action button support through App Intents
-- Export from Settings:
-  - GPX (`.gpx`)
-  - GeoJSON (`.geojson`)
-  - CSV (`.csv`, places + moves)
-- Background tracking support (visit monitoring + significant location changes)
-
 ## Requirements
 
 - Xcode project: `Moves.xcodeproj`
@@ -53,11 +81,14 @@ It uses on-device location + motion signals and stores timeline data locally wit
 
 ## Getting Started
 
-1. Open `Moves.xcodeproj` in Xcode.
-2. Select the `Moves` scheme.
-3. Choose an iPhone simulator or a physical device.
-4. Build and run.
-5. On first launch, allow location access (and motion access when prompted).
+1. Clone this repository: `git clone https://github.com/OkGoDoIt/Moves.git`
+2. Open `Moves.xcodeproj` in Xcode.
+3. Select the `Moves` scheme.
+4. Choose an iPhone simulator or a physical device. For a physical device, first copy
+   `Config/Moves.local.xcconfig.example` to `Config/Moves.local.xcconfig` and fill in your
+   own bundle ID prefix and team.
+5. Build and run.
+6. On first launch, allow location access (and motion access when prompted).
 
 ## How It Works
 
@@ -80,13 +111,23 @@ It uses on-device location + motion signals and stores timeline data locally wit
 ## Project Structure
 
 - `Moves/MovesApp.swift` app entry and model container setup
-- `Moves/ContentView.swift` timeline UI, maps, settings, export logic
+- `Moves/ContentView.swift` timeline UI and day paging
 - `Moves/LocationChange.swift` location capture, motion classification, timeline assembly
 - `Moves/VisitedLocation.swift` models and SwiftData repository
-- `MovesTests/TimelineAssemblerTests.swift` repository and classifier unit tests
+- `Moves/MapTab/`, `Moves/PlacesTab/`, `Moves/InsightsTab/` the other three tabs
+- `Moves/MovesSettingsView.swift` settings and export
+- `MovesTests/` unit tests
+
+[AGENTS.md](AGENTS.md) has the full layout, signing details, and development notes.
 
 ## Running Tests
 
 Use Xcode (`Product > Test`) with the `MovesTests` target.
 
 If you prefer command line, run tests with `xcodebuild test` using your local Xcode setup and a simulator destination.
+
+## Credits
+
+- The original Moves is by [Holger Krupp](https://github.com/holgerkrupp) of [Extremely Successful Apps](https://extremelysuccessfulapps.com).
+- `RouteFileKit`, `FogOfWorldKit`, and [CloudDataPresence](https://github.com/holgerkrupp/CloudDataPresence) also come from that work.
+- This version is by [Roger Pincombe](https://rogerpincombe.com).
