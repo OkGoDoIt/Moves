@@ -216,6 +216,7 @@
 		F911000130F0000100000001 /* DurableImportQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = F911000130F0000100000000 /* DurableImportQueue.swift */; };
 		FA00000130A0000100000001 /* PhotoAsset.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA00000130A0000100000000 /* PhotoAsset.swift */; };
 		FA00000130A0000300000003 /* PhotoFixes.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA00000130A0000300000002 /* PhotoFixes.swift */; };
+		FA00000130A0000300000005 /* OwnDeviceLedger.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA00000130A0000300000004 /* OwnDeviceLedger.swift */; };
 		FA00000130A0000300000001 /* PhotoHistoryImportJob.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA00000130A0000300000000 /* PhotoHistoryImportJob.swift */; };
 		FA00000130A0000100000003 /* PhotoLibraryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA00000130A0000100000002 /* PhotoLibraryService.swift */; };
 		FA00000130A0000100000005 /* PhotoHistoryImporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA00000130A0000100000004 /* PhotoHistoryImporter.swift */; };
@@ -528,6 +529,7 @@
 		F9F0C605BA23B813C5121275 /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		FA00000130A0000100000000 /* PhotoAsset.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoAsset.swift; sourceTree = "<group>"; };
 		FA00000130A0000300000002 /* PhotoFixes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoFixes.swift; sourceTree = "<group>"; };
+		FA00000130A0000300000004 /* OwnDeviceLedger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OwnDeviceLedger.swift; sourceTree = "<group>"; };
 		FA00000130A0000300000000 /* PhotoHistoryImportJob.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoHistoryImportJob.swift; sourceTree = "<group>"; };
 		FA00000130A0000100000002 /* PhotoLibraryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoLibraryService.swift; sourceTree = "<group>"; };
 		FA00000130A0000100000004 /* PhotoHistoryImporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoHistoryImporter.swift; sourceTree = "<group>"; };
@@ -955,6 +957,7 @@
 			children = (
 				FA00000130A0000100000000 /* PhotoAsset.swift */,
 				FA00000130A0000300000002 /* PhotoFixes.swift */,
+				FA00000130A0000300000004 /* OwnDeviceLedger.swift */,
 				FA00000130A0000300000000 /* PhotoHistoryImportJob.swift */,
 				FA00000130A0000100000002 /* PhotoLibraryService.swift */,
 				FA00000130A0000100000004 /* PhotoHistoryImporter.swift */,
@@ -1372,6 +1375,7 @@
 				F90000013090000100000007 /* TripRangeStats.swift in Sources */,
 				FA00000130A0000100000001 /* PhotoAsset.swift in Sources */,
 				FA00000130A0000300000003 /* PhotoFixes.swift in Sources */,
+				FA00000130A0000300000005 /* OwnDeviceLedger.swift in Sources */,
 				FA00000130A0000300000001 /* PhotoHistoryImportJob.swift in Sources */,
 				FA00000130A0000100000003 /* PhotoLibraryService.swift in Sources */,
 				FA00000130A0000100000005 /* PhotoHistoryImporter.swift in Sources */,

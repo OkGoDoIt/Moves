@@ -28,7 +28,7 @@ struct PhotosSettingsCard: View {
                     }
                 }
 
-            Text("Photos you take with this iPhone add their places to your timeline.")
+            Text("A photo you take with this iPhone adds its location to your timeline. Screenshots, saved photos, and photos from other phones in your library are left out.")
                 .font(.system(size: 12, weight: .medium, design: .rounded))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -38,6 +38,10 @@ struct PhotosSettingsCard: View {
                     status: photoLibrary.fixStatus,
                     isChecking: photoLibrary.isCheckingRecentPhotos
                 )
+            }
+
+            if !photoLibrary.ownCameraPeriods.isEmpty {
+                OwnCameraList(periods: photoLibrary.ownCameraPeriods)
             }
 
             Text(accessExplanation)
@@ -72,7 +76,8 @@ struct PhotosSettingsCard: View {
                         PhotoHistoryProgressSummary(
                             job: job,
                             isWorking: photoLibrary.isHistoryImportWorking,
-                            timeRemaining: photoLibrary.historyTimeRemaining
+                            timeRemaining: photoLibrary.historyTimeRemaining,
+                            isReadingLibrary: photoLibrary.isReadingLibrary
                         )
                     }
                 }
@@ -121,6 +126,37 @@ struct PhotosSettingsCard: View {
             guard status == .authorized || status == .limited else { return }
         }
         isShowingImporter = true
+    }
+}
+
+/// The phones recognized as the owner's, newest first, each with the months it was in use.
+struct OwnCameraList: View {
+    let periods: [OwnCameraRoster.Period]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("Your phones")
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+            ForEach(Array(periods.reversed().enumerated()), id: \.offset) { _, period in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(period.model)
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    Spacer(minLength: 8)
+                    Text(Self.months(period))
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private static func months(_ period: OwnCameraRoster.Period) -> String {
+        let style = Date.FormatStyle().month(.abbreviated).year()
+        let from = period.from.formatted(style)
+        let through = period.through.formatted(style)
+        return from == through ? from : "\(from) – \(through)"
     }
 }
 
@@ -176,6 +212,8 @@ struct PhotoHistoryProgressSummary: View {
     let job: PhotoHistoryJob
     let isWorking: Bool
     let timeRemaining: TimeInterval?
+    /// The import is still working out which photos the owner's phone took.
+    var isReadingLibrary = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -184,7 +222,7 @@ struct PhotoHistoryProgressSummary: View {
                     .tint(job.state == .running ? MovesPalette.place : .secondary)
             }
             HStack(spacing: 6) {
-                if job.state == .running, isWorking {
+                if job.state == .running, isWorking || isReadingLibrary {
                     ProgressView()
                         .controlSize(.mini)
                 } else {
@@ -230,7 +268,13 @@ struct PhotoHistoryProgressSummary: View {
     private var headline: String {
         switch job.state {
         case .running:
-            isWorking ? String(localized: "Importing now") : String(localized: "Starting…")
+            if isReadingLibrary {
+                String(localized: "Finding the photos your phone took…")
+            } else if isWorking {
+                String(localized: "Importing now")
+            } else {
+                String(localized: "Starting…")
+            }
         case .paused:
             String(localized: "Paused")
         case .failed:
@@ -374,17 +418,22 @@ struct PhotoHistoryImportSheet: View {
 
         Toggle("Include saved and imported photos", isOn: $includesSavedPhotos)
 
-        Text("Photos you took with your camera are always read. Saved and imported photos can carry someone else's location.")
+        Text("Photos your own phone took are always read. Saved and imported photos can carry someone else's location, and photos from other phones in your library are never read.")
             .font(.system(size: 12, weight: .medium, design: .rounded))
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
 
         if isLoadingPreview {
-            ProgressView("Counting photos…")
+            ProgressView("Finding the photos your phone took…")
         } else if let preview {
             VStack(alignment: .leading, spacing: 4) {
                 Text(preview.geotaggedPhotoCount == 0 ? String(localized: "No photos with a location in these dates") : preview.summary)
                     .font(.system(size: 15, weight: .semibold, design: .rounded))
+                if preview.otherDevicePhotoCount > 0 {
+                    Text("\(preview.otherDevicePhotoCount.formatted(.number)) from other phones in your library left out")
+                        .font(.system(size: 13, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                }
                 if preview.skippedPhotoCount > 0 {
                     Text("\(preview.skippedPhotoCount.formatted(.number)) saved or imported photos left out")
                         .font(.system(size: 13, weight: .medium, design: .rounded))
@@ -409,7 +458,8 @@ struct PhotoHistoryImportSheet: View {
         PhotoHistoryProgressSummary(
             job: job,
             isWorking: photoLibrary.isHistoryImportWorking,
-            timeRemaining: photoLibrary.historyTimeRemaining
+            timeRemaining: photoLibrary.historyTimeRemaining,
+            isReadingLibrary: photoLibrary.isReadingLibrary
         )
 
         switch job.state {
