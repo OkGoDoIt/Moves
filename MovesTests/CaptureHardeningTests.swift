@@ -119,6 +119,48 @@ final class CaptureHardeningTests: XCTestCase {
         XCTAssertEqual(assembler.events, ["rebuild week", "visit"], "The written fixes are not written twice")
     }
 
+    /// From a real evening: a visit's place lookup never came back, and every fix of the
+    /// drive that followed sat in memory behind it until the app was ended.
+    func testFixesAreWrittenPastAJobThatHasStoppedMoving() async {
+        let assembler = RecordingAssembler()
+        assembler.visitDelay = .seconds(2)
+        let pipeline = CaptureIngestPipeline(assembler: assembler, backgroundTime: .unavailable, stallAllowance: 0.1)
+
+        pipeline.visit(CLVisit())
+        pipeline.store([fix(metersEast: 0, at: start, accuracy: 5)], source: .continuous)
+        XCTAssertEqual(assembler.immediateWrites, 0, "A job that has only just started keeps its place in line")
+
+        // Nothing else arrives: the waiting fix is still written once the job has had its time.
+        try? await Task.sleep(for: .milliseconds(400))
+        XCTAssertEqual(assembler.immediateWrites, 1)
+
+        // Fixes that arrive while it is still stuck go straight to the store.
+        pipeline.store([
+            fix(metersEast: 10, at: start.addingTimeInterval(5), accuracy: 5),
+            fix(metersEast: 20, at: start.addingTimeInterval(10), accuracy: 5),
+        ], source: .continuous)
+        XCTAssertEqual(assembler.immediateWrites, 3)
+        XCTAssertEqual(pipeline.fixesWrittenPastStalls, 3)
+
+        // A rebuild asked for now has fixes the stuck job never saw, so it still runs.
+        pipeline.rebuild(.week)
+        await pipeline.drain()
+        XCTAssertEqual(assembler.events, ["visit", "rebuild week"], "Written once, not again when the job finishes")
+    }
+
+    func testAnAnswerThatNeverComesIsGivenUpOn() async {
+        let started = ContinuousClock.now
+        let name: String? = await BoundedWait.run(seconds: 0.1, fallback: nil) {
+            try? await Task.sleep(for: .seconds(30))
+            return "Too late"
+        }
+        XCTAssertNil(name)
+        XCTAssertLessThan(ContinuousClock.now - started, .seconds(5))
+
+        let prompt: String? = await BoundedWait.run(seconds: 5, fallback: nil) { "In time" }
+        XCTAssertEqual(prompt, "In time")
+    }
+
     // MARK: Rebuild coalescing in the assembler
 
     func testARebuildRequestedDuringOneWithNoNewDataDoesNotRunAgain() async throws {
@@ -763,9 +805,10 @@ private final class RecordingAssembler: TimelineAssembler {
     var events: [String] = []
     var immediateWrites = 0
     var rebuildDelay: Duration = .milliseconds(5)
+    var visitDelay: Duration = .milliseconds(20)
 
     func ingestVisit(_ visit: CLVisit) async {
-        try? await Task.sleep(for: .milliseconds(20))
+        try? await Task.sleep(for: visitDelay)
         events.append("visit")
     }
 

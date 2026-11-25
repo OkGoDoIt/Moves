@@ -308,27 +308,36 @@ final class CoreMotionTransportClassifier: MotionClassifier {
             return nil
         }
 
-        return await withCheckedContinuation { continuation in
-            pedometer.queryPedometerData(from: start, to: end) { data, error in
-                guard error == nil else {
-                    continuation.resume(returning: nil)
-                    return
+        let pedometer = pedometer
+        // Core Motion can leave a query unanswered when iOS suspends the app part-way.
+        return await BoundedWait.run(seconds: Self.queryTimeLimit, fallback: nil) {
+            await withCheckedContinuation { continuation in
+                pedometer.queryPedometerData(from: start, to: end) { data, error in
+                    guard error == nil else {
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                    continuation.resume(returning: data?.numberOfSteps.intValue)
                 }
-                continuation.resume(returning: data?.numberOfSteps.intValue)
             }
         }
     }
 
+    private static let queryTimeLimit: TimeInterval = 6
+
     private func queryActivities(from start: Date, to end: Date) async -> [CMMotionActivity]? {
         guard end > start else { return nil }
 
-        return await withCheckedContinuation { continuation in
-            activityManager.queryActivityStarting(from: start, to: end, to: .main) { activities, error in
-                guard error == nil else {
-                    continuation.resume(returning: nil)
-                    return
+        let activityManager = activityManager
+        return await BoundedWait.run(seconds: Self.queryTimeLimit, fallback: nil) {
+            await withCheckedContinuation { continuation in
+                activityManager.queryActivityStarting(from: start, to: end, to: .main) { activities, error in
+                    guard error == nil else {
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                    continuation.resume(returning: activities)
                 }
-                continuation.resume(returning: activities)
             }
         }
     }
@@ -814,7 +823,16 @@ final class DefaultTimelineAssembler: TimelineAssembler {
             print("Failed to reuse a nearby place label: \(error.localizedDescription)")
         }
 
-        if let resolvedName = await placeNameResolver.resolveName(for: place.coordinate) {
+        // A lookup needs the network, and capture runs in the background where a request
+        // can go unanswered. The place keeps no name for now; the backfill names it later.
+        let resolver = placeNameResolver
+        let coordinate = place.coordinate
+        let name = await BoundedWait.run(seconds: 8, fallback: nil) {
+            await resolver.resolveName(for: coordinate)
+        }
+        // The wait may have outlived the stay: a rebuild can remove it meanwhile.
+        guard !place.isDeleted, place.modelContext != nil else { return }
+        if let resolvedName = name {
             do {
                 let nearby = try repository.knownPlaces(
                     near: place.coordinate,
@@ -882,6 +900,15 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
     /// Continuous fixes waiting to be written, so the store is not saved every few seconds.
     private var pendingContinuousFixes: [CLLocation] = []
     private var pendingContinuousSince: Date?
+    /// Fixes iOS delivered since the last heartbeat line, before any filtering.
+    private var deliveredFixesSinceHeartbeat = 0
+    private var lastDeliveredFixAt: Date?
+    private var lastHeartbeatAt: Date?
+    private var heartbeatTask: Task<Void, Never>?
+    private var lastSessionRestartAt: Date?
+    /// The last motion Core Motion was sure of. A second of "unknown" in the middle of a
+    /// walk should not change how the walk is recorded.
+    private var lastDefiniteMotion: (state: CaptureMotionState, at: Date)?
     private var lastStoredSettledFixAt: Date?
     private var appliedConfiguration: CaptureConfiguration?
     private var appliedShowsIndicator = false
@@ -977,6 +1004,7 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         updateBackgroundLocationAllowance()
         if !shouldSkipLiveTracking {
             installLifecycleObservers()
+            startHeartbeat()
             if routeTrackingExpiredWhileAway {
                 // The rebuild that ending it would have run.
                 Self.captureLog.notice("Route tracking ended while Moves was not running; rebuilding")
@@ -1382,7 +1410,7 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
             let configuration = CapturePolicy.configuration(
                 level: captureDetailLevel,
                 phase: captureMachine.phase,
-                motion: captureMachine.motion,
+                motion: profileMotion(now: .now),
                 recentSpeed: fixFilter.lastAccepted?.speed,
                 energy: currentEnergyState,
                 isRouteTrackingActive: false
@@ -1462,6 +1490,8 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
                 "Following a trip: started by \(trigger.rawValue, privacy: .public), motion \(self.captureMachine.motion.rawValue, privacy: .public)"
             )
             storePendingContinuousFixes(reason: "trip started", rebuild: .none, now: now)
+            lastHeartbeatAt = nil
+            deliveredFixesSinceHeartbeat = 0
             fixFilter.beginSession(at: now)
             continuousSessionStartedAt = now
         case .settled(let anchor, let verdict):
@@ -1640,7 +1670,73 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         ) {
             storePendingContinuousFixes(reason: "batch", rebuild: .throttled, now: now)
         }
+        logTripHeartbeat(now: now)
+        restartSilentLocationSessionIfNeeded(now: now)
         handle(captureMachine.tick(now: now), now: now)
+    }
+
+    /// One line a minute while a trip is followed. The gap between two lines shows whether
+    /// the app kept running, and the counts show what iOS delivered and what was kept.
+    private func logTripHeartbeat(now: Date) {
+        guard captureMachine.phase != .off, isFollowingTrips else { return }
+        let isMoving = captureMachine.phase == .moving
+        let sinceLast = lastHeartbeatAt.map { now.timeIntervalSince($0) }
+        // Every minute on a trip, every five at a stop.
+        if let sinceLast, sinceLast < (isMoving ? 60 : 300) { return }
+        lastHeartbeatAt = now
+        let lastFix = lastDeliveredFixAt.map { "\(Int(now.timeIntervalSince($0))) s ago" } ?? "none yet"
+        let appState = UIApplication.shared.applicationState == .active ? "open" : "background"
+        let gap = sinceLast.map { "\(Int($0)) s" } ?? "first"
+        if isMoving {
+            Self.captureLog.notice(
+                "Trip heartbeat: \(self.deliveredFixesSinceHeartbeat) fixes from iOS, \(self.fixFilter.acceptedCount) kept this trip, last \(lastFix, privacy: .public), \(self.pendingContinuousFixes.count) buffered, motion \(self.captureMachine.motion.rawValue, privacy: .public), app \(appState, privacy: .public), writes \(self.pipeline.statusDescription, privacy: .public), since last heartbeat \(gap, privacy: .public)"
+            )
+        } else {
+            Self.captureLog.notice(
+                "Stop heartbeat: \(self.deliveredFixesSinceHeartbeat) fixes from iOS, last \(lastFix, privacy: .public), motion \(self.captureMachine.motion.rawValue, privacy: .public), app \(appState, privacy: .public), writes \(self.pipeline.statusDescription, privacy: .public), since last heartbeat \(gap, privacy: .public)"
+            )
+        }
+        deliveredFixesSinceHeartbeat = 0
+    }
+
+    /// Runs for the life of the process. It only writes log lines, and it does not keep the
+    /// app awake: when iOS suspends the app the lines stop, which is what they are for.
+    private func startHeartbeat() {
+        guard heartbeatTask == nil else { return }
+        heartbeatTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(30))
+                guard !Task.isCancelled, let self else { return }
+                self.logTripHeartbeat(now: .now)
+            }
+        }
+    }
+
+    /// A location session can go quiet while the person is plainly moving. Starting it
+    /// again costs nothing and brings the fixes back.
+    private func restartSilentLocationSessionIfNeeded(now: Date) {
+        guard captureMachine.phase == .moving, isStandardLocationRunning, !isTemporaryRouteTrackingActive,
+              profileMotion(now: now).isMoving
+        else { return }
+        let quietSince = lastDeliveredFixAt ?? continuousSessionStartedAt ?? now
+        guard now.timeIntervalSince(quietSince) >= 90 else { return }
+        if let lastSessionRestartAt, now.timeIntervalSince(lastSessionRestartAt) < 120 { return }
+        lastSessionRestartAt = now
+        Self.captureLog.notice(
+            "No fixes for \(Int(now.timeIntervalSince(quietSince))) s while \(self.captureMachine.motion.rawValue, privacy: .public); restarted location updates"
+        )
+        manager.stopUpdatingLocation()
+        manager.startUpdatingLocation()
+    }
+
+    /// The motion that decides how a trip is recorded: the live one, or the last sure one
+    /// for half a minute after Core Motion stops being sure.
+    private func profileMotion(now: Date) -> CaptureMotionState {
+        let live = captureMachine.motion
+        guard live == .unknown, let last = lastDefiniteMotion,
+              now.timeIntervalSince(last.at) <= 30
+        else { return live }
+        return last.state
     }
 
     private func startMotionUpdatesIfNeeded() {
@@ -1676,6 +1772,11 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
             isLowConfidence: activity.confidence == .low
         )
         let previous = captureMachine.motion
+        if state.isMoving {
+            lastDefiniteMotion = (state, .now)
+        } else if state == .stationary {
+            lastDefiniteMotion = nil
+        }
         guard isFollowingTrips, !isTemporaryRouteTrackingActive else {
             // Route tracking is in charge: remember the motion, but start nothing.
             captureMachine.noteMotion(state)
@@ -2267,6 +2368,8 @@ extension MovesLocationCaptureManager: @preconcurrency CLLocationManagerDelegate
             if departedRecently, !isTemporaryRouteTrackingActive {
                 handle(captureMachine.handleWake(.visitDeparture, location: nil, now: .now))
             }
+            // A visit wakes the app, so it is also a moment to notice a session gone quiet.
+            restartSilentLocationSessionIfNeeded(now: .now)
             // The visit rebuilds the week; the pipeline writes buffered fixes before it.
             storePendingContinuousFixes(reason: "visit", rebuild: .none)
             reconcileThrottle.recordRun(at: .now)
@@ -2291,6 +2394,8 @@ extension MovesLocationCaptureManager: @preconcurrency CLLocationManagerDelegate
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         guard !locations.isEmpty else { return }
 
+        deliveredFixesSinceHeartbeat += locations.count
+        lastDeliveredFixAt = .now
         refreshTemporaryRouteTrackingStateIfNeeded()
 
         let pendingOneShotLocationSource = oneShotRequestGate.takeSource(at: .now)

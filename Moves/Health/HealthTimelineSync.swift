@@ -133,7 +133,9 @@ final class HealthTimelineCacheStore: @unchecked Sendable {
     func replace(_ data: HealthTimelineCacheData) throws {
         let bytes = try JSONEncoder().encode(data)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try bytes.write(to: url, options: [.atomic, .completeFileProtection])
+        // Syncs run in the background with the phone locked, where a fully protected file
+        // cannot be written. The timeline store itself has this same protection.
+        try bytes.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         var target = url
         var values = URLResourceValues()
         values.isExcludedFromBackup = true
