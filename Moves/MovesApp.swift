@@ -241,6 +241,13 @@ private final class MovesRuntime: ObservableObject {
             Task(priority: .utility) { await DiagnosticsLog.shared.start() }
             TimelineSchemaUpgrader.runIfNeeded(container: container)
             TimelineSchemaUpgrader.removeRejectedPhotoStaysIfAny(container: container)
+            // iOS relaunches the app in the background for a location event, with no scene
+            // ever becoming active. Recording must start here too, or a relaunch after the
+            // app was ended only handles that one event and then goes quiet.
+            Task { [captureManager] in
+                await TimelineSchemaUpgrader.waitUntilFinished()
+                await captureManager.start()
+            }
         }
     }
 }
