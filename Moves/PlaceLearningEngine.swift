@@ -954,3 +954,69 @@ extension PlaceLearningEngine {
         return merges
     }
 }
+
+/// Coordinates sorted into a grid, so "everything within reach of here" reads a few cells
+/// instead of all of history.
+///
+/// `indices(near:)` returns every coordinate within `reach` and some a little beyond it;
+/// the caller still measures. Years of stays compared pair by pair is tens of millions of
+/// distances, which is what this avoids.
+struct CoordinateBuckets: Sendable {
+    private struct Cell: Hashable {
+        var row: Int
+        var column: Int
+    }
+
+    /// Shorter than any degree of latitude, so a cell is never narrower than `reach`.
+    private static let metersPerDegree = 110_000.0
+    /// Near the poles a cell spans most of the way round; past this many columns, read all.
+    private static let widestColumnSpan = 64
+
+    private let cellDegrees: Double
+    private let columnCount: Int
+    private let count: Int
+    private var cells: [Cell: [Int]] = [:]
+
+    init(_ coordinates: [CLLocationCoordinate2D], reach: CLLocationDistance) {
+        cellDegrees = max(reach, 1) / Self.metersPerDegree
+        columnCount = max(1, Int((360 / cellDegrees).rounded(.up)))
+        count = coordinates.count
+        for (index, coordinate) in coordinates.enumerated() {
+            cells[cell(for: coordinate), default: []].append(index)
+        }
+    }
+
+    /// Indices of the coordinates that may lie within `reach` of `coordinate`, ascending.
+    func indices(near coordinate: CLLocationCoordinate2D) -> [Int] {
+        guard coordinate.latitude.isFinite, coordinate.longitude.isFinite else { return Array(0..<count) }
+        let center = cell(for: coordinate)
+        let steepestLatitude = min(abs(coordinate.latitude) + cellDegrees, 90) * .pi / 180
+        let shrink = cos(steepestLatitude)
+        guard shrink > 0.001 else { return Array(0..<count) }
+        // One column more than the arithmetic asks for: the last column before the
+        // antimeridian is narrower than the rest.
+        let columnReach = Int((1 / shrink).rounded(.up)) + 1
+        guard 2 * columnReach + 1 <= Self.widestColumnSpan, 2 * columnReach + 1 < columnCount else {
+            return Array(0..<count)
+        }
+        var found: [Int] = []
+        for row in (center.row - 1)...(center.row + 1) {
+            for offset in -columnReach...columnReach {
+                let column = ((center.column + offset) % columnCount + columnCount) % columnCount
+                if let members = cells[Cell(row: row, column: column)] {
+                    found.append(contentsOf: members)
+                }
+            }
+        }
+        return found.sorted()
+    }
+
+    private func cell(for coordinate: CLLocationCoordinate2D) -> Cell {
+        guard coordinate.latitude.isFinite, coordinate.longitude.isFinite else { return Cell(row: 0, column: 0) }
+        let latitude = max(-90, min(90, coordinate.latitude))
+        let longitude = max(-360, min(360, coordinate.longitude))
+        let row = Int((latitude / cellDegrees).rounded(.down))
+        let column = Int(((longitude + 180) / cellDegrees).rounded(.down))
+        return Cell(row: row, column: ((column % columnCount) + columnCount) % columnCount)
+    }
+}

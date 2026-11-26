@@ -594,34 +594,46 @@ enum PlacesIndexBuilder {
         var clusters: [PlacesSuggestedCluster] = []
 
         // Named visits: same name within `namedClusterRadius` of the first one seen.
-        var remainingNamed = named
-        while let seed = remainingNamed.first {
-            remainingNamed.removeFirst()
+        // Each seed is held against the visits that share its name, not against all of
+        // them: ten thousand stays compared pair by pair kept this tab on its spinner.
+        var namedByKey: [String: [Int]] = [:]
+        for (index, entry) in named.enumerated() {
+            namedByKey[entry.key, default: []].append(index)
+        }
+        var namedTaken = Array(repeating: false, count: named.count)
+        for seedIndex in named.indices where !namedTaken[seedIndex] {
+            namedTaken[seedIndex] = true
+            let seed = named[seedIndex]
             var members = [seed.visit]
-            remainingNamed.removeAll { candidate in
-                let belongs = candidate.key == seed.key
-                    && distance(from: seed.visit.coordinate, to: candidate.visit.coordinate) <= namedClusterRadius
-                if belongs { members.append(candidate.visit) }
-                return belongs
+            for candidateIndex in namedByKey[seed.key] ?? [] where !namedTaken[candidateIndex] {
+                let candidate = named[candidateIndex].visit
+                guard distance(from: seed.visit.coordinate, to: candidate.coordinate) <= namedClusterRadius else { continue }
+                namedTaken[candidateIndex] = true
+                members.append(candidate)
             }
             clusters.append(makeCluster(from: members, now: now))
         }
 
         // Street-addressed visits: the longest stay seeds a cluster and gathers
         // everything within `unnamedClusterRadius`, so an overnight stay anchors it.
-        var remainingUnnamed = unnamed.sorted { lhs, rhs in
+        // The grid hands each seed only the stays around it.
+        let orderedUnnamed = unnamed.sorted { lhs, rhs in
             let left = lhs.stayDuration(now: now)
             let right = rhs.stayDuration(now: now)
             if left != right { return left > right }
             return lhs.arrivalDate > rhs.arrivalDate
         }
-        while let seed = remainingUnnamed.first {
-            remainingUnnamed.removeFirst()
+        let unnamedBuckets = CoordinateBuckets(orderedUnnamed.map(\.coordinate), reach: unnamedClusterRadius)
+        var unnamedTaken = Array(repeating: false, count: orderedUnnamed.count)
+        for seedIndex in orderedUnnamed.indices where !unnamedTaken[seedIndex] {
+            unnamedTaken[seedIndex] = true
+            let seed = orderedUnnamed[seedIndex]
             var members = [seed]
-            remainingUnnamed.removeAll { candidate in
-                let belongs = distance(from: seed.coordinate, to: candidate.coordinate) <= unnamedClusterRadius
-                if belongs { members.append(candidate) }
-                return belongs
+            for candidateIndex in unnamedBuckets.indices(near: seed.coordinate) where !unnamedTaken[candidateIndex] {
+                let candidate = orderedUnnamed[candidateIndex]
+                guard distance(from: seed.coordinate, to: candidate.coordinate) <= unnamedClusterRadius else { continue }
+                unnamedTaken[candidateIndex] = true
+                members.append(candidate)
             }
             clusters.append(makeCluster(from: members, now: now))
         }

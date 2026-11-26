@@ -322,6 +322,9 @@ private struct MovesRunningContent: View {
             photoLibraryController.sceneChanged(isActive: newPhase == .active)
             // Leaving and returning are when the log is most worth having on disk.
             Task(priority: .utility) { await DiagnosticsLog.shared.export() }
+            if newPhase == .background {
+                Task(priority: .utility) { await PlaceGeocodeBackfill.stopForegroundTrickle() }
+            }
             if newPhase == .active {
                 DailyTimelineBackup.scheduleNextRun()
                 ShareMapAggregateBackgroundTask.scheduleNextRun()

@@ -5,6 +5,7 @@ import Foundation
 import MapKit
 import OSLog
 import SwiftData
+import UIKit
 
 /// Reverse-geocoded country / city / street for a coordinate.
 struct PlaceGeocodeRegion: Codable, Equatable, Sendable {
@@ -178,6 +179,20 @@ struct PlaceGeocodeCellCache: Sendable {
         return "n:\(latitude)|\(longitude)"
     }
 
+    /// The latitudes and longitudes a key of either kind covers, a hair wider so a
+    /// coordinate on the edge is never left out. Nil for a key in another form.
+    static func bounds(forKey key: String) -> (latitude: ClosedRange<Double>, longitude: ClosedRange<Double>)? {
+        let isNameCell = key.hasPrefix("n:")
+        let scale = isNameCell ? 1_000.0 : 100.0
+        let parts = (isNameCell ? key.dropFirst(2) : Substring(key)).split(separator: "|", omittingEmptySubsequences: false)
+        guard parts.count == 2, let latitude = Int(parts[0]), let longitude = Int(parts[1]) else { return nil }
+        let half = 0.501 / scale
+        return (
+            (Double(latitude) / scale - half)...(Double(latitude) / scale + half),
+            (Double(longitude) / scale - half)...(Double(longitude) / scale + half)
+        )
+    }
+
     static func load(from url: URL = defaultURL()) -> PlaceGeocodeCellCache {
         guard let data = try? Data(contentsOf: url),
               let regions = try? JSONDecoder().decode([String: PlaceGeocodeRegion].self, from: data)
@@ -247,10 +262,21 @@ enum PlaceGeocodeBackfill {
         geocoder: any PlaceReverseGeocoding = MapKitPlaceReverseGeocoder(),
         searcher: (any LocalPlaceSearching)? = MapKitLocalPlaceSearcher()
     ) async {
+        // A tab that first appears while the app is off screen must not start what
+        // leaving the screen stops.
+        guard await MainActor.run(body: { UIApplication.shared.applicationState != .background }) else { return }
         await lock.run {
             _ = await fillMissingNames(in: container, geocoder: geocoder, searcher: searcher)
+            guard !Task.isCancelled else { return }
             await run(in: container, geocoder: geocoder)
         }
+    }
+
+    /// Ends the trickle when the app leaves the screen. Capture keeps the app running in
+    /// the background, and a name a second for hours there is battery spent unseen; the
+    /// next return to the app, or the overnight task, carries on from the cache.
+    static func stopForegroundTrickle() async {
+        await lock.cancel()
     }
 
     /// Reverse-geocodes unlabeled suggested visits (~100 m cells) so the list can show streets / POIs.
@@ -436,7 +462,7 @@ enum PlaceGeocodeBackfill {
     ) throws -> Int {
         guard region.hasAnyValue else { return 0 }
         var changed = 0
-        let visits = try context.fetch(FetchDescriptor<VisitPlace>.live())
+        let visits = try stays(inCell: cellKey, in: context)
         for visit in visits {
             let key = PlaceGeocodeCellCache.nameCellKey(for: visit.coordinate)
             guard key == cellKey else { continue }
@@ -447,6 +473,24 @@ enum PlaceGeocodeBackfill {
             if fill(place: place, with: region, includeAddress: true) { changed += 1 }
         }
         return changed
+    }
+
+    /// The stays whose coordinate can fall in a cell, read by latitude and longitude.
+    ///
+    /// The backfill fills one cell a second for as long as cells are missing. Reading
+    /// every stay for each cell kept a phone with years of history busy for hours.
+    private static func stays(inCell cellKey: String, in context: ModelContext) throws -> [VisitPlace] {
+        guard let bounds = PlaceGeocodeCellCache.bounds(forKey: cellKey) else {
+            return try context.fetch(FetchDescriptor<VisitPlace>.live())
+        }
+        let minLatitude = bounds.latitude.lowerBound, maxLatitude = bounds.latitude.upperBound
+        let minLongitude = bounds.longitude.lowerBound, maxLongitude = bounds.longitude.upperBound
+        // Stays off the timeline are left out in code, as `PlacesIndex` does for its own box.
+        let inBox = try context.fetch(FetchDescriptor<VisitPlace>(predicate: #Predicate {
+            $0.latitude >= minLatitude && $0.latitude <= maxLatitude
+                && $0.longitude >= minLongitude && $0.longitude <= maxLongitude
+        }))
+        return inBox.filter { $0.dayTimeline != nil }
     }
 
     /// Gives unnamed, unassigned stays the label earlier stays at the same spot carry,
@@ -465,16 +509,25 @@ enum PlaceGeocodeBackfill {
             return PlaceLearningEngine.StaySnapshot(visit, label: label)
         }
         guard !labeled.isEmpty else { return 0 }
+        // Only a stay at the same spot can lend its name, so each unnamed stay is held
+        // against its neighbors. Against all of history this was 25 million comparisons
+        // on a phone with a photo library's worth of stays, on every return to the app.
+        let buckets = CoordinateBuckets(
+            labeled.map(\.coordinate),
+            reach: PlaceLearningEngine.sameSpotMaximumDistance
+        )
         let places = try context.fetch(FetchDescriptor<KnownPlace>())
         var changed = 0
         for visit in needing {
+            let neighbors = buckets.indices(near: visit.coordinate).map { labeled[$0] }
+            guard !neighbors.isEmpty else { continue }
             let nearbyPlaces = places.filter {
                 PlaceLearningEngine.distance(from: $0.coordinate, to: visit.coordinate)
                     <= PlaceLearningEngine.rejectedLabelSearchRadius
             }
             guard let label = PlaceLearningEngine.reusableLabel(
                 for: PlaceLearningEngine.StaySnapshot(visit, label: nil),
-                among: labeled,
+                among: neighbors,
                 isSuppressed: { PlaceLearningEngine.shouldSuppress($0, nearbyPlaces: nearbyPlaces) }
             ) else { continue }
             visit.autoLabel = label
@@ -496,19 +549,21 @@ enum PlaceGeocodeBackfill {
         guard region.hasAnyValue else { return 0 }
         var changed = 0
 
-        let visits = try context.fetch(FetchDescriptor<VisitPlace>.live())
+        let visits = try stays(inCell: cellKey, in: context)
+        // Places with a stay in this cell, from the stays just read: walking every
+        // place's own stays loaded all of them again for each cell.
+        var placesWithStayHere = Set<UUID>()
         for visit in visits {
             let key = PlaceGeocodeCellCache.cellKey(for: visit.coordinate)
             guard key == cellKey else { continue }
+            if let place = visit.knownPlace { placesWithStayHere.insert(place.id) }
             if fill(visitCountry: visit, with: region) { changed += 1 }
         }
 
         let places = try context.fetch(FetchDescriptor<KnownPlace>())
         for place in places {
             let key = PlaceGeocodeCellCache.cellKey(for: place.coordinate)
-            let visitsShareCell = place.visits.contains {
-                PlaceGeocodeCellCache.cellKey(for: $0.coordinate) == cellKey
-            }
+            let visitsShareCell = placesWithStayHere.contains(place.id)
             guard key == cellKey || visitsShareCell else { continue }
             if fill(place: place, with: region) { changed += 1 }
         }
@@ -634,12 +689,25 @@ struct PlaceGeocodeWorkItem: Sendable {
 
 /// Ensures only one foreground trickle runs at a time.
 private actor PlaceGeocodeBackfillLock {
-    private var isRunning = false
+    private var running: Task<Void, Never>?
 
-    func run(_ work: @Sendable () async -> Void) async {
-        guard !isRunning else { return }
-        isRunning = true
-        defer { isRunning = false }
-        await work()
+    /// Runs `work` unless a run is under way; a caller that overlaps returns at once.
+    func run(_ work: @escaping @Sendable () async -> Void) async {
+        // A run that was told to stop is on its way out; coming straight back to the
+        // app waits for it instead of finding the trickle taken.
+        if let stopping = running, stopping.isCancelled {
+            await stopping.value
+            if running == stopping { running = nil }
+        }
+        guard running == nil else { return }
+        let task = Task(priority: .utility) { await work() }
+        running = task
+        await task.value
+        if running == task { running = nil }
+    }
+
+    /// Ends the run under way at its next cell.
+    func cancel() {
+        running?.cancel()
     }
 }

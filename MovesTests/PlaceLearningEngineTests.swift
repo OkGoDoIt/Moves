@@ -627,6 +627,49 @@ final class PlaceLearningEngineTests: XCTestCase {
         XCTAssertEqual(pinned.confirmedVisitCount, 2)
     }
 
+    /// The grid behind the Places list and the name reuse pass must never leave out a
+    /// stay that is within reach: it only saves measuring the ones that cannot be.
+    func testCoordinateBucketsReturnEverythingWithinReach() {
+        let reach: CLLocationDistance = 120
+        let centers = [
+            CLLocationCoordinate2D(latitude: 21.03, longitude: 105.85),
+            CLLocationCoordinate2D(latitude: 0.0002, longitude: -0.0003),
+            CLLocationCoordinate2D(latitude: 69.65, longitude: 18.96),
+            CLLocationCoordinate2D(latitude: -16.8, longitude: 179.9996),
+            CLLocationCoordinate2D(latitude: -16.8, longitude: -179.9996),
+            CLLocationCoordinate2D(latitude: 85, longitude: 40),
+        ]
+        var generator = SystemRandomNumberGenerator()
+        var points: [CLLocationCoordinate2D] = []
+        for center in centers {
+            for _ in 0..<150 {
+                var point = offset(
+                    center,
+                    northMeters: Double.random(in: -400...400, using: &generator),
+                    eastMeters: Double.random(in: -400...400, using: &generator)
+                )
+                // Across the antimeridian a longitude starts again at the other end.
+                if point.longitude > 180 { point.longitude -= 360 }
+                if point.longitude < -180 { point.longitude += 360 }
+                points.append(point)
+            }
+        }
+        let buckets = CoordinateBuckets(points, reach: reach)
+        var skipped = 0
+        for point in points {
+            let found = buckets.indices(near: point)
+            XCTAssertEqual(found, found.sorted(), "indices come back in order")
+            let foundSet = Set(found)
+            for (index, other) in points.enumerated() {
+                if PlaceLearningEngine.distance(from: point, to: other) <= reach {
+                    XCTAssertTrue(foundSet.contains(index), "a point within reach was left out near \(point)")
+                }
+            }
+            skipped += points.count - found.count
+        }
+        XCTAssertGreaterThan(skipped, points.count * points.count / 2, "the grid should spare most comparisons")
+    }
+
     func testMailboxActorForwardsResolve() async {
         let place = PlaceLearningEngine.PlaceSnapshot(
             name: "Home",

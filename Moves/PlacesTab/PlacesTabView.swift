@@ -215,6 +215,8 @@ struct PlacesTabView: View {
     /// recreates deleted places from visit labels, and repairs duplicate stops.
     private func clusterLabeledVisitsAfterSeed() async {
         #if targetEnvironment(simulator)
+        // A copy of a real store opened for a look is real history, not the demo seed.
+        guard ProcessInfo.processInfo.environment["MOVES_SIMULATOR_STORE"] == nil else { return }
         guard !Self.didClusterSeededVisits else { return }
         Self.didClusterSeededVisits = true
         for _ in 0..<80 {

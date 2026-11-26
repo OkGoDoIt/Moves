@@ -265,6 +265,50 @@ final class StoreResilienceTests: XCTestCase {
         }
     }
 
+    /// Opening Places, and the pass that hands unnamed stays a neighbor's name, on years
+    /// of history. Both once held every stay against every other, which took minutes on
+    /// the phone after a photo import; ten seconds is generous for neighbors only.
+    func testPlacesGroupingAndNameReuseAreQuickOnRealStore() throws {
+        let backup = try Self.latestDeviceBackup()
+        let directory = try makeTemporaryDirectory()
+        let storeURL = directory.appendingPathComponent("default.store")
+        for suffix in ["", "-wal", "-shm"] {
+            let source = URL(fileURLWithPath: backup.path + suffix)
+            guard FileManager.default.fileExists(atPath: source.path) else { continue }
+            try FileManager.default.copyItem(at: source, to: URL(fileURLWithPath: storeURL.path + suffix))
+        }
+        let container = try makeContainer(storeURL: storeURL)
+        let context = ModelContext(container)
+        let visits = try context.fetch(FetchDescriptor<VisitPlace>.live()).map(PlacesVisitRecord.init)
+        let places = try context.fetch(FetchDescriptor<KnownPlace>()).map(PlacesKnownRecord.init)
+        let clock = ContinuousClock()
+
+        var snapshot = PlacesIndexSnapshot.empty
+        let grouping = clock.measure {
+            snapshot = PlacesIndexBuilder.build(
+                knownPlaces: places,
+                visits: visits,
+                sort: .mostVisited,
+                query: "",
+                now: .now,
+                calendar: .current
+            )
+        }
+        // Every stay without a place of its own lands in exactly one suggestion.
+        let unassigned = visits.filter { $0.knownPlaceID == nil && !$0.isHiddenAsShortStop }
+        XCTAssertEqual(snapshot.suggested.reduce(0) { $0 + $1.visitCount }, unassigned.count)
+        XCTAssertEqual(Set(snapshot.suggested.flatMap(\.visitIDs)).count, unassigned.count)
+        XCTAssertLessThan(grouping, .seconds(10))
+
+        var reused = 0
+        let reuse = try clock.measure { reused = try PlaceGeocodeBackfill.reuseNearbyLabels(in: context) }
+        XCTAssertLessThan(reuse, .seconds(10))
+        // Written to the copy: names left unsaved are read again after the copy is
+        // deleted, and that ends the test process during whichever test runs next.
+        try context.save()
+        print("Places on backup copy: \(visits.count) stays in \(snapshot.suggested.count) suggestions, grouped in \(grouping); \(reused) stays took a neighbor's name in \(reuse)")
+    }
+
     /// Before-and-after numbers for the stop and trip rules on a copy of a real store.
     ///
     /// Skipped unless `MOVES_REBUILD_STORE` names a `default.store` (pass it to
