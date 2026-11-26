@@ -278,6 +278,31 @@ final class CapturePolicyTests: XCTestCase {
         )
     }
 
+    /// On the phone every launch began a four-minute trip: starting significant-change
+    /// monitoring handed back its last fix, hours old and from the walk home.
+    func testAnOldFixFarAwayIsNotADeparture() {
+        let lastNight = start.addingTimeInterval(-9 * 3_600)
+
+        var byFix = settledMachine()
+        XCTAssertEqual(byFix.handleFix(fix(metersEast: 300, at: lastNight, accuracy: 12), now: start), CaptureStateMachine.Transition.none)
+        XCTAssertEqual(byFix.phase, .settled)
+        XCTAssertEqual(byFix.departureAnchor, anchor())
+        XCTAssertEqual(
+            byFix.handleFix(fix(metersEast: 300, at: start.addingTimeInterval(-5), accuracy: 12), now: start),
+            .startedMoving(.displacement)
+        )
+
+        var byWake = settledMachine()
+        XCTAssertEqual(
+            byWake.handleWake(.significantChange, location: fix(metersEast: 2_000, at: lastNight, accuracy: 65), now: start),
+            CaptureStateMachine.Transition.none
+        )
+        XCTAssertEqual(
+            byWake.handleWake(.significantChange, location: fix(metersEast: 2_000, at: start, accuracy: 65), now: start),
+            .startedMoving(.significantChange)
+        )
+    }
+
     func testASignificantChangeNearTheSettledPointIsATowerChange() {
         var machine = settledMachine()
         XCTAssertEqual(

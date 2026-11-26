@@ -308,6 +308,10 @@ enum CapturePolicy {
         // Fix quality
         /// A fix older than this when a session starts is a cached one.
         static let staleFixAge: TimeInterval = 10
+        /// A fix older than this says where the phone was, not where it is. Starting
+        /// significant-change monitoring hands back the last fix that service delivered,
+        /// which can be hours old and from the far end of the last trip.
+        static let cachedFixAge: TimeInterval = 60
         /// Continuous fixes worse than this are skipped...
         static let maximumContinuousAccuracy: CLLocationAccuracy = 65
         /// ...unless nothing better arrived for this long.
@@ -752,6 +756,9 @@ struct CaptureStateMachine: Sendable {
             if phase == .moving, let location { detector.observe(location) }
             return .none
         }
+        if trigger == .significantChange, let location {
+            guard Self.isCurrent(location, now: now) else { return .none }
+        }
         if trigger == .significantChange, let location, let anchor = departureAnchor {
             let distance = location.distance(from: anchor.location)
             if distance < max(CapturePolicy.Tuning.significantChangeIgnoreRadius, location.horizontalAccuracy) {
@@ -797,6 +804,11 @@ struct CaptureStateMachine: Sendable {
         return min(doubled, CapturePolicy.Tuning.motionRetriggerMaximumCooldown)
     }
 
+    /// Whether a fix is recent enough to say where the phone is now.
+    static func isCurrent(_ location: CLLocation, now: Date) -> Bool {
+        now.timeIntervalSince(location.timestamp) <= CapturePolicy.Tuning.cachedFixAge
+    }
+
     mutating func handleFix(_ location: CLLocation, now: Date) -> Transition {
         switch phase {
         case .off:
@@ -805,6 +817,8 @@ struct CaptureStateMachine: Sendable {
             detector.observe(location)
             return tick(now: now)
         case .settled:
+            // An old fix far from here is the last trip, not a new one.
+            guard Self.isCurrent(location, now: now) else { return .none }
             let accuracy = location.horizontalAccuracy
             guard accuracy >= 0, accuracy <= CapturePolicy.Tuning.absoluteMaximumAccuracy else { return .none }
             guard let anchor = departureAnchor else {

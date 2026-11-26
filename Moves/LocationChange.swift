@@ -1713,6 +1713,14 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
 
         for location in locations {
             let phaseBefore = captureMachine.phase
+            if phaseBefore == .settled, !CaptureStateMachine.isCurrent(location, now: now) {
+                // Starting significant-change monitoring hands back its last fix: hours old,
+                // from the far end of the last trip. It is not a departure and not worth keeping.
+                Self.captureLog.info(
+                    "Ignored a cached fix from \(Int(now.timeIntervalSince(location.timestamp) / 60)) min ago while settled"
+                )
+                continue
+            }
             let transition: CaptureStateMachine.Transition
             if phaseBefore == .settled, !isStandardLocationRunning {
                 // No keep-alive session (balanced on low power): a fix while settled
@@ -1737,7 +1745,10 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
             case .settled:
                 // Keep the first fix of a departure, and one now and then during a long stay.
                 // The rest is the coarse keep-alive session and would only add jitter.
-                if case .startedMoving = transition {
+                if case .startedMoving(let trigger) = transition {
+                    Self.captureLog.notice(
+                        "Departure fix (\(trigger.rawValue, privacy: .public)): accuracy \(Int(location.horizontalAccuracy)) m, \(Int(now.timeIntervalSince(location.timestamp))) s old"
+                    )
                     departureFixes.append(location)
                     lastStoredSettledFixAt = now
                 } else if location.horizontalAccuracy >= 0,
@@ -2633,7 +2644,7 @@ extension MovesLocationCaptureManager: @preconcurrency CLLocationManagerDelegate
         // place. Stored as new, it reads as more time spent there and splits a stay in two.
         var locations = locations
         if pendingOneShotLocationSource != nil {
-            locations = locations.filter { Date.now.timeIntervalSince($0.timestamp) <= 60 }
+            locations = locations.filter { CaptureStateMachine.isCurrent($0, now: .now) }
             guard !locations.isEmpty else {
                 Self.captureLog.info("Ignored a cached launch fix")
                 return
