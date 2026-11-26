@@ -1,4 +1,5 @@
 import CoreLocation
+import MapKit
 import SwiftData
 import XCTest
 @testable import Moves
@@ -627,6 +628,45 @@ final class PlacesIndexTests: XCTestCase {
         XCTAssertEqual(reloaded.first?.locality, "Ho Chi Minh City")
     }
 
+    /// Apple's rate limit ended the whole backfill at its first refusal, so on a phone
+    /// with a long history the trickle rarely got past a handful of cells.
+    func testBackfillWaitsOutRateLimitAndCarriesOn() async throws {
+        let schema = Schema(MovesTimelineSchema.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)
+        )
+        let context = ModelContext(container)
+        let visit = VisitPlace(
+            arrivalDate: now,
+            departureDate: now.addingTimeInterval(600),
+            latitude: 10.8139,
+            longitude: 106.7100,
+            horizontalAccuracy: 12
+        )
+        context.insertOnDay(visit)
+        try context.save()
+
+        let region = PlaceGeocodeRegion(countryCode: "VN", locality: "Ho Chi Minh City")
+        let throttled = NSError(domain: MKErrorDomain, code: Int(MKError.Code.loadingThrottled.rawValue))
+        let geocoder = RefusingThenAnsweringGeocoder(refusals: [throttled], region: region)
+        let cacheURL = FileManager.default.temporaryDirectory.appendingPathComponent("places-busy-\(UUID().uuidString).json")
+        let filled = await PlaceGeocodeBackfill.run(
+            in: container,
+            geocoder: geocoder,
+            cache: PlaceGeocodeCellCache(regions: [:], url: cacheURL),
+            busyWait: .milliseconds(10)
+        )
+
+        XCTAssertEqual(filled, 1)
+        XCTAssertEqual(geocoder.calls, 2)
+        let reloaded = try ModelContext(container).fetch(FetchDescriptor<VisitPlace>())
+        XCTAssertEqual(reloaded.first?.locality, "Ho Chi Minh City")
+        XCTAssertEqual(PlaceGeocodeBackfill.trouble(NSError(domain: kCLErrorDomain, code: CLError.Code.network.rawValue)), .busy)
+        XCTAssertEqual(PlaceGeocodeBackfill.trouble(URLError(.notConnectedToInternet)), .offline)
+        XCTAssertNil(PlaceGeocodeBackfill.trouble(NSError(domain: kCLErrorDomain, code: CLError.Code.geocodeFoundNoResult.rawValue)))
+    }
+
     func testMergeUsesPlaceLearningEngineAndDeletesSource() throws {
         let schema = Schema(MovesTimelineSchema.models)
         let container = try ModelContainer(
@@ -874,5 +914,29 @@ private struct FakePlaceReverseGeocoder: PlaceReverseGeocoding, Sendable {
 
     func reverseGeocode(_ coordinate: CLLocationCoordinate2D) async throws -> PlaceGeocodeRegion? {
         region
+    }
+}
+
+/// Throws each of `refusals` in turn, then answers with `region`.
+private final class RefusingThenAnsweringGeocoder: PlaceReverseGeocoding, @unchecked Sendable {
+    private let lock = NSLock()
+    private var refusals: [any Error]
+    private var callCount = 0
+    let region: PlaceGeocodeRegion
+
+    init(refusals: [any Error], region: PlaceGeocodeRegion) {
+        self.refusals = refusals
+        self.region = region
+    }
+
+    var calls: Int { lock.withLock { callCount } }
+
+    func reverseGeocode(_ coordinate: CLLocationCoordinate2D) async throws -> PlaceGeocodeRegion? {
+        let refusal: (any Error)? = lock.withLock {
+            callCount += 1
+            return refusals.isEmpty ? nil : refusals.removeFirst()
+        }
+        if let refusal { throw refusal }
+        return region
     }
 }

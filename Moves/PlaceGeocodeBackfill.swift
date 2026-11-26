@@ -52,9 +52,18 @@ struct MapKitPlaceReverseGeocoder: PlaceReverseGeocoding {
             }
         }
 
-        let placemarks = try await CLGeocoder().reverseGeocodeLocation(location)
-        if let mark = placemarks.first {
-            region.merge(placemark: mark)
+        // Core Location only fills what MapKit left out. Asking both for every cell
+        // doubled the requests and ran into Apple's rate limit within a minute.
+        if region.countryCode == nil || region.locality == nil {
+            do {
+                let placemarks = try await CLGeocoder().reverseGeocodeLocation(location)
+                if let mark = placemarks.first {
+                    region.merge(placemark: mark)
+                }
+            } catch {
+                // MapKit's answer stands on its own; with none, the error is the answer.
+                guard region.hasAnyValue else { throw error }
+            }
         }
 
         region = region.withoutCountryAsCity()
@@ -230,12 +239,19 @@ struct PlaceGeocodeCellCache: Sendable {
 
 /// Fills `countryCode` / `locality` / `administrativeArea` on visits and learned places.
 ///
-/// One reverse-geocode per 0.01° cell, rate-limited to 1 request per second. Runs as a
-/// foreground trickle and as a `BGProcessingTask`.
+/// One reverse-geocode per 0.01° cell, one cell every two seconds. Runs as a foreground
+/// trickle and as a `BGProcessingTask`.
 enum PlaceGeocodeBackfill {
     /// Must stay in sync with `BGTaskSchedulerPermittedIdentifiers` in `Info.plist`.
     static let taskIdentifier = "\(MovesAppIdentity.bundleIdentifier).placeGeocodeBackfill"
-    static let requestInterval: Duration = .seconds(1)
+    /// A name cell also asks MapKit for nearby points of interest, so two requests a cell
+    /// at this pace stays under Apple's limit of about fifty a minute.
+    static let requestInterval: Duration = .seconds(2)
+    /// How long to wait when Apple's geocoder says the app has asked too often. Its limit
+    /// counts requests over about a minute.
+    static let busyWait: Duration = .seconds(60)
+    /// Waits for one cell before the run gives up until the next one.
+    static let maximumBusyWaits = 3
 
     static let log = Logger(subsystem: MovesAppIdentity.bundleIdentifier, category: "PlaceGeocodeBackfill")
 
@@ -286,7 +302,8 @@ enum PlaceGeocodeBackfill {
         geocoder: any PlaceReverseGeocoding = MapKitPlaceReverseGeocoder(),
         searcher: (any LocalPlaceSearching)? = nil,
         cache: PlaceGeocodeCellCache? = nil,
-        limit: Int = Int.max
+        limit: Int = Int.max,
+        busyWait: Duration = PlaceGeocodeBackfill.busyWait
     ) async -> Int {
         let context = ModelContext(container)
         context.autosaveEnabled = false
@@ -312,7 +329,7 @@ enum PlaceGeocodeBackfill {
                         try await Task.sleep(for: requestInterval)
                     }
                     requested += 1
-                    guard var resolved = try await geocoder.reverseGeocode(next.coordinate) else {
+                    guard var resolved = try await lookUp(next.coordinate, with: geocoder, busyWait: busyWait) else {
                         cache.store(PlaceGeocodeRegion(), for: next.cellKey)
                         completed += 1
                         continue
@@ -336,6 +353,8 @@ enum PlaceGeocodeBackfill {
             }
         } catch is CancellationError {
             return completed
+        } catch let error where trouble(error) != nil {
+            log.notice("Place-name backfill stopped for now after \(completed) cells: \(error.localizedDescription, privacy: .public)")
         } catch {
             log.error("Place-name backfill failed: \(error.localizedDescription, privacy: .public)")
         }
@@ -349,7 +368,8 @@ enum PlaceGeocodeBackfill {
         in container: ModelContainer,
         geocoder: any PlaceReverseGeocoding = MapKitPlaceReverseGeocoder(),
         cache: PlaceGeocodeCellCache? = nil,
-        limit: Int = Int.max
+        limit: Int = Int.max,
+        busyWait: Duration = PlaceGeocodeBackfill.busyWait
     ) async -> Int {
         let context = ModelContext(container)
         context.autosaveEnabled = false
@@ -370,7 +390,7 @@ enum PlaceGeocodeBackfill {
                         try await Task.sleep(for: requestInterval)
                     }
                     requested += 1
-                    guard let resolved = try await geocoder.reverseGeocode(next.coordinate) else {
+                    guard let resolved = try await lookUp(next.coordinate, with: geocoder, busyWait: busyWait) else {
                         cache.store(PlaceGeocodeRegion(), for: next.cellKey)
                         completed += 1
                         continue
@@ -390,11 +410,66 @@ enum PlaceGeocodeBackfill {
             }
         } catch is CancellationError {
             return completed
+        } catch let error where trouble(error) != nil {
+            log.notice("Geocode backfill stopped for now after \(completed) cells: \(error.localizedDescription, privacy: .public)")
         } catch {
             log.error("Geocode backfill failed: \(error.localizedDescription, privacy: .public)")
         }
 
         return completed
+    }
+
+    /// Why a lookup failed in a way the next run can get past on its own.
+    enum GeocodeTrouble: Equatable {
+        /// Apple's rate limit, or a server that did not answer in time.
+        case busy
+        /// No network at all.
+        case offline
+    }
+
+    static func trouble(_ error: any Error) -> GeocodeTrouble? {
+        let error = error as NSError
+        switch error.domain {
+        case MKErrorDomain:
+            let code = UInt(clamping: error.code)
+            return code == MKError.Code.loadingThrottled.rawValue || code == MKError.Code.serverFailure.rawValue
+                ? .busy : nil
+        case kCLErrorDomain:
+            // Core Location's geocoder reports its rate limit as a network error.
+            return error.code == CLError.Code.network.rawValue ? .busy : nil
+        case NSURLErrorDomain:
+            switch error.code {
+            case NSURLErrorTimedOut, NSURLErrorNetworkConnectionLost, NSURLErrorCannotConnectToHost:
+                return .busy
+            case NSURLErrorNotConnectedToInternet, NSURLErrorDataNotAllowed:
+                return .offline
+            default:
+                return nil
+            }
+        default:
+            return nil
+        }
+    }
+
+    /// Asks the geocoder about one cell, waiting out Apple's rate limit. A geocoder that
+    /// is still busy after a few waits, or a phone that is offline, ends the run, and the
+    /// next one carries on from the cache.
+    private static func lookUp(
+        _ coordinate: CLLocationCoordinate2D,
+        with geocoder: any PlaceReverseGeocoding,
+        busyWait: Duration
+    ) async throws -> PlaceGeocodeRegion? {
+        var waits = 0
+        while true {
+            do {
+                return try await geocoder.reverseGeocode(coordinate)
+            } catch {
+                guard trouble(error) == .busy, waits < maximumBusyWaits, !Task.isCancelled else { throw error }
+                waits += 1
+                log.notice("Geocoder busy, waiting \(busyWait.components.seconds) s: \(error.localizedDescription, privacy: .public)")
+                try await Task.sleep(for: busyWait)
+            }
+        }
     }
 
     /// Visits and learned places still missing country or city, grouped by cache cell.
