@@ -433,10 +433,17 @@ struct ContentView: View {
         ScrollView(.horizontal) {
             LazyHStack(spacing: 0) {
                 ForEach(dayTimelines, id: \.dayKey) { day in
-                    DayTimelinePage(
-                        dayKey: day.dayKey,
-                        isActive: day.dayKey == selectedDayKey
-                    )
+                    // One view per day, whatever the page is showing. A page is a choice
+                    // between a loaded day and two stand-ins, and SwiftUI cannot count
+                    // the views in a choice without building it: to place the pager on
+                    // today it built a page for every day since the first, several
+                    // times over, before the first frame. A stack always counts as one.
+                    ZStack {
+                        DayTimelinePage(
+                            dayKey: day.dayKey,
+                            isActive: day.dayKey == selectedDayKey
+                        )
+                    }
                     .containerRelativeFrame(.horizontal)
                     .id(day.dayKey)
                 }
