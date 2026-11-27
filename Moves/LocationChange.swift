@@ -1019,7 +1019,10 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
     @Published private(set) var authorizationStatus: CLAuthorizationStatus = .notDetermined
     @Published private(set) var isMonitoring = false
     @Published private(set) var isBackgroundLocationListeningEnabled = true
-    @Published private(set) var lastCaptureAt: Date?
+    /// Not published: it changes with every fix, about once a second on a trip, and a
+    /// change here re-rendered the root view, the Timeline, and every loaded day page.
+    /// The live route reads it when its own fixes redraw it.
+    private(set) var lastCaptureAt: Date?
     @Published private(set) var lastErrorMessage: String?
     @Published private(set) var temporaryRouteTrackingDuration: TemporaryRouteTrackingDuration = .endOfDay
     @Published private(set) var temporaryRouteTrackingStartedAt: Date?

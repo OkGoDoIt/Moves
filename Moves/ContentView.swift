@@ -350,7 +350,8 @@ struct ContentView: View {
     /// The time zone `dayTimelines` was laid out in.
     @State private var dayIndexTimeZone: TimeZone?
     @State private var spotlightRefreshTask: Task<Void, Never>?
-    @State private var lastSpotlightSignature: [String] = []
+    /// A plain box: remembering what was indexed must not re-render the Timeline.
+    @State private var spotlightMemo = SpotlightIndexMemo()
     @State private var didOpenScreenshotMove = false
     @State private var didOpenInitialDay = false
     @ObservedObject private var routeTrackingPreview = RouteTrackingPreview.shared
@@ -522,6 +523,8 @@ struct ContentView: View {
     private func refreshVisibleDays() {
         guard dayTimelines.indices.contains(selectedPageIndex) else { selectedDay = nil; return }
         let entry = dayTimelines[selectedPageIndex]
+        // This runs after every save; the same day again must not re-render the pager.
+        if let selectedDay, selectedDay.dayKey == entry.dayKey, selectedDay.modelContext != nil { return }
         selectedDay = fetchDay(entry.dayKey) ?? DayTimeline(dayStart: entry.dayStart)
     }
 
@@ -671,19 +674,24 @@ struct ContentView: View {
         }
     }
 
+    /// Saves of days, stays, and trips, iCloud changes, and new fixes. The first shows at
+    /// once; after it, at most one refresh every two seconds, however fast fixes, the stay
+    /// rebuild, and the name backfill save.
     private var historyChanges: AnyPublisher<Notification, Never> {
         NotificationCenter.default.publisher(for: ModelContext.didSave)
+            .filter(TimelineSaveFilter.touchesTimeline)
             .merge(with: NotificationCenter.default.publisher(for: .NSPersistentStoreRemoteChange))
             .merge(with: NotificationCenter.default.publisher(for: .movesLocationSamplesDidChange))
-            .debounce(for: .milliseconds(350), scheduler: DispatchQueue.main)
+            .throttle(for: .seconds(2), scheduler: DispatchQueue.main, latest: true)
             .eraseToAnyPublisher()
     }
 
+    /// Spotlight reads every stay, so it follows place saves at most every half minute.
     private var spotlightChanges: AnyPublisher<Notification, Never> {
         NotificationCenter.default.publisher(for: ModelContext.didSave)
             .filter(PlaceSaveFilter.touchesPlaces)
             .merge(with: NotificationCenter.default.publisher(for: .NSPersistentStoreRemoteChange))
-            .debounce(for: .milliseconds(350), scheduler: DispatchQueue.main)
+            .throttle(for: .seconds(30), scheduler: DispatchQueue.main, latest: true)
             .eraseToAnyPublisher()
     }
 
@@ -959,10 +967,14 @@ struct ContentView: View {
         guard scenePhase == .active else { return }
         spotlightRefreshTask?.cancel()
         let container = modelContext.container
+        let memo = spotlightMemo
+        let lastSignature = memo.signature
         spotlightRefreshTask = Task {
             do {
                 try await Task.sleep(for: .seconds(1))
-                let entities = try await importWorkerValue(Task.detached(priority: .utility) {
+                // The whole history is read, fingerprinted, and compared off the main actor;
+                // an unchanged index costs the main thread nothing.
+                let built = try await importWorkerValue(Task.detached(priority: .utility) { () throws -> (entities: [VisitedPlaceEntity], signature: Int)? in
                     let context = ModelContext(container)
                     var entities: [VisitedPlaceEntity] = []
                     var query = FetchDescriptor<VisitPlace>.live(sortBy: [SortDescriptor(\.arrivalDate)])
@@ -981,13 +993,19 @@ struct ContentView: View {
                         if count < 500 { break }
                         offset += count
                     }
-                    return entities
+                    var hasher = Hasher()
+                    for entity in entities {
+                        hasher.combine(entity.id)
+                        hasher.combine(entity.name)
+                        hasher.combine(entity.visitedAt)
+                    }
+                    let signature = hasher.finalize()
+                    return signature == lastSignature ? nil : (entities, signature)
                 })
                 try Task.checkCancellation()
-                let signature = entities.map { "\($0.id)|\($0.name)|\($0.visitedAt)" }
-                guard signature != lastSpotlightSignature else { return }
-                try await VisitedPlaceSpotlightIndexer.replaceIndex(with: entities)
-                lastSpotlightSignature = signature
+                guard let built else { return }
+                try await VisitedPlaceSpotlightIndexer.replaceIndex(with: built.entities)
+                memo.signature = built.signature
             } catch { /* A later save retries; indexing never affects recording. */ }
         }
     }
@@ -2076,6 +2094,12 @@ private struct RequestedMoveDetailView: View {
 /// Whether a save changed a visit or a learned place. Location batches don't, so Spotlight
 /// and calendar sync skip them. Unknown payloads count as a change, so older OS versions
 /// still pick up renamed and deleted places.
+/// The fingerprint of what Spotlight last indexed.
+@MainActor
+final class SpotlightIndexMemo {
+    var signature: Int?
+}
+
 enum PlaceSaveFilter {
     static func touchesPlaces(_ notification: Notification) -> Bool {
         let keys: [ModelContext.NotificationKey] = [.insertedIdentifiers, .updatedIdentifiers, .deletedIdentifiers]

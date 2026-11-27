@@ -30,6 +30,22 @@ extension View {
     }
 }
 
+/// Formatters made once per key and shared. Foundation's formatters are safe to read
+/// from any thread once set up; only the table itself needs the lock.
+final class FormatterCache<Value: AnyObject>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: Value] = [:]
+
+    func value(for key: String, make: () -> Value) -> Value {
+        lock.lock()
+        defer { lock.unlock() }
+        if let value = values[key] { return value }
+        let value = make()
+        values[key] = value
+        return value
+    }
+}
+
 /// Compact storyline clock that never wraps “AM” / “PM” onto a second glyph.
 enum StorylineClock {
     /// Whether `locale` displays a 12-hour period (AM/PM) next to the time.
@@ -51,11 +67,21 @@ enum StorylineClock {
         locale: Locale = .autoupdatingCurrent,
         timeZone: TimeZone = .autoupdatingCurrent
     ) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = locale
-        formatter.timeZone = timeZone
-        formatter.setLocalizedDateFormatFromTemplate("Jmm")
-        return formatter.string(from: date)
+        hourMinuteFormatter(locale: locale, timeZone: timeZone).string(from: date)
+    }
+
+    /// Every storyline row shows two of these on each render. Making the formatter and
+    /// resolving its template each time cost more than the rest of the row.
+    private static let formatters = FormatterCache<DateFormatter>()
+
+    private static func hourMinuteFormatter(locale: Locale, timeZone: TimeZone) -> DateFormatter {
+        formatters.value(for: "\(locale.identifier)|\(timeZone.identifier)") {
+            let formatter = DateFormatter()
+            formatter.locale = locale
+            formatter.timeZone = timeZone
+            formatter.setLocalizedDateFormatFromTemplate("Jmm")
+            return formatter
+        }
     }
 
     /// Locale AM/PM symbol when the locale uses a 12-hour clock; otherwise `nil`.

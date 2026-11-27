@@ -2258,14 +2258,22 @@ enum TimelineEntry: Identifiable {
         guard segment.timelineDuration > 0 else { return nil }
 
         let speed = Measurement(value: max(segment.distanceMeters, 0) / segment.timelineDuration, unit: UnitSpeed.metersPerSecond)
-        let unit: UnitSpeed = Locale.autoupdatingCurrent.measurementSystem == .metric ? .kilometersPerHour : .milesPerHour
-        let formatter = MeasurementFormatter()
-        formatter.unitOptions = .providedUnit
-        formatter.unitStyle = .short
-        formatter.numberFormatter.minimumFractionDigits = 1
-        formatter.numberFormatter.maximumFractionDigits = 1
+        let locale = Locale.autoupdatingCurrent
+        let unit: UnitSpeed = locale.measurementSystem == .metric ? .kilometersPerHour : .milesPerHour
+        // One per locale, not one per trip row on every render.
+        let formatter = speedFormatters.value(for: locale.identifier) {
+            let formatter = MeasurementFormatter()
+            formatter.locale = locale
+            formatter.unitOptions = .providedUnit
+            formatter.unitStyle = .short
+            formatter.numberFormatter.minimumFractionDigits = 1
+            formatter.numberFormatter.maximumFractionDigits = 1
+            return formatter
+        }
         return formatter.string(from: speed.converted(to: unit))
     }
+
+    private static let speedFormatters = FormatterCache<MeasurementFormatter>()
 
     private static func timeString(from date: Date) -> String {
         date.formatted(.dateTime.hour().minute())
