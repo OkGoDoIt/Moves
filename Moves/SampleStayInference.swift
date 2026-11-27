@@ -226,9 +226,15 @@ enum TravelEvidence {
     /// No single gap counts for more than this, so one late fix cannot carry a stretch.
     static let maximumStep: TimeInterval = 30
     static let travelShare = 0.5
+    /// A fix after a silence this long is where the phone sat through it, however fast it
+    /// moves next. Capture goes quiet at a stop and wakes on the way out, so the first fix
+    /// back is taken as the person sets off; dropped as travel, it would leave the silence
+    /// without the nearby fix that makes it a stop.
+    static let silenceBeforeDeparture: TimeInterval = 10 * 60
 
     /// `points` without the fixes taken while moving: those whose next minute of fixes
-    /// moved at least `movingDisplacement`, or whose previous minute did. Sparse fixes stay.
+    /// moved at least `movingDisplacement`, or whose previous minute did. Sparse fixes stay,
+    /// and so does the first fix after `silenceBeforeDeparture`.
     static func stationary(_ points: [LocationLogPoint]) -> [LocationLogPoint] {
         guard points.count >= 3 else { return points }
         var moving = [Bool](repeating: false, count: points.count)
@@ -243,6 +249,10 @@ enum TravelEvidence {
                 // first one at the destination, so it is judged by its own minute.
                 for marked in index..<ahead { moving[marked] = true }
             }
+        }
+        for index in points.indices.dropFirst()
+        where points[index].timestamp.timeIntervalSince(points[index - 1].timestamp) >= silenceBeforeDeparture {
+            moving[index] = false
         }
         return points.indices.filter { !moving[$0] }.map { points[$0] }
     }

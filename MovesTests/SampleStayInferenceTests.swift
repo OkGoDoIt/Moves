@@ -90,6 +90,32 @@ final class SampleStayInferenceTests: XCTestCase {
         XCTAssertEqual(stays.count, 1)
     }
 
+    /// Capture goes quiet at a stop and wakes as the person sets off, so the first fix back
+    /// is followed by a ride. Judged as travel, it left the silence without its nearby fix,
+    /// and a 55-minute stop vanished as soon as the ride away was written (Da Lat, Nov 27).
+    func testStopKeepsTheFixThatEndsItsSilence() throws {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let cafe = CLLocationCoordinate2D(latitude: 10, longitude: 106)
+        // Three minutes of walking up to the door, 1.5 m/s, a fix every 4 seconds.
+        var points = (0...45).map { step in
+            fix(offset(cafe, north: -Double(45 - step) * 6, east: 0), at: start.addingTimeInterval(Double(step) * 4), accuracy: 5)
+        }
+        let settled = start.addingTimeInterval(180)
+        let setOff = settled.addingTimeInterval(55 * 60)
+        points.append(fix(offset(cafe, north: 15, east: 0), at: setOff, accuracy: 5))
+        // The ride away, 6 m/s.
+        points += (1...45).map { step in
+            fix(offset(cafe, north: 15 + Double(step) * 24, east: 0), at: setOff.addingTimeInterval(Double(step) * 4), accuracy: 5)
+        }
+
+        let stays = SampleStayInference.stays(from: points, now: setOff.addingTimeInterval(200))
+
+        XCTAssertEqual(stays.count, 1)
+        let stay = try XCTUnwrap(stays.first)
+        XCTAssertEqual(stay.departureDate, setOff)
+        XCTAssertLessThanOrEqual(abs(stay.arrivalDate.timeIntervalSince(settled)), 90)
+    }
+
     /// Changed deliberately: 7.1 km in 24 minutes (4.9 m/s) with 25 steps a minute used to
     /// stay unknown. That is the owner's scooter in city traffic, and a motor vehicle is
     /// the answer; only Core Motion's own cycling reading keeps it from being one.
@@ -1175,6 +1201,49 @@ final class SampleStayReconciliationTests: XCTestCase {
         try await rebuild.assertSettled()
     }
 
+    /// A late visit report dated the stop to when the person parked, before a 15-minute walk
+    /// around the block and back. Joined with the stop the fixes showed, its centre came
+    /// from the walk's dense fixes, the stop was trimmed to two minutes on the street and
+    /// dissolved, and one trip ran from the first stop to the next (Da Lat, Nov 27).
+    func testLateVisitThatClaimsTheWalkThereKeepsTheStop() async throws {
+        let rebuild = try makeRebuild(mode: .automotive, steps: 0)
+        let start = Date().addingTimeInterval(-6 * 60 * 60)
+        let home = CLLocationCoordinate2D(latitude: 10.76, longitude: 106.70)
+        let parked = offset(home, north: 1_500, east: 0)
+        let next = offset(parked, north: 0, east: 1_500)
+        let left = start.addingTimeInterval(60 * 60)
+        let atParking = left.addingTimeInterval(6 * 60)
+        let settled = atParking.addingTimeInterval(15 * 60)
+        let setOff = settled.addingTimeInterval(55 * 60)
+        let atNext = setOff.addingTimeInterval(6 * 60)
+
+        _ = try rebuild.visit(home, from: start, to: left)
+        try rebuild.fixes(home, at: [5, 30, 59].map { start.addingTimeInterval($0 * 60) })
+        var fixes = track(from: home, north: 1_500, east: 0, start: left, seconds: 6 * 60)
+        // Out 450 m and back at 1 m/s, a fix every 4 seconds.
+        fixes += track(from: parked, north: 0, east: 450, start: atParking, seconds: 7.5 * 60)
+        fixes += track(from: offset(parked, north: 0, east: 450), north: 0, east: -450,
+                       start: atParking.addingTimeInterval(7.5 * 60), seconds: 7.5 * 60)
+        fixes.append(location(offset(parked, north: 15, east: 0), at: setOff))
+        fixes += track(from: parked, north: 0, east: 1_500, start: setOff, seconds: 6 * 60)
+        _ = try rebuild.repository.appendSamples(from: fixes, source: .continuous)
+        _ = try rebuild.visit(next, from: atNext, to: atNext.addingTimeInterval(60 * 60))
+        try rebuild.fixes(next, at: [10, 40, 59].map { atNext.addingTimeInterval($0 * 60) })
+        await rebuild.assembler.reconcileSampleStays()
+
+        // iOS reports the visit an hour late, from when the person parked.
+        _ = try rebuild.visit(offset(parked, north: 40, east: 40), from: atParking, to: setOff.addingTimeInterval(15))
+        await rebuild.assembler.reconcileSampleStays()
+
+        let stop = try XCTUnwrap(try rebuild.places().first { distance($0.coordinate, parked) < 100 }, "The stop is kept")
+        XCTAssertGreaterThanOrEqual(stop.arrivalDate, settled.addingTimeInterval(-90), "The walk is not part of the stop")
+        XCTAssertEqual(try XCTUnwrap(stop.departureDate).timeIntervalSince(setOff), 0, accuracy: 60)
+        XCTAssertEqual(try rebuild.places().count, 3)
+        XCTAssertEqual(try rebuild.moves().count, 2)
+        try rebuild.assertInvariants()
+        try await rebuild.assertSettled()
+    }
+
     private func makeBlipScene(
         blipMinutes: Double,
         steps: Int?,
@@ -1972,6 +2041,21 @@ private func location(_ coordinate: CLLocationCoordinate2D, at date: Date) -> CL
         speed: -1,
         timestamp: date
     )
+}
+
+/// Dense fixes every 4 seconds along a straight line, the first one 4 seconds after `start`.
+private func track(
+    from origin: CLLocationCoordinate2D,
+    north: Double,
+    east: Double,
+    start: Date,
+    seconds: TimeInterval
+) -> [CLLocation] {
+    let count = Int(seconds / 4)
+    return (1...count).map { index in
+        let share = Double(index) / Double(count)
+        return location(offset(origin, north: north * share, east: east * share), at: start.addingTimeInterval(Double(index) * 4))
+    }
 }
 
 private func offset(

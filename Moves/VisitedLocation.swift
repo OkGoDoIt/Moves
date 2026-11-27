@@ -2697,7 +2697,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
 
             places.sort { $0.arrivalDate < $1.arrivalDate }
             // Every fix the pass can see, so a merged stop gets the same centre from either entry point.
-            try mergeAdjacentSamePlaceVisits(&places, samples: evidence.samples)
+            try mergeAdjacentSamePlaceVisits(&places, samples: evidence.samples, stays: evidence.inferred)
             closeOpenPlacesThatHaveASuccessor(places)
             trimOverlappingStops(places)
             // Stop boundaries follow the fixes: trimmed to where the person was last and
@@ -2948,13 +2948,27 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         guard isAutomaticStop(place) else { return proposed }
         let end = place.departureDate ?? .distantFuture
         let fixes = evidence.fixes(from: proposed, through: min(end, Date.distantFuture))
-        return StopBoundaryEvidence.trimmedArrival(
+        let arrival = StopBoundaryEvidence.trimmedArrival(
             centre: place.coordinate,
             arrival: proposed,
             departure: place.departureDate,
             fixes: fixes,
             steps: evidence.stepLookup
         ) ?? proposed
+        // A visit report can date the arrival to when the person first came by, then walked
+        // on and came back. Where no stay the fixes show covers that stretch and the fixes
+        // there keep moving, the stop begins with the stay the fixes do show.
+        let firstStay = evidence.inferred
+            .filter { stay in
+                stay.arrivalDate < end && stay.presenceEnd > arrival
+                    && Self.distanceMeters(from: stay.coordinate, to: place.coordinate) <= Self.overlappingStayMatchDistance
+            }
+            .min { $0.arrivalDate < $1.arrivalDate }
+        if let firstStay, firstStay.arrivalDate > arrival,
+           evidence.showsTravel(from: arrival, to: firstStay.arrivalDate) {
+            return firstStay.arrivalDate
+        }
+        return arrival
     }
 
     /// The departure the fixes support for `place`, starting from `proposed`. Only ever
@@ -3725,7 +3739,8 @@ final class SwiftDataTimelineRepository: TimelineRepository {
     /// later while the phone has not moved.
     private func mergeAdjacentSamePlaceVisits(
         _ places: inout [VisitPlace],
-        samples: [LocationSample]
+        samples: [LocationSample],
+        stays: [SampleStay] = []
     ) throws {
         var index = 0
         while index < places.count - 1 {
@@ -3743,7 +3758,14 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             let sameNamedHandoff = abs(gap) <= 60
                 && !currentName.isEmpty
                 && currentName == next.userLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let phantom = hasPhantomTrip(from: current, to: next, separation: distance)
+            // Wander around a door stays inside one stay the fixes show. A stay of its own
+            // there, begun after this stop ended, is a short walk to a real second stop.
+            let nextStayedApart = stays.contains { stay in
+                stay.arrivalDate >= currentEnd.addingTimeInterval(-60)
+                    && stay.arrivalDate < (next.departureDate ?? .distantFuture)
+                    && Self.distanceMeters(from: stay.coordinate, to: next.coordinate) <= Self.stayMatchDistance
+            }
+            let phantom = !nextStayedApart && hasPhantomTrip(from: current, to: next, separation: distance)
             let reach = overlaps || sameNamedHandoff || phantom
                 ? Self.overlappingStayMatchDistance
                 : Self.stayMatchDistance
@@ -3777,7 +3799,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
                 current.departureDate ?? current.arrivalDate,
                 next.departureDate ?? next.arrivalDate
             )
-            let robust = Self.robustStayCenter(in: samples, from: joinedStart, to: joinedEnd)
+            let robust = Self.joinedStayCenter(in: samples, stays: stays, from: joinedStart, to: joinedEnd)
             if let robust {
                 current.latitude = robust.latitude
                 current.longitude = robust.longitude
@@ -4787,27 +4809,51 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         return PlaceLearningEngine.robustCenter(of: fixes)
     }
 
-    /// Robust centre from `samples`, which must be sorted by time.
-    private static func robustStayCenter(
+    /// The centre of two reports of one stay joined into one, from `samples` sorted by time.
+    ///
+    /// Only the stretches the fixes show as a stay count. A visit report can claim the walk
+    /// up to the door as time there, and capture follows a walk with a fix every few seconds
+    /// but a stop with almost none, so the walk's fixes would put the centre on the street
+    /// walked, and the stop's boundaries, trimmed to that centre, would leave it minutes long.
+    private static func joinedStayCenter(
         in samples: [LocationSample],
+        stays: [SampleStay],
         from start: Date,
         to end: Date
     ) -> CLLocationCoordinate2D? {
-        guard end > start, !samples.isEmpty else { return nil }
-        var low = 0
-        var high = samples.count
-        while low < high {
-            let middle = (low + high) / 2
-            if samples[middle].timestamp < start { low = middle + 1 } else { high = middle }
+        let overlapping = stays.compactMap { stay -> (stay: SampleStay, interval: DateInterval)? in
+            let from = max(stay.arrivalDate, start)
+            let to = min(stay.departureDate ?? end, end)
+            return to > from ? (stay, DateInterval(start: from, end: to)) : nil
         }
+        guard let longest = overlapping.max(by: { $0.interval.duration < $1.interval.duration }) else {
+            return robustStayCenter(in: samples, during: [DateInterval(start: start, end: max(start, end))])
+        }
+        return robustStayCenter(in: samples, during: overlapping.map(\.interval)) ?? longest.stay.coordinate
+    }
+
+    /// Robust centre of the fixes in `intervals`, from `samples` sorted by time.
+    private static func robustStayCenter(
+        in samples: [LocationSample],
+        during intervals: [DateInterval]
+    ) -> CLLocationCoordinate2D? {
+        guard !samples.isEmpty else { return nil }
         var fixes: [(latitude: Double, longitude: Double, accuracy: Double)] = []
-        var index = low
-        while index < samples.count, samples[index].timestamp <= end {
-            let sample = samples[index]
-            if sample.source != .photoLibrary {
-                fixes.append((sample.latitude, sample.longitude, sample.horizontalAccuracy))
+        for interval in intervals where interval.end > interval.start {
+            var low = 0
+            var high = samples.count
+            while low < high {
+                let middle = (low + high) / 2
+                if samples[middle].timestamp < interval.start { low = middle + 1 } else { high = middle }
             }
-            index += 1
+            var index = low
+            while index < samples.count, samples[index].timestamp <= interval.end {
+                let sample = samples[index]
+                if sample.source != .photoLibrary {
+                    fixes.append((sample.latitude, sample.longitude, sample.horizontalAccuracy))
+                }
+                index += 1
+            }
         }
         return PlaceLearningEngine.robustCenter(of: fixes)
     }
