@@ -33,6 +33,17 @@ struct MapTabView: View {
     /// The camera once it settles, which is when Heat and Fog redraw.
     @State private var restingCameraRect: MercatorRect?
     @State private var mapSize: CGSize = .zero
+    /// The map's height as a share of the screen. Zoomed all the way out, the flat map shows about
+    /// a quarter of the world's width on a phone, and never more than half however it is shaped;
+    /// a shorter map shows more of the width. Pinching out past the limit shrinks it, down to a
+    /// square that holds half the world, and zooming back in restores it.
+    @State private var mapHeightScale: CGFloat = 1
+    @State private var worldPinch: WorldPinch?
+    @State private var shrunkWidestSpan: Double = 0
+    /// Where the top bar ends and the chips begin, so a shrunken map sits between them.
+    @State private var screenSize: CGSize = .zero
+    @State private var topBarBottom: CGFloat = 0
+    @State private var chipsTop: CGFloat = 0
     @State private var userLocation: CLLocationCoordinate2D?
     /// All Time opens on where you are rather than fitting years of travel, once per visit to it.
     @State private var hasFramedAllTime = false
@@ -194,8 +205,18 @@ struct MapTabView: View {
     var body: some View {
         let _ = MapPerformanceProbe.shared.bodyEvaluated()
         ZStack(alignment: .top) {
-            map
-                .ignoresSafeArea()
+            GeometryReader { proxy in
+                let layout = WorldMapLayout(screen: proxy.size, heightScale: mapHeightScale,
+                                            topBarBottom: topBarBottom, chipsTop: chipsTop)
+                map
+                    // MapKit draws past its own bounds; a shrunken map keeps to its frame.
+                    .clipShape(.rect(cornerRadius: 20 * layout.progress, style: .continuous))
+                    .frame(width: proxy.size.width, height: layout.height)
+                    .position(x: proxy.size.width / 2, y: layout.centerY)
+            }
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { screenSize = $0 }
+            .background(Color(.systemGroupedBackground))
+            .ignoresSafeArea()
 
             VStack(spacing: 0) {
                 if coverage.loadFailed, layer != .routes {
@@ -205,6 +226,7 @@ struct MapTabView: View {
                 topBar
                     .padding(.horizontal, 14)
                     .padding(.top, 8)
+                    .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { topBarBottom = $0 }
 
                 if coverage.isCatchingUp {
                     Text(String(localized: "Catching up on your history"))
@@ -227,6 +249,7 @@ struct MapTabView: View {
                     )
                     Spacer(minLength: 8)
                 }
+                .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { chipsTop = $0 }
                 .padding(.horizontal, 14)
                 .padding(.bottom, 8)
 
@@ -510,15 +533,34 @@ struct MapTabView: View {
                 let started = CACurrentMediaTime()
                 MapPerformanceProbe.shared.activity("camera")
                 cameraState.rect = MercatorRect(context.rect)
+                cameraState.distance = context.camera.distance
                 MapPerformanceProbe.shared.cameraCallback(took: CACurrentMediaTime() - started)
             }
             .onMapCameraChange(frequency: .onEnd) { context in
                 MapPerformanceProbe.shared.settledAt = CACurrentMediaTime()
                 let rect = MercatorRect(context.rect)
                 cameraState.rect = rect
+                cameraState.distance = context.camera.distance
                 restingCameraRect = rect
                 visibleRegion = context.region
+                // Zoomed back in some other way (a double tap, a range that frames itself): showing
+                // well under the widest span it has shown while shrunk. Width, because the camera's
+                // distance also changes with the map's height.
+                if mapHeightScale < 1 {
+                    shrunkWidestSpan = max(shrunkWidestSpan, rect.width)
+                    if worldPinch == nil, rect.width < shrunkWidestSpan / 2 {
+                        shrunkWidestSpan = 0
+                        withAnimation(.smooth(duration: 0.3)) { mapHeightScale = 1 }
+                    }
+                } else {
+                    shrunkWidestSpan = 0
+                }
             }
+            .simultaneousGesture(
+                MagnifyGesture()
+                    .onChanged { value in worldPinchChanged(value.magnification) }
+                    .onEnded { _ in worldPinchEnded() }
+            )
             .simultaneousGesture(
                 SpatialTapGesture().onEnded { event in
                     guard layer == .routes,
@@ -530,6 +572,39 @@ struct MapTabView: View {
                     }
                 }
             )
+        }
+    }
+
+    /// A pinch out at MapKit's limit shrinks the map toward a square; a pinch in on a shrunken
+    /// map grows it back. Anywhere else the pinch is MapKit's alone.
+    private var worldLayout: WorldMapLayout {
+        WorldMapLayout(screen: screenSize, heightScale: mapHeightScale, topBarBottom: topBarBottom, chipsTop: chipsTop)
+    }
+
+    private func worldPinchChanged(_ magnification: CGFloat) {
+        let minimum = worldLayout.minimumScale
+        guard minimum < 1 else { return }
+        var pinch = worldPinch ?? WorldPinch()
+        if pinch.engaged == nil {
+            if mapHeightScale < 1 || pinch.noteOutward(magnification: magnification, distance: cameraState.distance) {
+                pinch.engaged = WorldPinch.Start(magnification: magnification, scale: mapHeightScale)
+            }
+        }
+        if let start = pinch.engaged {
+            let scale = start.scale * magnification / max(start.magnification, 0.01)
+            mapHeightScale = min(max(scale, minimum), 1)
+        }
+        worldPinch = pinch
+    }
+
+    /// Close to either end, the map settles there.
+    private func worldPinchEnded() {
+        worldPinch = nil
+        let minimum = worldLayout.minimumScale
+        guard mapHeightScale < 1 else { return }
+        let target: CGFloat? = mapHeightScale - minimum < 0.08 ? minimum : (1 - mapHeightScale < 0.08 ? 1 : nil)
+        if let target, target != mapHeightScale {
+            withAnimation(.smooth(duration: 0.25)) { mapHeightScale = target }
         }
     }
 
@@ -789,5 +864,83 @@ enum MapCameraDefaults {
               let location = manager.location,
               abs(location.timestamp.timeIntervalSinceNow) < 7 * 86_400 else { return nil }
         return location.coordinate
+    }
+}
+
+/// Where the Map tab's map sits as it shrinks toward a square for a wider view of the world.
+///
+/// MapKit's flat map stops zooming out at a fixed camera distance, which fixes how much of the
+/// world's height it shows; the width it shows is that height times the map's own shape, up to
+/// half the world, which it never goes past. So a portrait map shows about a quarter of the
+/// world's width, and a square one shows half.
+struct WorldMapLayout {
+    /// MapKit stops around 37,000 km up on an iPhone 18 Pro (iOS 27), nearer on smaller screens.
+    /// Only a camera at least this far out can be at the limit.
+    static let farDistance = 15_000_000.0
+
+    let screen: CGSize
+    let heightScale: CGFloat
+    let topBarBottom: CGFloat
+    let chipsTop: CGFloat
+
+    /// Room left between the top bar and the chips.
+    private var gap: CGFloat? {
+        chipsTop > topBarBottom + 2 * Self.gapMargin ? chipsTop - topBarBottom - 2 * Self.gapMargin : nil
+    }
+
+    static let gapMargin: CGFloat = 8
+
+    /// The smallest height share: a square, which already shows half the world's width, or the
+    /// gap between the controls on a short screen, so the controls never cover the map's
+    /// attribution. A landscape map is wider than tall already and never shrinks.
+    var minimumScale: CGFloat {
+        guard screen.height > 0, screen.width < screen.height else { return 1 }
+        return min(screen.width, gap ?? screen.width) / screen.height
+    }
+
+    /// 0 at full height, 1 at the smallest.
+    var progress: CGFloat {
+        let minimum = minimumScale
+        guard minimum < 1 else { return 0 }
+        return min(max((1 - heightScale) / (1 - minimum), 0), 1)
+    }
+
+    var height: CGFloat {
+        screen.height * max(heightScale, minimumScale)
+    }
+
+    /// Centred in the gap between the top bar and the chips as it shrinks.
+    var centerY: CGFloat {
+        let middle = screen.height / 2
+        guard chipsTop > topBarBottom else { return middle }
+        let target = min(max((topBarBottom + chipsTop) / 2, height / 2), screen.height - height / 2)
+        return middle + (target - middle) * progress
+    }
+}
+
+/// A pinch, and once it has started resizing the map, where it started.
+struct WorldPinch {
+    struct Start {
+        let magnification: CGFloat
+        let scale: CGFloat
+    }
+
+    var engaged: Start?
+    private var last: (magnification: CGFloat, distance: Double)?
+    private var stalled = 0
+
+    /// Whether the pinch has hit MapKit's limit: still spreading outward while the camera, already
+    /// far out, has stopped moving away. The limit's distance differs from phone to phone, so it
+    /// is found by watching rather than by a number.
+    mutating func noteOutward(magnification: CGFloat, distance: Double) -> Bool {
+        defer { last = (magnification, distance) }
+        guard let last, distance >= WorldMapLayout.farDistance else {
+            stalled = 0
+            return false
+        }
+        if magnification < last.magnification - 0.005 {
+            stalled = distance <= last.distance * 1.002 ? stalled + 1 : 0
+        }
+        return stalled >= 2
     }
 }

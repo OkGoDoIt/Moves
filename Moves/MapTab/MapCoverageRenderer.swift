@@ -1446,6 +1446,8 @@ final class MapCoverageController {
 @MainActor
 final class MapCameraState {
     var rect: MercatorRect?
+    /// The camera's distance from the ground, read only by gestures; never redraws anything.
+    @ObservationIgnored var distance: Double = 0
 }
 
 /// Places the current bitmap over the map so it pans and zooms with the camera. Fog keeps its
