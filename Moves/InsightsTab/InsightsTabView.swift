@@ -134,7 +134,6 @@ struct InsightsTabView: View {
                     healthCard
                     geographyCard
                     calendarCard
-                    streaksCard
                     monthlyCard
                     timeOfDayCard
                     weekdayCard
@@ -349,31 +348,37 @@ struct InsightsTabView: View {
         .disabled(count == 0)
     }
 
+    /// Active days and the streak on top, the days themselves month by month below.
     private var calendarCard: some View {
-        InsightsCard(title: String(localized: "Activity calendar")) {
-            InsightsActivityCalendar(days: store.snapshot.calendarDays, calendar: calendar)
-                .equatable()
+        let snapshot = store.snapshot
+        return InsightsCard(title: String(localized: "Activity calendar")) {
+            InsightsMetricRow {
+                InsightsMetric(
+                    title: String(localized: "Active days"),
+                    value: snapshot.activeDayCount.formatted()
+                )
+                InsightsMetric(title: streakTitle, value: streakLabel(streakValue))
+            }
+            InsightsActivityCalendar(days: snapshot.calendarDays, calendar: calendar) { date in
+                rootController.selectedTab = .timeline
+                rootController.requestedJumpDate = date
+            }
+            .equatable()
         }
     }
 
-    private var streaksCard: some View {
-        InsightsCard(title: String(localized: "Streaks")) {
-            InsightsMetricRow {
-                if store.snapshot.showsCurrentStreak {
-                    InsightsMetric(
-                        title: String(localized: "Current"),
-                        value: streakLabel(store.snapshot.currentStreakDays)
-                    )
-                }
-                InsightsMetric(
-                    title: String(localized: "Longest"),
-                    value: streakLabel(store.snapshot.longestStreakDays)
-                )
-            }
-            Text(String(localized: "A day counts when you moved at least \(activeDayThreshold)."))
-                .font(.system(.caption, design: .rounded, weight: .medium))
-                .foregroundStyle(.secondary)
+    private var streakValue: Int {
+        store.snapshot.showsCurrentStreak ? store.snapshot.currentStreakDays : store.snapshot.longestStreakDays
+    }
+
+    /// One tile says both: the streak running now, and how it compares with the longest.
+    private var streakTitle: String {
+        let snapshot = store.snapshot
+        guard snapshot.showsCurrentStreak else { return String(localized: "Longest streak") }
+        if snapshot.currentStreakDays > 1, snapshot.currentStreakDays >= snapshot.longestStreakDays {
+            return String(localized: "Streak, your longest")
         }
+        return String(localized: "Streak · longest \(snapshot.longestStreakDays)")
     }
 
     private var monthlyCard: some View {
@@ -585,17 +590,6 @@ struct InsightsTabView: View {
 
     private func streakLabel(_ days: Int) -> String {
         days == 1 ? String(localized: "1 day") : String(localized: "\(days) days")
-    }
-
-    /// "500 m" or "0.3 mi", in the unit the rest of the tab uses.
-    private var activeDayThreshold: String {
-        let meters = Measurement(value: InsightsSnapshot.activeDayMinimumDistance, unit: UnitLength.meters)
-        if MovesStatisticsFormatting.roadUnitMeters == 1_000 {
-            return meters.formatted(.measurement(width: .abbreviated, usage: .asProvided))
-        }
-        return meters.converted(to: .miles).formatted(
-            .measurement(width: .abbreviated, usage: .asProvided, numberFormatStyle: .number.precision(.fractionLength(1)))
-        )
     }
 
     private func comparisonPhrase(_ comparison: InsightsSnapshot.Comparison) -> String {
@@ -941,16 +935,22 @@ private struct InsightsWorldThumbnail: View {
     }
 }
 
-/// GitHub-style year grid, colored by distance. Future days stay empty.
+/// The period's days month by month, shaded by distance. Tapping a day shows its
+/// distance and offers it on the Timeline. Future days stay faint.
 private struct InsightsActivityCalendar: View, Equatable {
     let days: [InsightsSnapshot.CalendarDay]
     var calendar: Calendar = .autoupdatingCurrent
+    var openDay: (Date) -> Void = { _ in }
 
-    /// The grid places a year of days by calendar arithmetic, so it is laid out again only
-    /// when the days change, not each time the Insights page re-renders around it.
+    /// The months are laid out by calendar arithmetic, so they are drawn again only when
+    /// the days change, not each time the Insights page re-renders around them. `openDay`
+    /// only reaches the root controller, which never changes.
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.days == rhs.days && lhs.calendar == rhs.calendar
     }
+
+    @State private var selectedKey: String?
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
         if days.isEmpty {
@@ -958,22 +958,80 @@ private struct InsightsActivityCalendar: View, Equatable {
                 .font(.system(.footnote, design: .rounded))
                 .foregroundStyle(.secondary)
         } else {
-            VStack(alignment: .leading, spacing: 8) {
-                chart
-                legend
+            let months = self.months
+            let titles = monthTitles(months)
+            VStack(alignment: .leading, spacing: 14) {
+                LazyVGrid(
+                    columns: Array(repeating: GridItem(.flexible(), spacing: 12, alignment: .top), count: columnCount),
+                    alignment: .leading,
+                    spacing: 14
+                ) {
+                    ForEach(months) { month in
+                        InsightsCalendarMonth(
+                            month: month,
+                            title: titles[month.id] ?? "",
+                            selectedKey: selectedKey,
+                            fill: { color(for: $0.day, level: $0.level) }
+                        ) { day in
+                            withAnimation(.snappy) {
+                                selectedKey = selectedKey == day.dayKey ? nil : day.dayKey
+                            }
+                        }
+                    }
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityLabel(String(localized: "\(activeCount) active days"))
+                .accessibilityChartDescriptor(InsightsCalendarDescriptor(days: days))
+                footer
+                    .frame(minHeight: 36, alignment: .top)
             }
+        }
+    }
+
+    private var columnCount: Int {
+        dynamicTypeSize.isAccessibilitySize ? 3 : 4
+    }
+
+    /// The tapped day, or the key to the shading.
+    @ViewBuilder
+    private var footer: some View {
+        if let day = selectedDay {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(day.date.formatted(dayStyle))
+                        .font(.system(.subheadline, design: .rounded, weight: .semibold))
+                    Text(dayDetail(day))
+                        .font(.system(.caption, design: .rounded, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+                Button {
+                    openDay(day.date)
+                } label: {
+                    Text(String(localized: "Open day"))
+                        .font(.system(.subheadline, design: .rounded, weight: .semibold))
+                }
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.capsule)
+                .tint(MovesPalette.place)
+            }
+            .accessibilityElement(children: .combine)
+            .transition(.opacity)
+        } else {
+            legend
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .transition(.opacity)
         }
     }
 
     /// Less-to-more key, so the shading reads without guessing.
     private var legend: some View {
         HStack(spacing: 4) {
-            Spacer(minLength: 0)
             Text(String(localized: "Less"))
             ForEach(0..<5, id: \.self) { level in
-                RoundedRectangle(cornerRadius: 2, style: .continuous)
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
                     .fill(color(forLevel: level))
-                    .frame(width: 10, height: 10)
+                    .frame(width: 11, height: 11)
             }
             Text(String(localized: "More"))
         }
@@ -982,36 +1040,56 @@ private struct InsightsActivityCalendar: View, Equatable {
         .accessibilityHidden(true)
     }
 
-    private var chart: some View {
-        Chart(plotPoints) { point in
-            RectangleMark(
-                x: .value(String(localized: "Week"), point.weekIndex),
-                y: .value(String(localized: "Day"), point.plotY)
-            )
-            .foregroundStyle(color(for: point.day, level: point.level))
-            .cornerRadius(2)
-        }
-        .chartXAxis(.hidden)
-        .chartYAxis {
-            AxisMarks(values: [0, 2, 4, 6]) { value in
-                AxisValueLabel {
-                    if let plotY = value.as(Int.self) {
-                        let row = 6 - plotY
-                        if weekdayLabels.indices.contains(row) {
-                            Text(weekdayLabels[row])
-                                .font(.system(.caption2, design: .rounded, weight: .medium))
-                        }
-                    }
-                }
+    private var selectedDay: InsightsSnapshot.CalendarDay? {
+        guard let selectedKey else { return nil }
+        return days.first { $0.dayKey == selectedKey }
+    }
+
+    private var dayStyle: Date.FormatStyle {
+        Date.FormatStyle(calendar: calendar, timeZone: calendar.timeZone)
+            .weekday(.wide).month(.wide).day()
+    }
+
+    private func dayDetail(_ day: InsightsSnapshot.CalendarDay) -> String {
+        if day.distanceMeters > 0 { return MovesStatisticsFormatting.distance(day.distanceMeters) }
+        return day.isActive ? String(localized: "Flights only") : String(localized: "No trips")
+    }
+
+    /// The last year's days touch thirteen months; the sliver of the first is left out.
+    private var months: [InsightsCalendarMonthData] {
+        let maximum = maximumDistance
+        var result: [InsightsCalendarMonthData] = []
+        for day in days {
+            let parts = calendar.dateComponents([.year, .month, .day], from: day.date)
+            guard let year = parts.year, let month = parts.month, let dayOfMonth = parts.day else { continue }
+            let id = "\(year)-\(month)"
+            if result.last?.id != id {
+                guard let start = calendar.date(from: DateComponents(year: year, month: month, day: 1)) else { continue }
+                let offset = (calendar.component(.weekday, from: start) - calendar.firstWeekday + 7) % 7
+                result.append(InsightsCalendarMonthData(id: id, start: start, year: year, month: month, offset: offset))
             }
+            let index = result[result.count - 1].offset + dayOfMonth - 1
+            guard result[result.count - 1].cells.indices.contains(index) else { continue }
+            result[result.count - 1].cells[index] = InsightsCalendarCell(
+                day: day,
+                level: level(for: day.distanceMeters, maximum: maximum)
+            )
         }
-        .chartYScale(domain: -0.5...6.5)
-        .chartLegend(.hidden)
-        // Axis labels stop growing before they collide; the captions keep scaling.
-        .dynamicTypeSize(...DynamicTypeSize.xxLarge)
-        .frame(height: 128)
-        .accessibilityLabel(String(localized: "\(activeCount) active days"))
-        .accessibilityChartDescriptor(InsightsCalendarDescriptor(days: days))
+        if result.count > 12 { result.removeFirst(result.count - 12) }
+        return result
+    }
+
+    /// "Mar", with the year on the first month and on January when the months span two years.
+    private func monthTitles(_ months: [InsightsCalendarMonthData]) -> [String: String] {
+        let spansYears = Set(months.map(\.year)).count > 1
+        let short = Date.FormatStyle(calendar: calendar, timeZone: calendar.timeZone).month(.abbreviated)
+        let withYear = short.year()
+        var titles: [String: String] = [:]
+        for (index, month) in months.enumerated() {
+            let showsYear = spansYears && (index == 0 || month.month == 1)
+            titles[month.id] = month.start.formatted(showsYear ? withYear : short)
+        }
+        return titles
     }
 
     private func color(forLevel level: Int) -> Color {
@@ -1037,34 +1115,6 @@ private struct InsightsActivityCalendar: View, Equatable {
         days.filter(\.isActive).count
     }
 
-    private var weekdayLabels: [String] {
-        let symbols = calendar.veryShortStandaloneWeekdaySymbols
-        let first = calendar.firstWeekday - 1
-        return (0..<7).map { offset in
-            symbols[(first + offset) % 7]
-        }
-    }
-
-    private var plotPoints: [CalendarPlotPoint] {
-        guard let first = days.first else { return [] }
-        let gridStart = calendar.dateInterval(of: .weekOfYear, for: first.date)?.start
-            ?? first.date
-        let maxDistance = maximumDistance
-        return days.map { day in
-            let weekday = calendar.component(.weekday, from: day.date)
-            let row = (weekday - calendar.firstWeekday + 7) % 7
-            let daysFromStart = calendar.dateComponents([.day], from: gridStart, to: day.date).day ?? 0
-            let weekIndex = max(daysFromStart, 0) / 7
-            return CalendarPlotPoint(
-                id: day.dayKey,
-                weekIndex: weekIndex,
-                plotY: 6 - row,
-                level: level(for: day.distanceMeters, maximum: maxDistance),
-                day: day
-            )
-        }
-    }
-
     private func level(for distance: Double, maximum: Double) -> Int {
         guard distance > 0, maximum > 0 else { return 0 }
         let fraction = distance / maximum
@@ -1083,12 +1133,85 @@ private struct InsightsActivityCalendar: View, Equatable {
     }
 }
 
-private struct CalendarPlotPoint: Identifiable {
-    let id: String
-    let weekIndex: Int
-    let plotY: Int
-    let level: Int
+private struct InsightsCalendarCell {
     let day: InsightsSnapshot.CalendarDay
+    let level: Int
+}
+
+/// One month laid out on its weeks: six rows of seven, so every month block is the same height.
+private struct InsightsCalendarMonthData: Identifiable {
+    let id: String
+    let start: Date
+    let year: Int
+    let month: Int
+    /// Blank cells before the 1st, counted from the locale's first weekday.
+    let offset: Int
+    var cells: [InsightsCalendarCell?] = Array(repeating: nil, count: 42)
+}
+
+private struct InsightsCalendarMonth: View {
+    let month: InsightsCalendarMonthData
+    let title: String
+    let selectedKey: String?
+    let fill: (InsightsCalendarCell) -> Color
+    let select: (InsightsSnapshot.CalendarDay) -> Void
+
+    @State private var width: CGFloat = 0
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title)
+                .font(.system(.caption2, design: .rounded, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+            Canvas { context, size in
+                let cell = size.width / 7
+                let inset = max(cell * 0.11, 0.75)
+                for (index, entry) in month.cells.enumerated() {
+                    guard let entry else { continue }
+                    let frame = CGRect(
+                        x: CGFloat(index % 7) * cell,
+                        y: CGFloat(index / 7) * cell,
+                        width: cell,
+                        height: cell
+                    ).insetBy(dx: inset, dy: inset)
+                    let radius = frame.width * 0.28
+                    context.fill(
+                        Path(roundedRect: frame, cornerRadius: radius, style: .continuous),
+                        with: .color(fill(entry))
+                    )
+                    if entry.day.dayKey == selectedKey {
+                        let ring = frame.insetBy(dx: -inset * 0.9, dy: -inset * 0.9)
+                        context.stroke(
+                            Path(roundedRect: ring, cornerRadius: radius + inset, style: .continuous),
+                            with: .color(.primary),
+                            lineWidth: 1.5
+                        )
+                    }
+                }
+            }
+            .aspectRatio(7.0 / 6.0, contentMode: .fit)
+            .contentShape(Rectangle())
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
+            .onTapGesture(coordinateSpace: .local) { location in
+                guard width > 0 else { return }
+                let cell = width / 7
+                let index = Int(location.y / cell) * 7 + Int(location.x / cell)
+                guard month.cells.indices.contains(index),
+                      let entry = month.cells[index],
+                      !entry.day.isFuture else { return }
+                select(entry.day)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityText)
+    }
+
+    private var accessibilityText: String {
+        let active = month.cells.compactMap { $0 }.filter(\.day.isActive).count
+        return String(localized: "\(title): \(active) active days")
+    }
 }
 
 private struct InsightsCalendarDescriptor: AXChartDescriptorRepresentable {
@@ -1123,17 +1246,34 @@ private struct InsightsCalendarDescriptor: AXChartDescriptorRepresentable {
     }
 }
 
-/// Small caption under a chart: the bar being touched, or the biggest one.
-private struct InsightsChartCaption: View {
-    let text: String
+/// The answer above a chart: the highlighted bar's value, large, and what it is under it.
+/// It follows the tapped bar, and the biggest one otherwise.
+private struct InsightsChartHeadline: View {
+    let value: String
+    let detail: String
 
     var body: some View {
-        Text(text)
-            .font(.system(.caption, design: .rounded, weight: .medium))
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentTransition(.numericText())
+        VStack(alignment: .leading, spacing: 2) {
+            Text(value)
+                .font(.system(.title2, design: .rounded, weight: .bold))
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .contentTransition(.numericText())
+            Text(detail)
+                .font(.system(.footnote, design: .rounded, weight: .medium))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
     }
+}
+
+/// "9%", or "Under 1%" for a sliver that would otherwise round to nothing.
+private func insightsShareText(_ fraction: Double) -> String {
+    if fraction > 0, fraction < 0.005 { return String(localized: "Under 1%") }
+    return fraction.formatted(.percent.precision(.fractionLength(0)))
 }
 
 private extension View {
@@ -1185,33 +1325,55 @@ private struct InsightsMonthlyChart: View {
     @State private var selectedID: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Chart(rows) { row in
-                // Categories, not dates: each label then sits centred under its own bar.
-                BarMark(
-                    x: .value(usesYears ? String(localized: "Year") : String(localized: "Month"), row.id),
-                    y: .value(MovesStatisticsFormatting.roadUnitTitle, row.distanceMeters / MovesStatisticsFormatting.roadUnitMeters)
+        VStack(alignment: .leading, spacing: 12) {
+            if let row = highlighted {
+                InsightsChartHeadline(
+                    value: row.distanceMeters > 0
+                        ? MovesStatisticsFormatting.distance(row.distanceMeters)
+                        : String(localized: "No trips"),
+                    detail: detail(for: row)
+                )
+            } else {
+                InsightsChartHeadline(value: MovesStatisticsFormatting.distance(0), detail: String(localized: "No trips on the ground yet"))
+            }
+            let highlightedID = highlighted?.id
+            let plotted = Array(rows.enumerated())
+            // Bars on a numeric axis, one unit each: a category axis labels every bar
+            // whatever values it is given, which piled nineteen years on top of each other.
+            Chart(plotted, id: \.element.id) { index, row in
+                let distance = row.distanceMeters / MovesStatisticsFormatting.roadUnitMeters
+                RectangleMark(
+                    xStart: .value("Position", Double(index) + 0.14),
+                    xEnd: .value("Position", Double(index) + 0.86),
+                    yStart: .value("Distance", 0.0),
+                    yEnd: .value("Distance", distance)
                 )
                 .foregroundStyle(MovesPalette.transport(.cycling).gradient)
-                .opacity(selectedRow == nil || selectedRow?.id == row.id ? 1 : 0.35)
-                .cornerRadius(4)
+                .opacity(highlightedID == nil || highlightedID == row.id ? 1 : 0.4)
+                .cornerRadius(rows.count > 12 ? 3 : 4)
             }
+            .chartXScale(domain: 0...Double(max(rows.count, 1)))
             .insightsTapSelection($selectedID) { proxy, x in
-                proxy.value(atX: x, as: String.self)
+                guard let value: Double = proxy.value(atX: x) else { return nil }
+                let index = Int(value.rounded(.down))
+                return rows.indices.contains(index) ? rows[index].id : nil
             }
             .chartXAxis {
-                AxisMarks(values: labelledIDs) { value in
-                    AxisValueLabel {
-                        if let id = value.as(String.self), let row = rows.first(where: { $0.id == id }) {
-                            Text(shortName(row))
-                                .font(.system(.caption2, design: .rounded, weight: .medium))
-                                .foregroundStyle(.secondary)
+                AxisMarks(values: labelledPositions) { value in
+                    AxisValueLabel(anchor: .top) {
+                        if let position = value.as(Double.self) {
+                            let index = Int(position.rounded(.down))
+                            if rows.indices.contains(index) {
+                                Text(shortName(rows[index]))
+                                    .font(.system(.caption2, design: .rounded, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
                 }
             }
             .chartYAxis {
-                AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { value in
+                AxisMarks(position: .trailing, values: .automatic(desiredCount: 3)) { value in
                     AxisGridLine()
                     AxisValueLabel {
                         if let amount = value.as(Double.self) {
@@ -1227,19 +1389,24 @@ private struct InsightsMonthlyChart: View {
             .frame(height: 150)
             .accessibilityChartDescriptor(InsightsMonthlyDescriptor(rows: rows, usesYears: usesYears))
             .accessibilityLabel(usesYears ? String(localized: "Distance by year") : String(localized: "Distance by month"))
-
-            InsightsChartCaption(text: caption)
         }
     }
 
-    /// Every third month (or every few years) gets a label, so labels never crowd.
-    private var labelledIDs: [String] {
-        let every = usesYears ? max(rows.count / 5, 1) : 3
-        return rows.enumerated().compactMap { index, row in index % every == 0 ? row.id : nil }
+    /// Every month gets its initial. Years are labelled on round numbers (every year,
+    /// every second, fifth, or tenth), never more than six, so they never overlap.
+    private var labelledPositions: [Double] {
+        let step = usesYears ? ([1, 2, 5, 10, 20].first { rows.count / $0 <= 6 } ?? 50) : 1
+        return rows.indices.compactMap { index in
+            let year = calendar.component(.year, from: rows[index].date)
+            return !usesYears || year % step == 0 ? Double(index) + 0.5 : nil
+        }
     }
 
     private func shortName(_ row: InsightsSnapshot.MonthDistance) -> String {
-        usesYears ? row.date.formatted(.dateTime.year()) : row.date.formatted(.dateTime.month(.abbreviated))
+        if usesYears { return String(calendar.component(.year, from: row.date)) }
+        let index = calendar.component(.month, from: row.date) - 1
+        let symbols = calendar.veryShortStandaloneMonthSymbols
+        return symbols.indices.contains(index) ? symbols[index] : ""
     }
 
     private var selectedRow: InsightsSnapshot.MonthDistance? {
@@ -1247,25 +1414,30 @@ private struct InsightsMonthlyChart: View {
         return rows.first { $0.id == selectedID }
     }
 
-    private func name(_ row: InsightsSnapshot.MonthDistance) -> String {
-        usesYears ? row.date.formatted(.dateTime.year()) : row.date.formatted(.dateTime.month(.wide))
+    private var peak: InsightsSnapshot.MonthDistance? {
+        guard let peak = rows.max(by: { $0.distanceMeters < $1.distanceMeters }), peak.distanceMeters > 0 else { return nil }
+        return peak
     }
 
-    private var caption: String {
-        let flights = leavesOutFlights ? " " + String(localized: "Flights not included.") : ""
-        if let row = selectedRow {
-            if row.distanceMeters <= 0 {
-                return String(localized: "\(name(row)): no trips.") + flights
-            }
-            return String(localized: "\(name(row)): \(MovesStatisticsFormatting.distance(row.distanceMeters)).") + flights
+    /// The tapped bar, or the biggest.
+    private var highlighted: InsightsSnapshot.MonthDistance? {
+        selectedRow ?? peak
+    }
+
+    private func name(_ row: InsightsSnapshot.MonthDistance) -> String {
+        usesYears
+            ? String(calendar.component(.year, from: row.date))
+            : row.date.formatted(Date.FormatStyle(calendar: calendar, timeZone: calendar.timeZone).month(.wide))
+    }
+
+    private func detail(for row: InsightsSnapshot.MonthDistance) -> String {
+        let base: String
+        if selectedRow != nil || rows.filter({ $0.distanceMeters > 0 }).count == 1 {
+            base = name(row)
+        } else {
+            base = String(localized: "Most in \(name(row))")
         }
-        guard let peak = rows.max(by: { $0.distanceMeters < $1.distanceMeters }), peak.distanceMeters > 0 else {
-            return String(localized: "No trips on the ground yet.")
-        }
-        if rows.filter({ $0.distanceMeters > 0 }).count == 1 {
-            return String(localized: "\(name(peak)): \(MovesStatisticsFormatting.distance(peak.distanceMeters)).") + flights
-        }
-        return String(localized: "Most in \(name(peak)): \(MovesStatisticsFormatting.distance(peak.distanceMeters)).") + flights
+        return leavesOutFlights ? base + " · " + String(localized: "on the ground") : base
     }
 }
 
@@ -1310,42 +1482,58 @@ private struct InsightsHourChart: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 12) {
+            if let row = highlighted {
+                InsightsChartHeadline(value: Self.hourSpan(row.hour, calendar: calendar), detail: detail(for: row))
+            } else {
+                InsightsChartHeadline(value: "—", detail: String(localized: "No trips on the ground yet"))
+            }
+            let highlightedHour = highlighted?.hour
             Chart(rows) { row in
-                BarMark(
-                    x: .value(String(localized: "Hour"), row.hour),
-                    y: .value(String(localized: "Minutes"), row.duration / 60)
+                // Each bar fills its own hour, so the quarter lines fall exactly between bars.
+                let start = Double(row.hour) + 0.12
+                let end = Double(row.hour) + 0.88
+                let minutes = row.duration / 60
+                RectangleMark(
+                    xStart: .value("Hour", start),
+                    xEnd: .value("Hour", end),
+                    yStart: .value("Minutes", 0.0),
+                    yEnd: .value("Minutes", minutes)
                 )
                 .foregroundStyle(MovesPalette.transport(.walking).gradient)
-                .opacity(selected == nil || selected?.hour == row.hour ? 1 : 0.35)
+                .opacity(highlightedHour == nil || highlightedHour == row.hour ? 1 : 0.4)
                 .cornerRadius(2)
             }
-            .chartXScale(domain: -0.5...23.5)
+            .chartXScale(domain: 0...24)
             .insightsTapSelection($selectedHour) { proxy, x in
                 guard let value: Double = proxy.value(atX: x) else { return nil }
-                let hour = Int(value.rounded())
+                let hour = Int(value.rounded(.down))
                 return (0...23).contains(hour) ? hour : nil
             }
             .chartXAxis {
-                AxisMarks(values: [0, 6, 12, 18]) { value in
+                AxisMarks(values: [0, 6, 12, 18, 24]) { _ in
                     AxisGridLine()
-                    AxisValueLabel {
-                        if let hour = value.as(Int.self) {
-                            Text(Self.hourLabel(hour, calendar: calendar))
+                }
+                AxisMarks(values: [3, 9, 15, 21]) { value in
+                    AxisValueLabel(anchor: .top) {
+                        if let quarter = value.as(Int.self) {
+                            Text(Self.partOfDay(quarter))
                                 .font(.system(.caption2, design: .rounded, weight: .medium))
+                                .foregroundStyle(.secondary)
                         }
                     }
                 }
             }
             .chartYAxis(.hidden)
             .chartLegend(.hidden)
-            .dynamicTypeSize(...DynamicTypeSize.xxLarge)
+            // Four words share the width; past Large, "Evening" reaches the card's edge.
+            .dynamicTypeSize(...DynamicTypeSize.large)
             .frame(height: 120)
             .accessibilityChartDescriptor(InsightsHourDescriptor(durations: durations, calendar: calendar))
             .accessibilityLabel(String(localized: "Moving time by hour"))
-
-            InsightsChartCaption(text: caption)
         }
+        // Another year's chart starts from its own busiest hour.
+        .onChange(of: durations) { _, _ in selectedHour = nil }
     }
 
     private var selected: HourRow? {
@@ -1353,17 +1541,30 @@ private struct InsightsHourChart: View {
         return rows[selectedHour]
     }
 
-    private var caption: String {
-        if let row = selected {
-            if row.duration <= 0 {
-                return String(localized: "\(Self.hourSpan(row.hour, calendar: calendar)): no trips.")
-            }
-            return String(localized: "\(Self.hourSpan(row.hour, calendar: calendar)): \(MovesStatisticsFormatting.duration(row.duration)) moving.")
+    private var peak: HourRow? {
+        guard let peak = rows.max(by: { $0.duration < $1.duration }), peak.duration > 0 else { return nil }
+        return peak
+    }
+
+    private var highlighted: HourRow? {
+        selected ?? peak
+    }
+
+    private func detail(for row: HourRow) -> String {
+        let total = durations.reduce(0, +)
+        guard row.duration > 0, total > 0 else { return String(localized: "No trips at this hour") }
+        let share = String(localized: "\(insightsShareText(row.duration / total)) of your time moving")
+        return selected == nil ? String(localized: "Busiest hour") + " · " + share : share
+    }
+
+    /// The quarter of the day a label sits in the middle of.
+    static func partOfDay(_ hour: Int) -> String {
+        switch hour {
+        case ..<6: return String(localized: "Night")
+        case ..<12: return String(localized: "Morning")
+        case ..<18: return String(localized: "Afternoon")
+        default: return String(localized: "Evening")
         }
-        guard let peak = rows.max(by: { $0.duration < $1.duration }), peak.duration > 0 else {
-            return String(localized: "No trips on the ground yet.")
-        }
-        return String(localized: "Busiest hour: \(Self.hourSpan(peak.hour, calendar: calendar)), \(MovesStatisticsFormatting.duration(peak.duration)) in all.")
     }
 
     /// "6 AM" or "06" in the locale's own clock.
@@ -1413,55 +1614,61 @@ private struct InsightsWeekdayChart: View {
         }
     }
 
-    @State private var selectedLabel: String?
+    @ScaledMetric(relativeTo: .caption) private var labelWidth: CGFloat = 38
+    @ScaledMetric(relativeTo: .caption) private var shareWidth: CGFloat = 40
+    @ScaledMetric(relativeTo: .caption) private var barHeight: CGFloat = 14
 
+    /// Every day's share is written beside its bar, so nothing needs a tap.
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Chart(rows) { row in
-                BarMark(
-                    x: .value(String(localized: "Day"), row.label),
-                    y: .value(String(localized: "Hours"), row.duration / 3600)
-                )
-                .foregroundStyle(MovesPalette.place.gradient)
-                .opacity(selected == nil || selected?.order == row.order ? 1 : 0.35)
-                .cornerRadius(4)
+        VStack(alignment: .leading, spacing: 12) {
+            if let peak {
+                InsightsChartHeadline(value: peak.fullName, detail: String(localized: "Busiest day"))
+            } else {
+                InsightsChartHeadline(value: "—", detail: String(localized: "No trips on the ground yet"))
             }
-            .insightsTapSelection($selectedLabel) { proxy, x in
-                proxy.value(atX: x, as: String.self)
-            }
-            .chartXAxis {
-                AxisMarks { _ in
-                    AxisValueLabel()
-                        .font(.system(.caption2, design: .rounded, weight: .medium))
+            let longest = rows.map(share).max() ?? 0
+            VStack(spacing: 8) {
+                ForEach(rows) { row in
+                    HStack(spacing: 8) {
+                        Text(row.label)
+                            .font(.system(.caption, design: .rounded, weight: .semibold))
+                            .foregroundStyle(peak?.order == row.order ? .primary : .secondary)
+                            .frame(width: labelWidth, alignment: .leading)
+                        GeometryReader { geometry in
+                            Capsule(style: .continuous)
+                                .fill(MovesPalette.place.gradient)
+                                .opacity(peak == nil || peak?.order == row.order ? 1 : 0.45)
+                                .frame(width: longest > 0 ? max(geometry.size.width * share(row) / longest, share(row) > 0 ? barHeight : 0) : 0)
+                                .frame(maxHeight: .infinity, alignment: .center)
+                        }
+                        .frame(height: barHeight)
+                        Text(insightsShareText(share(row)))
+                            .font(.system(.caption, design: .rounded, weight: .semibold))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                            .frame(width: shareWidth, alignment: .trailing)
+                    }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("\(row.fullName), \(insightsShareText(share(row)))")
                 }
             }
-            .chartYAxis(.hidden)
-            .chartLegend(.hidden)
             .dynamicTypeSize(...DynamicTypeSize.xxLarge)
-            .frame(height: 120)
-            .accessibilityChartDescriptor(InsightsWeekdayDescriptor(rows: rows))
+            .accessibilityElement(children: .contain)
             .accessibilityLabel(String(localized: "Moving time by day of the week"))
-
-            InsightsChartCaption(text: caption)
         }
     }
 
-    private var selected: WeekdayRow? {
-        guard let selectedLabel else { return nil }
-        return rows.first { $0.label == selectedLabel }
+    private var total: TimeInterval {
+        rows.reduce(0) { $0 + $1.duration }
     }
 
-    private var caption: String {
-        if let row = selected {
-            if row.duration <= 0 {
-                return String(localized: "\(row.fullName): no trips.")
-            }
-            return String(localized: "\(row.fullName): \(MovesStatisticsFormatting.duration(row.duration)) moving.")
-        }
-        guard let peak = rows.max(by: { $0.duration < $1.duration }), peak.duration > 0 else {
-            return String(localized: "No trips on the ground yet.")
-        }
-        return String(localized: "Busiest day: \(peak.fullName), \(MovesStatisticsFormatting.duration(peak.duration)) in all.")
+    private func share(_ row: WeekdayRow) -> Double {
+        total > 0 ? row.duration / total : 0
+    }
+
+    private var peak: WeekdayRow? {
+        guard let peak = rows.max(by: { $0.duration < $1.duration }), peak.duration > 0 else { return nil }
+        return peak
     }
 }
 
@@ -1506,31 +1713,3 @@ private struct InsightsHourDescriptor: AXChartDescriptorRepresentable {
     }
 }
 
-private struct InsightsWeekdayDescriptor: AXChartDescriptorRepresentable {
-    let rows: [WeekdayRow]
-
-    func makeChartDescriptor() -> AXChartDescriptor {
-        AXChartDescriptor(
-            title: String(localized: "Moving time by weekday"),
-            summary: String(localized: "Hours moving"),
-            xAxis: AXCategoricalDataAxisDescriptor(
-                title: String(localized: "Day"),
-                categoryOrder: rows.map(\.label)
-            ),
-            yAxis: AXNumericDataAxisDescriptor(
-                title: String(localized: "Hours"),
-                range: 0...max((rows.map(\.duration).max() ?? 1) / 3600, 1),
-                gridlinePositions: []
-            ) { String(format: "%.1f", $0) },
-            series: [
-                AXDataSeriesDescriptor(
-                    name: String(localized: "Moving"),
-                    isContinuous: false,
-                    dataPoints: rows.map { row in
-                        AXDataPoint(x: row.label, y: row.duration / 3600)
-                    }
-                )
-            ]
-        )
-    }
-}
