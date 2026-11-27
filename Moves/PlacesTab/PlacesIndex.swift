@@ -1016,6 +1016,21 @@ enum PlacesGeography {
     }
 }
 
+/// Reads the Places tab's inputs on a private context and copies them out at once, so
+/// nothing faults later against a row another context may delete.
+enum PlacesSourceLoader {
+    static func load(from container: ModelContainer) throws -> (known: [PlacesKnownRecord], visits: [PlacesVisitRecord]) {
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        let known = try context.fetch(FetchDescriptor<KnownPlace>(sortBy: [SortDescriptor(\.name)]))
+            .map(PlacesKnownRecord.init)
+        var visitFetch = FetchDescriptor<VisitPlace>.live(sortBy: [SortDescriptor(\.arrivalDate, order: .reverse)])
+        visitFetch.relationshipKeyPathsForPrefetching = [\.knownPlace, \.dayTimeline]
+        let visits = try context.fetch(visitFetch).map(PlacesVisitRecord.init)
+        return (known, visits)
+    }
+}
+
 /// Builds grouped Places data off the main actor from live SwiftData rows.
 @MainActor
 @Observable
@@ -1029,7 +1044,9 @@ final class PlacesIndex {
     @ObservationIgnored
     private var generation = 0
     @ObservationIgnored
-    private var ingested: (known: [PlacesKnownRecord], visits: [PlacesVisitRecord], userCoordinate: CLLocationCoordinate2D?)?
+    private var loadGeneration = 0
+    @ObservationIgnored
+    private var ingested:(known: [PlacesKnownRecord], visits: [PlacesVisitRecord], userCoordinate: CLLocationCoordinate2D?)?
 
     /// Copies SwiftData rows into sendable records, then groups off-main.
     func ingest(
@@ -1049,6 +1066,42 @@ final class PlacesIndex {
             calendar: calendar,
             userCoordinate: userCoordinate
         )
+    }
+
+    /// Reads places and stays on a context of its own, off the main actor, and regroups
+    /// only when something the tab shows changed.
+    ///
+    /// The tab used to hold `@Query`s over every place and stay, so every save anywhere
+    /// (the place-name backfill, the stay rebuild after each batch of fixes) refetched
+    /// the whole history on the main context and copied it into records there, while
+    /// the tab sat in the background behind Timeline or Map.
+    func reload(container: ModelContainer, userCoordinate: CLLocationCoordinate2D? = nil) {
+        loadGeneration += 1
+        let load = loadGeneration
+        let current = ingested.map { (known: $0.known, visits: $0.visits) }
+        Task.detached(priority: .userInitiated) {
+            guard let source = try? PlacesSourceLoader.load(from: container) else { return }
+            let unchanged = current.map { $0.known == source.known && $0.visits == source.visits } ?? false
+            await MainActor.run {
+                guard load == self.loadGeneration else { return }
+                if unchanged {
+                    // The rows are the same; only a moved user can change the distances.
+                    guard let userCoordinate, let ingested = self.ingested,
+                          ingested.userCoordinate.map({ !Self.isNear($0, userCoordinate) }) ?? true
+                    else { return }
+                    self.ingested = (ingested.known, ingested.visits, userCoordinate)
+                    self.refilter()
+                    return
+                }
+                self.ingested = (source.known, source.visits, userCoordinate)
+                self.rebuild(knownRecords: source.known, visitRecords: source.visits, userCoordinate: userCoordinate)
+            }
+        }
+    }
+
+    private nonisolated static func isNear(_ lhs: CLLocationCoordinate2D, _ rhs: CLLocationCoordinate2D) -> Bool {
+        CLLocation(latitude: lhs.latitude, longitude: lhs.longitude)
+            .distance(from: CLLocation(latitude: rhs.latitude, longitude: rhs.longitude)) < 500
     }
 
     /// Re-applies `query` and `sort` to the last ingested rows, so typing never copies SwiftData again.

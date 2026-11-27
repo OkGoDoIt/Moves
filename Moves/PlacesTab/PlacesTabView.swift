@@ -1,3 +1,4 @@
+import Combine
 import CoreLocation
 import MapKit
 import SwiftData
@@ -8,13 +9,9 @@ struct PlacesTabView: View {
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var rootController: MovesRootController
 
-    @Query(sort: \KnownPlace.name)
-    private var knownPlaces: [KnownPlace]
-
-    @Query(filter: #Predicate<VisitPlace> { $0.dayTimeline != nil }, sort: \VisitPlace.arrivalDate, order: .reverse)
-    private var visits: [VisitPlace]
-
     @State private var index = PlacesIndex()
+    /// One for the tab's life: only its last known fix is read, for distances.
+    @State private var locationManager = CLLocationManager()
     @State private var path = NavigationPath()
     @State private var didOpenLaunchPlace = false
     @State private var clusterToConfirm: PlacesSuggestedCluster?
@@ -76,7 +73,7 @@ struct PlacesTabView: View {
             rebuild()
             openRequestedPlace()
         }
-        .onChange(of: dataSignature) { _, _ in rebuild() }
+        .onReceive(placeChanges) { _ in rebuild() }
         .onChange(of: index.sort) { _, _ in index.refilter() }
         .onChange(of: index.query) { _, _ in index.refilter() }
         .onChange(of: index.snapshot.placeCount) { _, _ in
@@ -94,15 +91,16 @@ struct PlacesTabView: View {
         }
     }
 
-    /// Reloads grouping when places, assignments, or geocoded country/city change.
-    private var dataSignature: String {
-        let known = knownPlaces.map {
-            "\($0.id.uuidString):\($0.name):\($0.countryCode ?? ""):\($0.locality ?? ""):\($0.confirmedVisitCount):\($0.footprintRadius)"
-        }
-        let assigned = visits.prefix(400).map {
-            "\($0.id.uuidString):\($0.knownPlace?.id.uuidString ?? ""):\($0.autoLabel ?? ""):\($0.thoroughfare ?? ""):\($0.formattedAddress ?? ""):\($0.countryCode ?? ""):\($0.locality ?? "")"
-        }
-        return (known + assigned).joined(separator: ",")
+    /// A save that touched places or stays, on any context, read after it committed. The
+    /// first one shows at once (a rename coming back from a place page); after it, the
+    /// stay rebuild and the name backfill reload the tab at most every few seconds.
+    private var placeChanges: AnyPublisher<Notification, Never> {
+        NotificationCenter.default.publisher(for: ModelContext.didSave)
+            .filter(PlaceSaveFilter.touchesPlaces)
+            .merge(with: NotificationCenter.default.publisher(for: .NSPersistentStoreRemoteChange))
+            .merge(with: NotificationCenter.default.publisher(for: .NSUndoManagerDidUndoChange))
+            .throttle(for: .seconds(3), scheduler: DispatchQueue.main, latest: true)
+            .eraseToAnyPublisher()
     }
 
     private var sortMenu: some View {
@@ -194,11 +192,7 @@ struct PlacesTabView: View {
     }
 
     private func rebuild() {
-        index.ingest(
-            knownPlaces: knownPlaces,
-            visits: visits,
-            userCoordinate: CLLocationManager().location?.coordinate
-        )
+        index.reload(container: modelContext.container, userCoordinate: locationManager.location?.coordinate)
     }
 
     /// A deep link or search result can name a place before this tab has ever appeared,

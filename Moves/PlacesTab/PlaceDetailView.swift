@@ -34,16 +34,43 @@ struct PlaceDetailView: View {
         allVisits
     }
 
+    /// The summary maps every stay at the place (thousands at home) and rebuilds the
+    /// occupancy grid, so it is worked out again only when the place or its stays change,
+    /// not on every render.
+    @State private var summaryMemo = PlaceSummaryMemo()
+
     private var summary: PlacesPlaceSummary? {
         guard let place else { return nil }
-        return PlacesIndexBuilder.summary(
-            for: PlacesKnownRecord(place),
-            visits: visits.map(PlacesVisitRecord.init),
-            now: .now,
-            calendar: .autoupdatingCurrent
-        )
+        var hasher = Hasher()
+        let record = PlacesKnownRecord(place)
+        hasher.combine(record.name)
+        hasher.combine(record.category)
+        hasher.combine(record.confirmedVisitCount)
+        hasher.combine(record.footprintRadius)
+        hasher.combine(record.countryCode)
+        hasher.combine(record.locality)
+        hasher.combine(visits.count)
+        for visit in visits {
+            hasher.combine(visit.id)
+            hasher.combine(visit.arrivalDate)
+            hasher.combine(visit.departureDate)
+        }
+        return summaryMemo.value(for: hasher.finalize()) {
+            PlacesIndexBuilder.summary(
+                for: record,
+                visits: visits.map(PlacesVisitRecord.init),
+                now: .now,
+                calendar: .autoupdatingCurrent
+            )
+        }
     }
 
+    /// Whether there is another place to merge into; a count, not a fetch of every place.
+    private var hasOtherPlaces: Bool {
+        ((try? modelContext.fetchCount(FetchDescriptor<KnownPlace>())) ?? 0) > 1
+    }
+
+    /// Every other place, nearest first. Read when the merge sheet opens, never per render.
     private var mergeCandidates: [KnownPlace] {
         guard let place else { return [] }
         let origin = CLLocation(latitude: place.centerLatitude, longitude: place.centerLongitude)
@@ -91,8 +118,7 @@ struct PlaceDetailView: View {
                     Button(String(localized: "Merge into…"), systemImage: "arrow.triangle.merge") {
                         isMerging = true
                     }
-                    // A count, not the sorted list: this runs on every render.
-                    .disabled(((try? modelContext.fetchCount(FetchDescriptor<KnownPlace>())) ?? 0) < 2)
+                    .disabled(!hasOtherPlaces)
                     Button(String(localized: "Shrink footprint"), systemImage: "minus.circle") {
                         shrink()
                     }
@@ -581,5 +607,20 @@ private struct MergePlaceSheet: View {
             }
         }
         .presentationDetents([.medium, .large])
+    }
+}
+
+/// Remembers the last summary and the fingerprint it was built from. A plain box held in
+/// `@State`, so filling it while the body runs does not ask for another render.
+final class PlaceSummaryMemo {
+    private var key: Int?
+    private var summary: PlacesPlaceSummary?
+
+    func value(for key: Int, build: () -> PlacesPlaceSummary) -> PlacesPlaceSummary {
+        if key == self.key, let summary { return summary }
+        let built = build()
+        self.key = key
+        summary = built
+        return built
     }
 }
