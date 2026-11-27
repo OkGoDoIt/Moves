@@ -93,6 +93,8 @@ struct RouteMatchResolution: Sendable {
     let summary: String
     /// True when at least one MapKit (or fake) polyline was kept.
     let usedNetworkRoute: Bool
+    /// The directions budget ran out partway; `coordinates` are the fallback.
+    let throttled: Bool
 
     init(
         coordinates: [CLLocationCoordinate2D],
@@ -100,7 +102,8 @@ struct RouteMatchResolution: Sendable {
         rejected: Bool,
         confidence: RouteMatchConfidence,
         summary: String,
-        usedNetworkRoute: Bool = false
+        usedNetworkRoute: Bool = false,
+        throttled: Bool = false
     ) {
         self.coordinates = coordinates
         self.cacheable = cacheable
@@ -108,6 +111,7 @@ struct RouteMatchResolution: Sendable {
         self.confidence = confidence
         self.summary = summary
         self.usedNetworkRoute = usedNetworkRoute
+        self.throttled = throttled
     }
 }
 
@@ -188,7 +192,13 @@ enum RoadRouteMatcher {
     private static let transientFallbackMemoTTL: TimeInterval = 3 * 60
     private static let rejectedMemoTTL: TimeInterval = 24 * 60 * 60
     private static let algorithmVersion = "snap-v1"
+    /// Since this version a route-tracked trip is matched across its gaps (see
+    /// `matchDenseWindows`). Only trips with such a gap take it, so their old straight
+    /// lines are matched again while every other trip keeps its stored path and spends
+    /// no directions requests.
+    private static let gapAlgorithmVersion = "snap-v2-gaps"
     private static let denseWindowMeters: CLLocationDistance = 400
+    private static let denseWindowMinimumMeters: CLLocationDistance = 80
     private static let endpointsMinimumMeters: CLLocationDistance = 300
     private static let sparseLengthRatio = 1.3
     private static let walkingOffPathFraction = 0.30
@@ -211,22 +221,41 @@ enum RoadRouteMatcher {
         await DirectionsRequestLimiter.shared.reset()
     }
 
+    /// A path to draw now. While `isWaitingForDirections`, the directions budget ran out
+    /// partway and `coordinates` are the recorded fixes; nothing about the trip was stored,
+    /// so asking again once the limiter frees a slot finishes the match.
+    struct DisplayedRoute {
+        var coordinates: [CLLocationCoordinate2D]
+        var isWaitingForDirections = false
+
+        init(_ coordinates: [CLLocationCoordinate2D], isWaitingForDirections: Bool = false) {
+            self.coordinates = coordinates
+            self.isWaitingForDirections = isWaitingForDirections
+        }
+    }
+
     static func matchedCoordinates(for move: MoveSegment) async -> [CLLocationCoordinate2D] {
         guard !move.hasLeftStore, !TimelineRetirement.isRetired(move), let context = move.modelContext else { return [] }
         return await matchedCoordinates(moveID: move.id, in: context)
     }
 
+    static func matchedCoordinates(moveID: UUID, in context: ModelContext) async -> [CLLocationCoordinate2D] {
+        await displayedRoute(moveID: moveID, in: context).coordinates
+    }
+
     /// The path to show for a trip. The row is looked up by id again after every await,
     /// never held across one: matching can take seconds, and in that time the person can
     /// delete the trip or the rebuild retire it. Either way this returns quietly.
-    static func matchedCoordinates(moveID: UUID, in context: ModelContext) async -> [CLLocationCoordinate2D] {
-        guard let move = fetchMove(id: moveID, in: context) else { return [] }
+    static func displayedRoute(moveID: UUID, in context: ModelContext) async -> DisplayedRoute {
+        guard let move = fetchMove(id: moveID, in: context) else { return DisplayedRoute([]) }
         let signature = matchCacheSignature(for: move, fallback: MoveRouteGeometry.rawCoordinates(for: move))
-        let coordinates = await resolveDisplayedCoordinates(moveID: moveID, in: context)
-        guard let move = fetchMove(id: moveID, in: context) else { return coordinates }
+        let route = await resolveDisplayedRoute(moveID: moveID, in: context)
+        let coordinates = route.coordinates
+        guard let move = fetchMove(id: moveID, in: context) else { return route }
         guard matchesCurrentInput(move, signature: signature) else {
-            return await matchedCoordinates(moveID: moveID, in: context)
+            return await displayedRoute(moveID: moveID, in: context)
         }
+        guard !route.isWaitingForDirections else { return route }
         // The stored distance is what was measured or imported, and totals read it, so
         // showing a path leaves it alone. Only a path the person drew, or a move with no
         // distance yet, takes the displayed length.
@@ -239,7 +268,7 @@ enum RoadRouteMatcher {
             }
         }
         applyHealthRouteSignal(to: move, routeMeters: displayedDistance)
-        return coordinates
+        return route
     }
 
     /// A matched walk Health disagrees with reads as estimated. Runs whenever a path is
@@ -253,11 +282,11 @@ enum RoadRouteMatcher {
         }
     }
 
-    private static func resolveDisplayedCoordinates(moveID: UUID, in context: ModelContext) async -> [CLLocationCoordinate2D] {
-        guard let move = fetchMove(id: moveID, in: context) else { return [] }
+    private static func resolveDisplayedRoute(moveID: UUID, in context: ModelContext) async -> DisplayedRoute {
+        guard let move = fetchMove(id: moveID, in: context) else { return DisplayedRoute([]) }
         if let manualCoordinates = move.manualRouteCoordinates {
             apply(resolution: .manual(manualCoordinates), to: move)
-            return manualCoordinates
+            return DisplayedRoute(manualCoordinates)
         }
 
         if move.routeMatchPolicy == .manual {
@@ -282,30 +311,40 @@ enum RoadRouteMatcher {
             )
             storeCache(coordinates, signature: cacheSignature, on: move)
             apply(resolution: resolution, to: move)
-            await memo.storePersistent(coordinates, for: cacheKey)
-            return coordinates
+            await memo.storePersistent(resolution, for: cacheKey)
+            return DisplayedRoute(coordinates)
         }
 
         if let cached = move.cachedRouteCoordinates(for: cacheSignature) {
-            await memo.storePersistent(cached, for: cacheKey)
-            return cached
+            let resolution = RouteMatchResolution(
+                coordinates: cached,
+                cacheable: true,
+                rejected: false,
+                confidence: move.routeMatchConfidence,
+                summary: move.routeMatchSummary ?? ""
+            )
+            await memo.storePersistent(resolution, for: cacheKey)
+            return DisplayedRoute(cached)
         }
 
         // From here on every await is followed by a fresh lookup of the row.
         if let cached = await memo.cached(for: cacheKey) {
             switch cached {
-            case .persistent(let coordinates):
+            case .persistent(let resolution):
                 if let move = fetchMove(id: moveID, in: context) {
-                    storeCache(coordinates, signature: cacheSignature, on: move)
+                    storeCache(resolution.coordinates, signature: cacheSignature, on: move)
+                    if !resolution.summary.isEmpty {
+                        apply(resolution: resolution, to: move)
+                    }
                 }
-                return coordinates
+                return DisplayedRoute(resolution.coordinates)
             case .transient(let coordinates):
-                return coordinates
+                return DisplayedRoute(coordinates)
             case .rejected(let resolution):
                 if let move = fetchMove(id: moveID, in: context) {
                     apply(resolution: resolution, to: move)
                 }
-                return resolution.coordinates
+                return DisplayedRoute(resolution.coordinates)
             }
         }
 
@@ -314,7 +353,7 @@ enum RoadRouteMatcher {
             if let move = fetchMove(id: moveID, in: context) {
                 await persist(result, on: move, cacheKey: cacheKey, cacheSignature: cacheSignature)
             }
-            return result.coordinates
+            return DisplayedRoute(result.coordinates, isWaitingForDirections: result.throttled)
         }
 
         let provider = directionsProvider
@@ -328,7 +367,7 @@ enum RoadRouteMatcher {
         if let move = fetchMove(id: moveID, in: context) {
             await persist(result, on: move, cacheKey: cacheKey, cacheSignature: cacheSignature)
         }
-        return result.coordinates
+        return DisplayedRoute(result.coordinates, isWaitingForDirections: result.throttled)
     }
 
     /// How a background match ended.
@@ -426,6 +465,9 @@ enum RoadRouteMatcher {
         // A person can change the mode or draw a path while directions are in flight.
         // An older answer must never overwrite that correction's route metadata.
         guard matchesCurrentInput(move, signature: cacheSignature) else { return }
+        // Cut short by the directions budget: nothing was learned, so nothing is kept,
+        // and the next ask (the detail view's retry, or the next look) starts over.
+        guard !result.throttled else { return }
         apply(resolution: result, to: move)
         if result.rejected {
             await memo.storeRejected(result, for: cacheKey, ttl: rejectedMemoTTL)
@@ -434,7 +476,7 @@ enum RoadRouteMatcher {
         // The row is written before the memo await, never after it.
         if result.cacheable {
             storeCache(result.coordinates, signature: cacheSignature, on: move)
-            await memo.storePersistent(result.coordinates, for: cacheKey)
+            await memo.storePersistent(result, for: cacheKey)
         } else {
             await memo.storeTransient(
                 result.coordinates,
@@ -478,14 +520,20 @@ enum RoadRouteMatcher {
     /// trip's distance. Written only when the match for this input is first stored:
     /// the distance is not part of the cache signature, so writing it never asks for a
     /// new match, and a later refinement (Health's walk estimate) is not overwritten
-    /// until the trip's times, mode, or fixes change.
-    static func confidentMatchedDistance(_ coordinates: [CLLocationCoordinate2D], for move: MoveSegment) -> Double? {
+    /// until the trip's times, mode, or fixes change. A distance Health has replaced is
+    /// never overwritten: a new matching version re-matches old trips without any change.
+    static func confidentMatchedDistance(
+        _ coordinates: [CLLocationCoordinate2D],
+        for move: MoveSegment,
+        healthCache: HealthTimelineCacheStore = .shared
+    ) -> Double? {
         guard coordinates.count > 1,
               move.routeMatchConfidence == .high || move.routeMatchConfidence == .medium,
               move.routeMatchPolicy == .auto,
               move.origin == .sensor,
               move.manualRouteCoordinatesData == nil,
-              !move.usesHealthWorkoutRoute
+              !move.usesHealthWorkoutRoute,
+              healthCache.data().trips[move.id]?.appliedDistance == nil
         else { return nil }
         let length = routeDistance(for: coordinates)
         guard length > 0, abs(length - move.distanceMeters) >= 1 else { return nil }
@@ -512,7 +560,7 @@ enum RoadRouteMatcher {
         fallback: [CLLocationCoordinate2D]
     ) -> String {
         [
-            algorithmVersion,
+            algorithmVersion(for: move, fallback: fallback),
             move.routeMatchPolicy.rawValue,
             currentSnappingLevel.rawValue,
             MoveRouteGeometry.cacheSignature(for: move, fallback: fallback)
@@ -525,11 +573,31 @@ enum RoadRouteMatcher {
         fallback: [CLLocationCoordinate2D]
     ) -> Int {
         var hasher = Hasher()
-        hasher.combine(algorithmVersion)
+        hasher.combine(algorithmVersion(for: move, fallback: fallback))
         hasher.combine(move.routeMatchPolicy.rawValue)
         hasher.combine(currentSnappingLevel.rawValue)
         hasher.combine(MoveRouteGeometry.cacheKey(for: move, fallback: fallback))
         return hasher.finalize()
+    }
+
+    private static func algorithmVersion(
+        for move: MoveSegment,
+        fallback: [CLLocationCoordinate2D]
+    ) -> String {
+        let density = RouteMatchDensity.classify(
+            intermediateSampleCount: move.samples.preferredRouteDisplaySamples.count,
+            recordedMeters: routeDistance(for: fallback)
+        )
+        guard density == .dense, longestGapMeters(in: fallback) > denseWindowMeters else {
+            return algorithmVersion
+        }
+        return gapAlgorithmVersion
+    }
+
+    private static func longestGapMeters(in coordinates: [CLLocationCoordinate2D]) -> CLLocationDistance {
+        zip(coordinates, coordinates.dropFirst())
+            .map { RouteCoordinateOps.distanceMeters(from: $0, to: $1) }
+            .max() ?? 0
     }
 }
 
@@ -708,6 +776,7 @@ extension RoadRouteMatcher {
         var offPathFixCount = 0
         var usedOffPathRaw = false
         var snappedAnyWindow = false
+        var filledGapCount = 0
         var deviationSamples: [CLLocationDistance] = []
 
         let windows = denseWindows(in: fallback, maximumSpanMeters: denseWindowMeters)
@@ -717,9 +786,48 @@ extension RoadRouteMatcher {
             let end = fallback[window.end]
             let segmentDistance = RouteCoordinateOps.distanceMeters(from: start, to: end)
 
-            if segmentDistance < minimumMatchDistance(for: input.transportMode)
-                || segmentDistance > denseWindowMeters {
+            // A window this short is a burst of fixes taken a few seconds apart, often
+            // the first of them still vague. Routing it costs a request, adds nothing to
+            // the drawn path, and its vague fix would read as the walk leaving the path.
+            if segmentDistance < max(minimumMatchDistance(for: input.transportMode), denseWindowMinimumMeters) {
                 RouteCoordinateOps.append(recordedSegment, to: &matchedCoordinates)
+                continue
+            }
+
+            // Two neighboring fixes farther apart than a window are a gap: iOS suspended
+            // the app, or sent nothing, for minutes. A straight line across it cuts
+            // through blocks and lakes, so it is routed like the endpoints of a sparse
+            // trip. With no fixes inside, length is the only check (Roads skips it).
+            if segmentDistance > denseWindowMeters {
+                attemptedNetworkMatch = true
+                let gapResult = await routeSegment(
+                    from: start,
+                    to: end,
+                    transportTypes: mapTransportTypes(for: input.transportMode),
+                    recordedSegment: recordedSegment,
+                    input: input,
+                    provider: provider,
+                    requestsAlternateRoutes: true,
+                    corridorMeters: corridor,
+                    maximumLengthRatio: nil
+                )
+                sawRouteCandidate = sawRouteCandidate || gapResult.hadRouteCandidates
+                if gapResult.throttled {
+                    throttled = true
+                    break
+                }
+                if let route = gapResult.coordinates,
+                   input.forceRoads || RouteMatchPlausibility.isPlausibleGapRoute(
+                       route,
+                       from: start,
+                       to: end,
+                       transportMode: input.transportMode
+                   ) {
+                    filledGapCount += 1
+                    RouteCoordinateOps.append(route, to: &matchedCoordinates)
+                } else {
+                    RouteCoordinateOps.append(recordedSegment, to: &matchedCoordinates)
+                }
                 continue
             }
 
@@ -758,7 +866,8 @@ extension RoadRouteMatcher {
                     : Double(offPath.count) / Double(intermediates.count)
                 let keepRawOffNetwork = shouldKeepWalkingOffNetwork(
                     input: input,
-                    offPathFraction: offPathFraction
+                    offPathFraction: offPathFraction,
+                    offPathCount: offPath.count
                 )
                 if !input.forceRoads && (keepRawOffNetwork || segmentResult.coordinates == nil) {
                     if keepRawOffNetwork {
@@ -782,7 +891,8 @@ extension RoadRouteMatcher {
                 cacheable: false,
                 rejected: false,
                 confidence: .unknown,
-                summary: RouteMatchSummaries.estimated
+                summary: RouteMatchSummaries.estimated,
+                throttled: true
             )
         }
 
@@ -806,11 +916,16 @@ extension RoadRouteMatcher {
             : Double(offPathFixCount) / Double(matchedFixCount)
         let summary: String
         let confidence: RouteMatchConfidence
-        if usedOffPathRaw || (offPathFraction >= walkingOffPathFraction && input.transportMode == .walking) {
+        // A filled gap is a guess at where the person went, so the path reads as medium.
+        let filledGaps = filledGapCount > 0
+        let mostlyOffPath = offPathFraction >= walkingOffPathFraction
+            && offPathFixCount >= 3
+            && input.transportMode == .walking
+        if usedOffPathRaw || mostlyOffPath {
             summary = RouteMatchSummaries.partlyOffPath
-            confidence = snappedAnyWindow ? .high : .recorded
+            confidence = filledGaps ? .medium : (snappedAnyWindow ? .high : .recorded)
         } else if snappedAnyWindow {
-            summary = RouteMatchSummaries.matched(
+            let matched = RouteMatchSummaries.matched(
                 mode: input.transportMode,
                 percentWithinCorridor: percentWithin(
                     deviationSamples,
@@ -818,7 +933,11 @@ extension RoadRouteMatcher {
                 ),
                 typicalDeviationMeters: typicalDeviationMeters(deviationSamples)
             )
-            confidence = .high
+            summary = filledGaps ? "\(matched) · \(RouteMatchSummaries.gapsFilledSuffix)" : matched
+            confidence = filledGaps ? .medium : .high
+        } else if filledGaps {
+            summary = RouteMatchSummaries.gapsFilled(mode: input.transportMode)
+            confidence = .medium
         } else {
             summary = RouteMatchSummaries.recorded(usesRouteTracking: input.usesRouteTracking)
             confidence = .recorded
@@ -830,7 +949,7 @@ extension RoadRouteMatcher {
             rejected: false,
             confidence: confidence,
             summary: summary,
-            usedNetworkRoute: snappedAnyWindow
+            usedNetworkRoute: snappedAnyWindow || filledGaps
         )
     }
 
@@ -949,7 +1068,8 @@ extension RoadRouteMatcher {
                 cacheable: false,
                 rejected: false,
                 confidence: .estimated,
-                summary: RouteMatchSummaries.estimatedNoFixes
+                summary: RouteMatchSummaries.estimatedNoFixes,
+                throttled: true
             )
         }
 
@@ -1028,7 +1148,8 @@ extension RoadRouteMatcher {
                     cacheable: false,
                     rejected: false,
                     confidence: .unknown,
-                    summary: RouteMatchSummaries.estimated
+                    summary: RouteMatchSummaries.estimated,
+                    throttled: true
                 )
             }
 
@@ -1210,11 +1331,17 @@ extension RoadRouteMatcher {
         return windows
     }
 
+    /// One stray fix is not a walk through a park: the first fix after a pause is often
+    /// tens of metres out. It takes two in a window to keep the recorded line there.
     private static func shouldKeepWalkingOffNetwork(
         input: RouteMatchInput,
-        offPathFraction: Double
+        offPathFraction: Double,
+        offPathCount: Int
     ) -> Bool {
-        guard input.transportMode == .walking, offPathFraction >= walkingOffPathFraction else {
+        guard input.transportMode == .walking,
+              offPathFraction >= walkingOffPathFraction,
+              offPathCount >= 2
+        else {
             return false
         }
         return walkingSpeedIsPlausible(input: input)
@@ -1307,16 +1434,25 @@ enum RouteMatchSummaries {
         percentWithinCorridor: Int,
         typicalDeviationMeters: Int
     ) -> String {
-        let surface: String
+        "Matched to \(surface(for: mode)) · \(percentWithinCorridor)% of fixes within \(typicalDeviationMeters) m"
+    }
+
+    /// A route-tracked trip whose only matched parts are the stretches with no fixes.
+    static func gapsFilled(mode: TransportMode) -> String {
+        "Gaps filled along \(surface(for: mode))"
+    }
+
+    static let gapsFilledSuffix = "gaps filled"
+
+    private static func surface(for mode: TransportMode) -> String {
         switch mode {
         case .walking, .running:
-            surface = "footpaths"
+            return "footpaths"
         case .cycling:
-            surface = "paths"
+            return "paths"
         default:
-            surface = "roads"
+            return "roads"
         }
-        return "Matched to \(surface) · \(percentWithinCorridor)% of fixes within \(typicalDeviationMeters) m"
     }
 }
 
@@ -1393,6 +1529,36 @@ enum RouteMatchPlausibility {
         )
         let maximumDeviation = maximumRecordedPointDeviation(recorded, from: matched)
         return maximumDeviation <= corridor
+    }
+
+    /// A route across a stretch with no fixes. Nothing recorded says where the person went,
+    /// so length is the only test: round a block or along a lake shore passes, a detour to
+    /// the next bridge does not.
+    static func isPlausibleGapRoute(
+        _ route: [CLLocationCoordinate2D],
+        from start: CLLocationCoordinate2D,
+        to end: CLLocationCoordinate2D,
+        transportMode: TransportMode
+    ) -> Bool {
+        guard route.count > 1 else { return false }
+        let straight = RouteCoordinateOps.distanceMeters(from: start, to: end)
+        let ratio: Double
+        let allowance: CLLocationDistance
+        switch transportMode {
+        case .walking, .running:
+            ratio = 1.6
+            allowance = 300
+        case .cycling:
+            ratio = 1.6
+            allowance = 500
+        case .automotive:
+            ratio = 1.8
+            allowance = 1_000
+        case .train, .swimming, .plane, .boat, .stationary, .unknown:
+            ratio = 1.6
+            allowance = 500
+        }
+        return routeDistance(for: route) <= max(straight * ratio, straight + allowance)
     }
 
     static func selectionScore(
@@ -1526,7 +1692,9 @@ enum RouteMatchPlausibility {
 
 actor RouteMatchMemo {
     enum CacheEntry {
-        case persistent([CLLocationCoordinate2D])
+        /// Kept whole, label included: switching the Path control clears the trip's label,
+        /// and switching back to a path already worked out must put it back.
+        case persistent(RouteMatchResolution)
         case transient([CLLocationCoordinate2D])
         case rejected(RouteMatchResolution)
     }
@@ -1541,7 +1709,7 @@ actor RouteMatchMemo {
         let expiresAt: Date
     }
 
-    private var cache: [Int: [CLLocationCoordinate2D]] = [:]
+    private var cache: [Int: RouteMatchResolution] = [:]
     private var transientCache: [Int: TransientCacheEntry] = [:]
     private var rejectedCache: [Int: RejectedCacheEntry] = [:]
     private var inFlightTasks: [Int: Task<RouteMatchResolution, Never>] = [:]
@@ -1571,8 +1739,8 @@ actor RouteMatchMemo {
         return .transient(transient.coordinates)
     }
 
-    func storePersistent(_ coordinates: [CLLocationCoordinate2D], for key: Int) {
-        cache[key] = coordinates
+    func storePersistent(_ resolution: RouteMatchResolution, for key: Int) {
+        cache[key] = resolution
         transientCache.removeValue(forKey: key)
         rejectedCache.removeValue(forKey: key)
     }
@@ -1672,6 +1840,23 @@ actor DirectionsRequestLimiter {
             return true
         }
         return requestDates.count >= Self.maxRequestsPerWindow
+    }
+
+    /// How long until `reserveSlot` can succeed again. Nil once the day's budget is spent,
+    /// since waiting on screen would not help.
+    func secondsUntilFreeSlot(now: Date = .now) -> TimeInterval? {
+        prune(now)
+        if Self.dayKey(now) == dayStamp, requestsToday >= Self.maxRequestsPerDay {
+            return nil
+        }
+        var wait: TimeInterval = 0
+        if let cooldownUntil {
+            wait = max(wait, cooldownUntil.timeIntervalSince(now))
+        }
+        if requestDates.count >= Self.maxRequestsPerWindow, let oldest = requestDates.min() {
+            wait = max(wait, windowDuration - now.timeIntervalSince(oldest))
+        }
+        return max(wait, 0)
     }
 
     func registerFailure(_ error: Error, now: Date = .now) -> Bool {

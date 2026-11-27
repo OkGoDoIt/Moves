@@ -404,6 +404,7 @@ struct MoveMapDetailView: View {
     @State private var manualRouteDragRevision = 0
     @State private var isIgnoringCurrentManualRouteGesture = false
     @State private var isSavingManualRoute = false
+    @State private var isWaitingForDirections = false
     @State private var isConfirmingDeletion = false
     @State private var isDeleting = false
     @State private var deleteErrorMessage = ""
@@ -779,7 +780,12 @@ struct MoveMapDetailView: View {
             .controlSize(.small)
             .disabled(isSavingManualRoute)
 
-            if let summary = segment.routeMatchSummary, !summary.isEmpty {
+            if isWaitingForDirections {
+                Label("Finding the route…", systemImage: "hourglass")
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .labelStyle(.titleAndIcon)
+            } else if let summary = segment.routeMatchSummary, !summary.isEmpty {
                 Label(summary, systemImage: pathConfidenceSymbolName)
                     .font(.system(size: 12, weight: .medium, design: .rounded))
                     .foregroundStyle(.secondary)
@@ -1017,7 +1023,20 @@ struct MoveMapDetailView: View {
     @MainActor
     private func refreshRouteCoordinates() async {
         let id = segment.id
-        let matched = await RoadRouteMatcher.matchedCoordinates(moveID: id, in: modelContext)
+        var route = await RoadRouteMatcher.displayedRoute(moveID: id, in: modelContext)
+        // Switching Path settings can spend the minute's directions budget. Show the fixes,
+        // say the route is still coming, and finish once a request is free again.
+        while route.isWaitingForDirections, !Task.isCancelled {
+            guard liveSegment(id) != nil else { return }
+            routeCoordinates = route.coordinates
+            guard let wait = await DirectionsRequestLimiter.shared.secondsUntilFreeSlot() else { break }
+            isWaitingForDirections = true
+            try? await Task.sleep(for: .seconds(wait + 1))
+            guard !Task.isCancelled else { break }
+            route = await RoadRouteMatcher.displayedRoute(moveID: id, in: modelContext)
+        }
+        isWaitingForDirections = false
+        let matched = route.coordinates
         guard !Task.isCancelled, let current = liveSegment(id) else { return }
         routeCoordinates = matched
         _ = await SpeedProfileBuilder.buildAndCache(for: current, coordinates: matched)

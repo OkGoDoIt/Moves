@@ -244,6 +244,81 @@ final class RouteMatchPolicyTests: XCTestCase {
         XCTAssertGreaterThan(routeDistance(for: coordinates), recorded * 1.3)
     }
 
+    /// A walk recorded while iOS kept suspending the app: bursts of three fixes about
+    /// 500 m apart with nothing between. Before snap-v2 every gap stayed a straight line in
+    /// every Path setting, Roads included.
+    func testRouteTrackedWalkWithGapsIsMatchedAcrossThem() async throws {
+        let move = makeMove(from: gappyWalk(), includePlaces: true, source: .continuous)
+        let recorded = MoveRouteGeometry.rawCoordinates(for: move)
+        let provider = FakeDirectionsProvider(style: .close)
+        RoadRouteMatcher.directionsProvider = provider
+
+        let coordinates = await RoadRouteMatcher.matchedCoordinates(for: move)
+        let requestCount = await provider.requestCount
+
+        XCTAssertEqual(requestCount, 9, "one request per gap between bursts")
+        XCTAssertEqual(coordinates.count, recorded.count + 9, "each gap follows its route")
+        XCTAssertEqual(move.routeMatchSummary, RouteMatchSummaries.gapsFilled(mode: .walking))
+        XCTAssertEqual(move.routeMatchConfidence, .medium)
+        XCTAssertTrue(move.routeCacheSignature?.hasPrefix("snap-v2-gaps|") == true)
+    }
+
+    func testGapRouteMustBePlausibleExceptOnRoads() async throws {
+        let auto = makeMove(from: gappyWalk(), includePlaces: true, source: .continuous)
+        let recorded = MoveRouteGeometry.rawCoordinates(for: auto)
+        RoadRouteMatcher.directionsProvider = FakeDirectionsProvider(style: .detour)
+
+        let autoCoordinates = await RoadRouteMatcher.matchedCoordinates(for: auto)
+        XCTAssertEqual(routeDistance(for: autoCoordinates), routeDistance(for: recorded), accuracy: 1)
+        XCTAssertEqual(auto.routeMatchSummary, RouteMatchSummaries.recorded(usesRouteTracking: true))
+
+        let roads = makeMove(from: gappyWalk(), includePlaces: true, policy: .roads, source: .continuous)
+        let roadsCoordinates = await RoadRouteMatcher.matchedCoordinates(for: roads)
+        XCTAssertGreaterThan(routeDistance(for: roadsCoordinates), routeDistance(for: recorded) * 2)
+    }
+
+    func testSwitchingBackToAPathKeepsItsLabelWithoutAskingAgain() async throws {
+        let move = makeMove(from: gappyWalk(), includePlaces: true, source: .continuous)
+        let provider = FakeDirectionsProvider(style: .close)
+        RoadRouteMatcher.directionsProvider = provider
+        let repository = SwiftDataTimelineRepository(modelContext: context)
+
+        _ = await RoadRouteMatcher.matchedCoordinates(for: move)
+        let firstCount = await provider.requestCount
+        try repository.setRouteMatchPolicy(.recorded, for: move)
+        _ = await RoadRouteMatcher.matchedCoordinates(for: move)
+        try repository.setRouteMatchPolicy(.auto, for: move)
+        _ = await RoadRouteMatcher.matchedCoordinates(for: move)
+        let secondCount = await provider.requestCount
+
+        XCTAssertEqual(secondCount, firstCount)
+        XCTAssertEqual(move.routeMatchSummary, RouteMatchSummaries.gapsFilled(mode: .walking))
+        XCTAssertEqual(move.routeMatchConfidence, .medium)
+    }
+
+    /// Out of directions for the minute: the fixes are shown, nothing is stored, and asking
+    /// again once a slot frees finishes the match.
+    func testMatchCutShortByTheBudgetIsFinishedLater() async throws {
+        let move = makeMove(from: gappyWalk(), includePlaces: true, source: .continuous)
+        RoadRouteMatcher.directionsProvider = FakeDirectionsProvider(style: .close)
+        let limiter = DirectionsRequestLimiter.shared
+        for _ in 0..<DirectionsRequestLimiter.maxRequestsPerWindow {
+            _ = await limiter.reserveSlot()
+        }
+        let wait = await limiter.secondsUntilFreeSlot()
+        XCTAssertGreaterThan(wait ?? 0, 0)
+
+        let waiting = await RoadRouteMatcher.displayedRoute(moveID: move.id, in: context)
+        XCTAssertTrue(waiting.isWaitingForDirections)
+        XCTAssertNil(move.routeMatchSummary)
+        XCTAssertNil(move.routeCacheCoordinatesData)
+
+        await limiter.reset()
+        let finished = await RoadRouteMatcher.displayedRoute(moveID: move.id, in: context)
+        XCTAssertFalse(finished.isWaitingForDirections)
+        XCTAssertEqual(move.routeMatchSummary, RouteMatchSummaries.gapsFilled(mode: .walking))
+    }
+
     func testRejectedMatchIsMemoisedForADay() async throws {
         let fixture = try loadFixture("sparse-car")
         let move = makeMove(from: fixture, includePlaces: true)
@@ -678,6 +753,19 @@ extension RouteMatchPolicyTests {
         move.samples = samples
         context.insert(move)
         return move
+    }
+
+    /// Ten bursts of three fixes 8 m apart, 520 m between bursts, heading east.
+    private func gappyWalk() -> RouteMatchFixture {
+        let metersPerDegreeLongitude = 111_320 * cos(52.52 * .pi / 180)
+        var points: [RouteMatchFixture.Point] = []
+        for burst in 0..<10 {
+            for fix in 0..<3 {
+                let meters = Double(burst) * 536 + Double(fix) * 8
+                points.append(.init(lat: 52.52, lon: 13.40 + meters / metersPerDegreeLongitude))
+            }
+        }
+        return RouteMatchFixture(mode: "walking", accuracy: 5, points: points)
     }
 
     private func makeEndpointCarMove() -> MoveSegment {
