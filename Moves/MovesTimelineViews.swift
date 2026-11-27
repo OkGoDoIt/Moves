@@ -1860,12 +1860,7 @@ enum TimelineRepeatedStays {
         // Same name on the row, and close enough that the name is not a coincidence.
         let distance = CLLocation(latitude: a.latitude, longitude: a.longitude)
             .distance(from: CLLocation(latitude: b.latitude, longitude: b.longitude))
-        return distance < 500 && rowTitle(a) == rowTitle(b)
-    }
-
-    private static func rowTitle(_ place: VisitPlace) -> String {
-        let known = place.knownPlace?.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return known.isEmpty ? place.displayTitle : known
+        return distance < 500 && a.timelineTitle == b.timelineTitle
     }
 }
 
@@ -2110,13 +2105,11 @@ enum TimelineEntry: Identifiable {
     var titleText: String {
         switch self {
         case .start(let place, _):
-            return "Start at \(Self.placeTitle(place))"
+            return "Start at \(place.timelineTitle)"
         case .place(let place):
-            return Self.placeTitle(place)
+            return place.timelineTitle
         case .move(let segment):
-            let start = segment.startPlace.map(Self.placeTitle) ?? String(localized: "Unknown start")
-            let end = segment.endPlace.map(Self.placeTitle) ?? String(localized: "Unknown destination")
-            return "\(start) to \(end)"
+            return segment.timelineTitle
         case .liveRoute(let snapshot):
             return snapshot.isFollowedTrip
                 ? String(localized: "Trip in progress")
@@ -2244,14 +2237,6 @@ enum TimelineEntry: Identifiable {
         default:
             return nil
         }
-    }
-
-    private static func placeTitle(_ place: VisitPlace) -> String {
-        let known = place.knownPlace?.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !known.isEmpty {
-            return known
-        }
-        return place.displayTitle
     }
 
     private static func averageSpeedText(for segment: MoveSegment) -> String? {

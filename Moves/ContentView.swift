@@ -1779,7 +1779,7 @@ enum TimelineExporter {
         if let zone = privacyZones.first(where: { $0.contains(place.coordinate) }) {
             return zone.category.title
         }
-        return place.displayTitle
+        return place.timelineTitle
     }
 
     private static func moveTitle(for move: MoveSegment, privacyZones: [PrivacyZone]) -> String {

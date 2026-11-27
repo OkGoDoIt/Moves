@@ -165,6 +165,34 @@ final class TimelineTabTests: XCTestCase {
         XCTAssertFalse(TimelinePlaceNaming.needsName(shortStop))
     }
 
+    /// The Nov 25 Da Lat walk: the end stay had only a learned place, and the detail title
+    /// showed its coordinates while the row showed the place.
+    func testTripRowAndDetailNameEndpointsTheSameWay() throws {
+        let schema = Schema(MovesTimelineSchema.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)
+        )
+        let context = ModelContext(container)
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let origin = VisitPlace(arrivalDate: start, departureDate: start.addingTimeInterval(600), latitude: 11.95055, longitude: 108.46148, horizontalAccuracy: 10, autoLabel: "66 Nguyen Dinh Chieu")
+        let resort = VisitPlace(arrivalDate: start.addingTimeInterval(5_000), departureDate: nil, latitude: 11.94329, longitude: 108.42534, horizontalAccuracy: 10)
+        let known = KnownPlace(name: "Ana Mandara Villas Dalat Resort & Spa", latitude: 11.9452, longitude: 108.4237)
+        [origin, resort].forEach(context.insert)
+        context.insert(known)
+        let walk = MoveSegment(dedupeKey: "walk", startDate: start.addingTimeInterval(600), endDate: start.addingTimeInterval(5_000), transportMode: .walking, distanceMeters: 4_000, stepCount: nil)
+        context.insert(walk)
+        walk.startPlace = origin
+        walk.endPlace = resort
+
+        XCTAssertEqual(walk.timelineTitle, "66 Nguyen Dinh Chieu to 11.94329, 108.42534", "Coordinates only when nothing is known")
+
+        resort.knownPlace = known
+        XCTAssertEqual(walk.timelineTitle, "66 Nguyen Dinh Chieu to Ana Mandara Villas Dalat Resort & Spa")
+        XCTAssertEqual(TimelineEntry.move(walk).titleText, walk.timelineTitle)
+        XCTAssertEqual(TimelineEntry.place(resort).titleText, resort.timelineTitle)
+    }
+
     func testOnlyStaysAndTripsOpenADetailScreen() {
         let start = Date(timeIntervalSince1970: 1_800_000_000)
         let stay = VisitPlace(arrivalDate: start, departureDate: nil, latitude: 0, longitude: 0, horizontalAccuracy: 10)

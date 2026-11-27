@@ -874,9 +874,7 @@ struct MoveMapDetailView: View {
     }
 
     private var moveRouteTitle: String {
-        let start = segment.startPlace?.displayTitle ?? "Unknown start"
-        let end = segment.endPlace?.displayTitle ?? "Unknown destination"
-        return "\(start) to \(end)"
+        segment.timelineTitle
     }
 
     private var mapInteractionModes: MapInteractionModes {

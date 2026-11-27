@@ -492,6 +492,13 @@ final class VisitPlace {
         return "\(lat), \(lon)"
     }
 
+    /// The stay's name on the timeline, its day map, and the trips to and from it: the
+    /// learned place first, then `displayTitle`, so coordinates show only when nothing is known.
+    var timelineTitle: String {
+        let known = knownPlace?.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return known.isEmpty ? displayTitle : known
+    }
+
     /// Inclusive stay interval used by time-of-day lookup. Open-ended visits
     /// cover from arrival until the next outgoing move (or indefinitely).
     func covers(_ date: Date) -> Bool {
@@ -618,6 +625,13 @@ final class MoveSegment {
         self.stepCount = stepCount
         self.comment = comment
         self.createdAt = .now
+    }
+
+    /// "Home to Corner café": the trip row and the trip's detail screen both read this.
+    var timelineTitle: String {
+        let start = startPlace?.timelineTitle ?? String(localized: "Unknown start")
+        let end = endPlace?.timelineTitle ?? String(localized: "Unknown destination")
+        return "\(start) to \(end)"
     }
 
     var transportMode: TransportMode {

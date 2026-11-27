@@ -81,9 +81,7 @@ struct TimelineDayMapContent {
         content.dayKey = dayTimeline.dayKey
         content.timeZone = dayTimeline.placeTimeZone
         content.placeMarkers = places.map { place in
-            let knownName = place.knownPlace?.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let title = knownName.isEmpty ? place.displayTitle : knownName
-            return PlaceMarker(id: place.id, title: title, coordinate: place.coordinate)
+            PlaceMarker(id: place.id, title: place.timelineTitle, coordinate: place.coordinate)
         }
         content.placeArrivals = Dictionary(places.map { ($0.id, $0.arrivalDate) }, uniquingKeysWith: { first, _ in first })
         let sortedMoves = dayTimeline.moves.sorted { $0.timelineStartDate < $1.timelineStartDate }
