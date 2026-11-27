@@ -30,6 +30,7 @@ protocol TimelineItemActions: AnyObject {
 
     func requestChangeMode(_ move: MoveSegment)
     func setTransportMode(_ mode: TransportMode, for move: MoveSegment)
+    func setTransportMode(_ mode: TransportMode, forPart index: Int, of move: MoveSegment)
     func requestSplitMove(_ move: MoveSegment)
     func mergeWithPreviousMove(_ move: MoveSegment)
     func mergeWithNextMove(_ move: MoveSegment)
@@ -166,19 +167,31 @@ extension TransportMode {
 struct TransportModeMenu: View {
     let move: MoveSegment
     let actions: any TimelineItemActions
+    /// The part of a trip in parts this chip shows and changes; nil for the whole trip.
+    var partIndex: Int? = nil
+
+    private var mode: TransportMode {
+        guard let partIndex else { return move.transportMode }
+        let parts = move.modeParts
+        return parts.indices.contains(partIndex) ? parts[partIndex].mode : move.transportMode
+    }
 
     private var selection: Binding<TransportMode> {
         Binding(
-            get: { move.transportMode },
-            set: { mode in
-                guard mode != move.transportMode else { return }
-                actions.setTransportMode(mode, for: move)
+            get: { mode },
+            set: { newMode in
+                guard newMode != mode else { return }
+                if let partIndex, move.modeParts.indices.contains(partIndex) {
+                    actions.setTransportMode(newMode, forPart: partIndex, of: move)
+                } else {
+                    actions.setTransportMode(newMode, for: move)
+                }
             }
         )
     }
 
     var body: some View {
-        let tint = MovesPalette.transport(move.transportMode)
+        let tint = MovesPalette.transport(mode)
 
         Menu {
             Picker(String(localized: "Mode"), selection: selection) {
@@ -189,7 +202,7 @@ struct TransportModeMenu: View {
             }
         } label: {
             HStack(spacing: 3) {
-                Text(move.transportMode.title)
+                Text(mode.title)
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)

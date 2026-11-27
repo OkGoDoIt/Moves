@@ -155,9 +155,13 @@ protocol MotionClassifier {
     func approachWasAutomotive(before date: Date) async -> Bool
     /// True when the last few minutes are on foot and not in a vehicle.
     func recentlyWalking(at date: Date) async -> Bool
+    /// Core Motion's activities over the interval, in order, for finding where a trip
+    /// changed mode. Nil when it has no reading.
+    func activities(start: Date, end: Date) async -> [TripModeSplit.Activity]?
 }
 
 extension MotionClassifier {
+    func activities(start: Date, end: Date) async -> [TripModeSplit.Activity]? { nil }
     func dominantActivity(start: Date, end: Date) async -> TransportMode? { nil }
     func approachWasAutomotive(before date: Date) async -> Bool { false }
     func recentlyWalking(at date: Date) async -> Bool { false }
@@ -369,6 +373,14 @@ final class CoreMotionTransportClassifier: MotionClassifier {
             to: end
         )
         return scores.max { $0.value < $1.value }?.key
+    }
+
+    func activities(start: Date, end: Date) async -> [TripModeSplit.Activity]? {
+        guard CMMotionActivityManager.isActivityAvailable(),
+              let activities = await queryActivities(from: start, to: end),
+              !activities.isEmpty
+        else { return nil }
+        return activities.map { TripModeSplit.Activity(start: $0.startDate, mode: Self.mode(for: $0)) }
     }
 
     private static let queryTimeLimit: TimeInterval = 6
@@ -725,6 +737,7 @@ final class DefaultTimelineAssembler: TimelineAssembler {
                 Self.timelineLog.error("Failed to recheck foot trip paces: \(error.localizedDescription, privacy: .public)")
             }
         }
+        await splitRecentTripsOnce()
         do {
             let now = self.now()
             let started = ContinuousClock.now
@@ -819,6 +832,7 @@ final class DefaultTimelineAssembler: TimelineAssembler {
 
     private func apply(_ result: SampleStayReconciliationResult, asksForReview: Bool = true) async throws {
         var changedTrips = 0
+        var unnamedSwitches: [(moveID: UUID, part: Int, coordinate: CLLocationCoordinate2D)] = []
         // Stops are read before the motion queries and looked up again by id after them,
         // never held across one: the person can delete a stop meanwhile on another context.
         let newPlaceIDs = result.newPlaces.map(\.id)
@@ -826,9 +840,9 @@ final class DefaultTimelineAssembler: TimelineAssembler {
             guard Self.isLive(leg.startPlace), Self.isLive(leg.endPlace) else { continue }
             let startID = leg.startPlace.id
             let endID = leg.endPlace.id
-            let before = leg.startPlace.outgoingMoves
-                .first { $0.endPlace?.id == endID }
-                .map(TripShape.init)
+            let stored = leg.startPlace.outgoingMoves.first { $0.endPlace?.id == endID }
+            let before = stored.map(TripShape.init)
+            let storedParts = stored?.modeParts ?? []
             let straightLine = leg.straightLineMeters > 0
                 ? leg.straightLineMeters
                 : CLLocation(latitude: leg.startPlace.latitude, longitude: leg.startPlace.longitude)
@@ -886,8 +900,8 @@ final class DefaultTimelineAssembler: TimelineAssembler {
                 // Read the current preference after the motion query awaits.
                 transportMode = automaticModes().allowedMode(proposedMode)
             }
-            guard let startPlace = try repository.livePlace(id: startID),
-                  let endPlace = try repository.livePlace(id: endID) else { continue }
+            guard try repository.livePlace(id: startID) != nil,
+                  try repository.livePlace(id: endID) != nil else { continue }
 
             var distance = leg.keptDistance ?? leg.distanceMeters
             if leg.keptDistance == nil,
@@ -911,6 +925,17 @@ final class DefaultTimelineAssembler: TimelineAssembler {
                 transportMode = automaticModes().allowedMode(paced)
                 distance = leg.keptDistance ?? leg.distanceMeters
             }
+            // A ride straight into a walk is one trip in parts, each with its own mode. The
+            // trip's own mode is the part that covered the most ground.
+            var parts: [TripModePart] = []
+            if leg.keptMode == nil {
+                parts = await modeParts(for: leg, distance: distance, storedParts: storedParts)
+                if let primary = parts.max(by: { $0.distanceMeters < $1.distanceMeters }) {
+                    transportMode = primary.mode
+                }
+            }
+            guard let startPlace = try repository.livePlace(id: startID),
+                  let endPlace = try repository.livePlace(id: endID) else { continue }
             let between = try repository.samples(from: leg.startDate, to: leg.endDate)
             let move = try repository.upsertMove(
                 startPlace: startPlace,
@@ -936,6 +961,23 @@ final class DefaultTimelineAssembler: TimelineAssembler {
                     move.clearCachedRouteCoordinates()
                     move.speedProfileData = nil
                 }
+                // Parts follow the trip: found again with a new mode, or kept and clipped
+                // to the trip's ends when only those moved.
+                let wanted = leg.keptMode == nil
+                    ? parts
+                    : TripModeSplit.clamped(move.modeParts, start: move.startDate, end: move.endDate, totalDistance: move.distanceMeters)
+                if wanted != move.modeParts {
+                    move.modeParts = wanted
+                    move.clearCachedRouteCoordinates()
+                    move.speedProfileData = nil
+                }
+                for (index, part) in wanted.dropLast().enumerated() where part.endName == nil {
+                    if let switchPoint = leg.locations.min(by: {
+                        abs($0.timestamp.timeIntervalSince(part.end)) < abs($1.timestamp.timeIntervalSince(part.end))
+                    }) {
+                        unnamedSwitches.append((move.id, index, switchPoint.coordinate))
+                    }
+                }
             }
             if before != TripShape(move) {
                 changedTrips += 1
@@ -946,9 +988,10 @@ final class DefaultTimelineAssembler: TimelineAssembler {
             // the answer, not a question; only a relabeled walk or an unresolved result asks.
             let relabeledByRules = transportMode != afterLastBlock
                 && (transportMode == .unknown || afterLastBlock == .walking || afterLastBlock == .running)
-            let unsureOfMode = transportMode == classification.mode
+            // Parts were found from motion and fixes that agree: nothing to ask.
+            let unsureOfMode = parts.isEmpty && (transportMode == classification.mode
                 ? classification.confidence < TimelineReviewHeuristics.uncertainModeConfidence
-                : relabeledByRules
+                : relabeledByRules)
             // Only recent, recorded trips are worth a question: nobody should be asked
             // about imported history or last month.
             if asksForReview, move.reviewState == .none, move.transportModeSource == .auto, unsureOfMode,
@@ -969,6 +1012,7 @@ final class DefaultTimelineAssembler: TimelineAssembler {
             await fillAutomaticPlaceLabelIfNeeded(forPlaceID: id)
         }
         try repository.saveIfNeeded()
+        await nameModeSwitches(unnamedSwitches.prefix(4))
 
         // A pass that only rewrote the same trips (an unknown mode retried) changed nothing.
         lastRebuildChanges = (result.newPlaces.count, changedTrips)
@@ -981,6 +1025,121 @@ final class DefaultTimelineAssembler: TimelineAssembler {
 
     private static func isLive(_ place: VisitPlace) -> Bool {
         !place.isDeleted && !TimelineRetirement.isRetired(place)
+    }
+
+    private func modeParts(
+        for leg: SampleStayMoveLeg,
+        distance: CLLocationDistance,
+        storedParts: [TripModePart]
+    ) async -> [TripModePart] {
+        await modeParts(start: leg.startDate, end: leg.endDate, locations: leg.locations, distance: distance, storedParts: storedParts)
+    }
+
+    /// The parts of a trip that changed between riding and going on foot, or none.
+    private func modeParts(
+        start: Date,
+        end: Date,
+        locations: [CLLocation],
+        distance: CLLocationDistance,
+        storedParts: [TripModePart]
+    ) async -> [TripModePart] {
+        // From a little before the trip: Core Motion lists the activity under way then too.
+        guard let activities = await motionClassifier.activities(
+            start: start.addingTimeInterval(-5 * 60),
+            end: end
+        ) else { return [] }
+        var parts = TripModeSplit.parts(
+            activities: activities,
+            locations: locations,
+            start: start,
+            end: end,
+            totalDistance: distance
+        )
+        guard !parts.isEmpty else { return [] }
+        for index in parts.indices {
+            parts[index].mode = automaticModes().allowedMode(parts[index].mode)
+            parts[index].stepCount = await motionClassifier.stepCount(start: parts[index].start, end: parts[index].end)
+            // A name found on an earlier pass stays with the same switch.
+            parts[index].endName = storedParts.first { abs($0.end.timeIntervalSince(parts[index].end)) < 60 }?.endName
+        }
+        // A mode the person turned off can leave two parts the same.
+        var joined: [TripModePart] = []
+        for part in parts {
+            guard var last = joined.last, last.mode == part.mode else {
+                joined.append(part)
+                continue
+            }
+            last.end = part.end
+            last.distanceMeters += part.distanceMeters
+            last.stepCount = last.stepCount.flatMap { first in part.stepCount.map { first + $0 } }
+            last.endName = part.endName
+            joined[joined.count - 1] = last
+        }
+        return joined.count >= 2 ? joined : []
+    }
+
+    /// Bumped when the split rules change, so the last week is looked at again once.
+    static let modeSplitSweepVersion = 1
+    static let modeSplitSweepVersionKey = "timeline.modeSplitSweepVersion"
+
+    /// Once per version of the split rules: automatic trips from the last week (as far back
+    /// as Core Motion remembers) that changed mode with no stop get their parts.
+    private func splitRecentTripsOnce() async {
+        guard let defaults = paceRulesDefaults,
+              defaults.integer(forKey: Self.modeSplitSweepVersionKey) < Self.modeSplitSweepVersion
+        else { return }
+        do {
+            let candidates = try repository.tripsToCheckForModeSplit(since: now().addingTimeInterval(-7 * 24 * 60 * 60))
+            var unnamed: [(moveID: UUID, part: Int, coordinate: CLLocationCoordinate2D)] = []
+            var split = 0
+            for trip in candidates {
+                let parts = await modeParts(start: trip.start, end: trip.end, locations: trip.locations, distance: trip.distance, storedParts: [])
+                guard !parts.isEmpty,
+                      let move = try repository.liveMove(id: trip.id),
+                      move.permitsAutomaticModeChanges, move.modePartsData == nil,
+                      move.startDate == trip.start, move.endDate == trip.end,
+                      let primary = parts.max(by: { $0.distanceMeters < $1.distanceMeters })
+                else { continue }
+                move.transportMode = primary.mode
+                move.modeParts = parts
+                move.clearCachedRouteCoordinates()
+                move.speedProfileData = nil
+                split += 1
+                for (index, part) in parts.dropLast().enumerated() {
+                    if let point = trip.locations.min(by: { abs($0.timestamp.timeIntervalSince(part.end)) < abs($1.timestamp.timeIntervalSince(part.end)) }) {
+                        unnamed.append((trip.id, index, point.coordinate))
+                    }
+                }
+            }
+            try repository.saveIfNeeded()
+            defaults.set(Self.modeSplitSweepVersion, forKey: Self.modeSplitSweepVersionKey)
+            if split > 0 {
+                Self.timelineLog.info("Split \(split) recent trips that changed mode with no stop")
+            }
+            await nameModeSwitches(unnamed.prefix(8))
+        } catch {
+            Self.timelineLog.error("Failed to look for trips that changed mode: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Names where each trip changed mode ("Pasteur"), for the first part's title. The
+    /// lookup needs the network; a switch left unnamed is titled by where the trip began.
+    private func nameModeSwitches(_ switches: ArraySlice<(moveID: UUID, part: Int, coordinate: CLLocationCoordinate2D)>) async {
+        for item in switches {
+            let resolver = placeNameResolver
+            let coordinate = item.coordinate
+            let resolved: String? = await BoundedWait.run(seconds: 8, fallback: nil) {
+                await resolver.resolveName(for: coordinate)
+            }
+            guard let name = resolved else { continue }
+            // The wait may have outlived the trip: it is looked up again by id.
+            guard let move = try? repository.liveMove(id: item.moveID) else { continue }
+            var parts = move.modeParts
+            guard parts.indices.contains(item.part), parts[item.part].endName == nil else { continue }
+            parts[item.part].endName = name
+            move.modeParts = parts
+            try? repository.saveIfNeeded()
+        }
     }
 
     /// Metres a step, for walks the fixes cannot draw. Health's learned k scales its own

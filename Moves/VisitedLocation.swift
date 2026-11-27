@@ -598,6 +598,8 @@ final class MoveSegment {
     var routeCacheSignature: String? = nil
     var routeCacheCoordinatesData: Data? = nil
     var manualRouteCoordinatesData: Data? = nil
+    /// `[TripModePart]` when the trip changed mode with no stop between; nil for one mode.
+    var modePartsData: Data? = nil
 
     @Relationship(deleteRule: .nullify, originalName: "samples", inverse: \LocationSample.moveSegment)
     var samplesStorage: [LocationSample]? = nil
@@ -634,9 +636,39 @@ final class MoveSegment {
         return "\(start) to \(end)"
     }
 
+    /// Setting a different mode makes the trip one mode: a rule or a person that judged
+    /// the whole trip outranks the parts. Part edits write through `setMode(_:ofPart:)`.
     var transportMode: TransportMode {
         get { TransportMode(rawValue: transportModeRawValue) ?? .unknown }
-        set { transportModeRawValue = newValue.rawValue }
+        set {
+            if newValue.rawValue != transportModeRawValue { modePartsData = nil }
+            transportModeRawValue = newValue.rawValue
+        }
+    }
+
+    /// Changes one part's mode. Parts that end up alike join, and the trip's own mode
+    /// follows the part that covered the most ground.
+    func setMode(_ mode: TransportMode, ofPart index: Int) {
+        var parts = modeParts
+        guard parts.indices.contains(index) else { return }
+        parts[index].mode = mode
+        parts[index].isCorrected = true
+        var joined: [TripModePart] = []
+        for part in parts {
+            guard var last = joined.last, last.mode == part.mode else {
+                joined.append(part)
+                continue
+            }
+            last.end = part.end
+            last.distanceMeters += part.distanceMeters
+            last.stepCount = last.stepCount.flatMap { first in part.stepCount.map { first + $0 } }
+            last.endName = part.endName
+            last.isCorrected = true
+            joined[joined.count - 1] = last
+        }
+        let primary = joined.max { $0.distanceMeters < $1.distanceMeters }?.mode ?? mode
+        transportModeRawValue = primary.rawValue
+        modeParts = joined
     }
 
     var routeMatchPolicy: RouteMatchPolicy {
@@ -712,6 +744,32 @@ final class MoveSegment {
         isDeleted || (modelContext == nil && persistentModelID.storeIdentifier != nil)
     }
 
+    /// The stretches of a trip that changed mode with no stop between, in order. Empty for
+    /// a trip in one mode. Setting fewer than two parts stores none.
+    var modeParts: [TripModePart] {
+        get {
+            guard let modePartsData else { return [] }
+            return (try? JSONDecoder().decode([TripModePart].self, from: modePartsData)) ?? []
+        }
+        set {
+            modePartsData = newValue.count >= 2 ? try? JSONEncoder().encode(newValue) : nil
+        }
+    }
+
+    /// Each way this trip was taken, with how far and how long: its parts, or the whole trip.
+    /// Totals by mode read this, so a ride and the walk after it count as a ride and a walk.
+    var modeBreakdown: [TripModePart] {
+        let parts = modeParts
+        guard parts.isEmpty else { return parts }
+        return [TripModePart(
+            start: timelineStartDate,
+            end: endDate,
+            mode: transportMode,
+            distanceMeters: max(distanceMeters, 0),
+            stepCount: stepCount
+        )]
+    }
+
     /// Route caches and match labels are derived data. With the undo manager attached they
     /// land on the undo stack above the person's own edit, and the next Undo reverts a cache
     /// instead of that edit. Saves inside the window because SwiftData registers pending
@@ -730,6 +788,31 @@ final class MoveSegment {
         }
         context.undoManager = undoManager
     }
+}
+
+/// A stored trip's times, distance, and fixes, read once so motion queries hold no row.
+struct ModeSplitCandidate {
+    let id: UUID
+    let start: Date
+    let end: Date
+    let distance: CLLocationDistance
+    let locations: [CLLocation]
+}
+
+/// One stretch of a trip taken one way, when the trip changed mode with no stop between
+/// (a ride, then a walk). Stored on the trip as JSON; new fields must be optional.
+struct TripModePart: Codable, Equatable, Sendable {
+    var start: Date
+    var end: Date
+    var mode: TransportMode
+    var distanceMeters: Double
+    var stepCount: Int?
+    /// Where this part ends, when that is a switch rather than the trip's end ("Pasteur").
+    var endName: String?
+    /// True when the person chose this part's mode.
+    var isCorrected: Bool?
+
+    var duration: TimeInterval { max(end.timeIntervalSince(start), 0) }
 }
 
 @Model
@@ -1078,6 +1161,10 @@ protocol TimelineRepository {
     func latestPlace(before date: Date, excluding placeID: UUID?) throws -> VisitPlace?
     /// The live stop with this id, or nil once it is deleted or retired.
     func livePlace(id: UUID) throws -> VisitPlace?
+    /// The live trip with this id, or nil once it is deleted or retired.
+    func liveMove(id: UUID) throws -> MoveSegment?
+    /// Automatic trips since `since` in one mode, copied out for the mode-split sweep.
+    func tripsToCheckForModeSplit(since: Date) throws -> [ModeSplitCandidate]
     func samples(from startDate: Date, to endDate: Date) throws -> [LocationSample]
     /// Rebuilds stops and the automatic trips between them from stored fixes.
     ///
@@ -1124,6 +1211,8 @@ protocol TimelineRepository {
     func splitVisit(_ visit: VisitPlace, at date: Date) throws -> (VisitPlace, VisitPlace)
     func updateTimes(of visit: VisitPlace, arrival: Date, departure: Date?) throws
     func setTransportMode(_ mode: TransportMode, for move: MoveSegment, source: TransportModeSource) throws
+    /// The person's mode for one part of a trip in parts.
+    func setTransportMode(_ mode: TransportMode, forPart index: Int, of move: MoveSegment) throws
     func setRouteMatchPolicy(_ policy: RouteMatchPolicy, for move: MoveSegment) throws
     func assign(_ visit: VisitPlace, to place: KnownPlace, source: PlaceAssignmentSource, confidence: Double) throws
     func createKnownPlace(from visit: VisitPlace, name: String) throws -> KnownPlace
@@ -4113,7 +4202,9 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         samples: [LocationSample]
     ) -> StoredTripRefresh {
         let duration = move.endDate.timeIntervalSince(move.startDate)
+        // A trip in parts carries each part's own steps; the whole trip's rate says nothing.
         if move.transportMode == .walking || move.transportMode == .running,
+           move.modePartsData == nil,
            move.permitsAutomaticModeChanges,
            let proposed = ImplausibleWalk.stepEvidenceMode(
                proposed: move.transportMode,
@@ -4558,6 +4649,15 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             move.transportMode = mode
             move.transportModeSource = source
             move.clearCachedRouteCoordinates()
+        }
+    }
+
+    func setTransportMode(_ mode: TransportMode, forPart index: Int, of move: MoveSegment) throws {
+        try performingUndoableChange(named: "Change Mode") {
+            move.setMode(mode, ofPart: index)
+            move.transportModeSource = .user
+            move.clearCachedRouteCoordinates()
+            move.speedProfileData = nil
         }
     }
 
@@ -5618,6 +5718,36 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         try findPlace(byID: placeID).flatMap { $0.isDeleted ? nil : $0 }
     }
 
+    func liveMove(id moveID: UUID) throws -> MoveSegment? {
+        try findMove(byID: moveID).flatMap { $0.isDeleted || TimelineRetirement.isRetired($0) ? nil : $0 }
+    }
+
+    func tripsToCheckForModeSplit(since: Date) throws -> [ModeSplitCandidate] {
+        let moves = try modelContext.fetch(FetchDescriptor<MoveSegment>(
+            predicate: #Predicate { $0.startDate >= since && $0.dayTimeline != nil },
+            sortBy: [SortDescriptor(\.startDate)]
+        ))
+        var candidates: [ModeSplitCandidate] = []
+        for move in moves where candidates.count < 300 {
+            guard move.permitsAutomaticModeChanges, move.modePartsData == nil,
+                  move.transportMode != .plane,
+                  move.endDate.timeIntervalSince(move.startDate) >= 2 * TripModeSplit.minimumPart
+            else { continue }
+            let locations = try samples(from: move.startDate, to: move.endDate)
+                .filter { $0.source != .photoLibrary }
+                .map(\.asLocation)
+            guard locations.count >= 6 else { continue }
+            candidates.append(ModeSplitCandidate(
+                id: move.id,
+                start: move.startDate,
+                end: move.endDate,
+                distance: move.distanceMeters,
+                locations: locations
+            ))
+        }
+        return candidates
+    }
+
     /// A retired stop reads as gone, so nothing reuses or merges into it.
     private func findPlace(byID placeID: UUID) throws -> VisitPlace? {
         var descriptor = FetchDescriptor<VisitPlace>(
@@ -6581,6 +6711,29 @@ enum SimulatorDemoDataSeeder {
             move.endPlace = places[pendingMove.endIndex]
             move.dayTimeline = timeline
             context.insert(move)
+            // One demo drive ends on foot: a trip that changed mode with no stop between.
+            if pendingMove.transportMode == .automotive,
+               routeIndex == demoRoutes.firstIndex(where: { Self.plannedStops(for: $0).contains { $0.transportMode == .automotive } }),
+               moveIndex == pendingMoves.firstIndex(where: { $0.transportMode == .automotive }) {
+                let parked = pendingMove.startDate.addingTimeInterval(pendingMove.endDate.timeIntervalSince(pendingMove.startDate) / 2)
+                let walked = (pendingMove.distanceMeters * 0.15).rounded()
+                move.modeParts = [
+                    TripModePart(
+                        start: pendingMove.startDate,
+                        end: parked,
+                        mode: .automotive,
+                        distanceMeters: pendingMove.distanceMeters - walked,
+                        endName: places[pendingMove.endIndex].userLabel
+                    ),
+                    TripModePart(
+                        start: parked,
+                        end: pendingMove.endDate,
+                        mode: .walking,
+                        distanceMeters: walked,
+                        stepCount: Int(walked / 0.75)
+                    ),
+                ]
+            }
 
             for sample in pendingMove.samples {
                 sample.dayTimeline = timeline

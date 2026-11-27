@@ -363,15 +363,17 @@ private struct MovesShareSnapshot {
             return $0.activityScore > $1.activityScore
         }
 
+        // A trip in parts counts each part under its own mode.
+        let allParts = allMoves.flatMap(\.modeBreakdown)
         let transports = TransportMode.allCases.compactMap { mode -> MovesShareTransport? in
             guard mode != .stationary else { return nil }
-            let moves = allMoves.filter { $0.transportMode == mode }
-            guard !moves.isEmpty else { return nil }
+            let parts = allParts.filter { $0.mode == mode }
+            guard !parts.isEmpty else { return nil }
             return MovesShareTransport(
                 mode: mode,
-                distanceMeters: moves.reduce(0) { $0 + max($1.distanceMeters, 0) },
-                duration: moves.reduce(0) { $0 + max($1.timelineDuration, 0) },
-                segmentCount: moves.count
+                distanceMeters: parts.reduce(0) { $0 + max($1.distanceMeters, 0) },
+                duration: parts.reduce(0) { $0 + $1.duration },
+                segmentCount: parts.count
             )
         }
         .sorted {

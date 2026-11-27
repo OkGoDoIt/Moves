@@ -116,6 +116,71 @@ final class SampleStayInferenceTests: XCTestCase {
         XCTAssertLessThanOrEqual(abs(stay.arrivalDate.timeIntervalSince(settled)), 90)
     }
 
+    /// A motorbike ride straight into a walk (Da Lat, Nov 27): two parts, split where Core
+    /// Motion changed, sharing the trip's distance.
+    func testRideIntoAWalkIsTwoParts() throws {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let home = CLLocationCoordinate2D(latitude: 10, longitude: 106)
+        let parked = offset(home, north: 1_500, east: 0)
+        let switchAt = start.addingTimeInterval(6 * 60)
+        let end = switchAt.addingTimeInterval(15 * 60)
+        let locations = trackLocations(from: home, north: 1_500, east: 0, start: start, seconds: 6 * 60)
+            + trackLocations(from: parked, north: 0, east: 1_100, start: switchAt, seconds: 15 * 60)
+        let activities = [
+            TripModeSplit.Activity(start: start.addingTimeInterval(-5 * 60), mode: .stationary),
+            TripModeSplit.Activity(start: start.addingTimeInterval(60), mode: .automotive),
+            // Getting off the bike: a few unclear seconds.
+            TripModeSplit.Activity(start: switchAt.addingTimeInterval(-20), mode: .unknown),
+            TripModeSplit.Activity(start: switchAt, mode: .walking),
+        ]
+
+        let parts = TripModeSplit.parts(activities: activities, locations: locations, start: start, end: end, totalDistance: 2_700)
+
+        XCTAssertEqual(parts.map(\.mode), [.automotive, .walking])
+        XCTAssertEqual(parts.first?.start, start)
+        XCTAssertEqual(parts.last?.end, end)
+        XCTAssertEqual(try XCTUnwrap(parts.first).end.timeIntervalSince(switchAt), 0, accuracy: 30)
+        XCTAssertEqual(parts.reduce(0) { $0 + $1.distanceMeters }, 2_700, accuracy: 2)
+        XCTAssertGreaterThan(parts[0].distanceMeters, parts[1].distanceMeters)
+    }
+
+    /// Guards: motion alone is not enough, and a brief reading is not a part.
+    func testModeSplitNeedsFixesThatAgreeAndPartsThatLast() {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let home = CLLocationCoordinate2D(latitude: 10, longitude: 106)
+        let switchAt = start.addingTimeInterval(6 * 60)
+        let end = switchAt.addingTimeInterval(15 * 60)
+        let rideThenWalk = [
+            TripModeSplit.Activity(start: start, mode: .automotive),
+            TripModeSplit.Activity(start: switchAt, mode: .walking),
+        ]
+        // A walk the whole way: motion said "automotive" at first, the fixes never rode.
+        let walkedAllTheWay = trackLocations(from: home, north: 1_600, east: 0, start: start, seconds: 21 * 60)
+        XCTAssertTrue(TripModeSplit.parts(activities: rideThenWalk, locations: walkedAllTheWay, start: start, end: end, totalDistance: 1_600).isEmpty)
+
+        // Stuck in traffic, motion reads a minute of walking in the middle of a drive.
+        let drive = trackLocations(from: home, north: 9_000, east: 0, start: start, seconds: 21 * 60)
+        let flicker = [
+            TripModeSplit.Activity(start: start, mode: .automotive),
+            TripModeSplit.Activity(start: switchAt, mode: .walking),
+            TripModeSplit.Activity(start: switchAt.addingTimeInterval(60), mode: .automotive),
+        ]
+        XCTAssertTrue(TripModeSplit.parts(activities: flicker, locations: drive, start: start, end: end, totalDistance: 9_000).isEmpty)
+    }
+
+    func testKeptPartsFollowTheTripsEnds() {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let parts = [
+            TripModePart(start: start, end: start.addingTimeInterval(360), mode: .automotive, distanceMeters: 1_500),
+            TripModePart(start: start.addingTimeInterval(360), end: start.addingTimeInterval(1_260), mode: .walking, distanceMeters: 1_100),
+        ]
+        let moved = TripModeSplit.clamped(parts, start: start.addingTimeInterval(60), end: start.addingTimeInterval(1_200), totalDistance: 2_600)
+        XCTAssertEqual(moved.first?.start, start.addingTimeInterval(60))
+        XCTAssertEqual(moved.last?.end, start.addingTimeInterval(1_200))
+        // A stop that grew over most of the ride leaves too little of it to be a part.
+        XCTAssertTrue(TripModeSplit.clamped(parts, start: start.addingTimeInterval(300), end: start.addingTimeInterval(1_260), totalDistance: 2_600).isEmpty)
+    }
+
     /// Changed deliberately: 7.1 km in 24 minutes (4.9 m/s) with 25 steps a minute used to
     /// stay unknown. That is the owner's scooter in city traffic, and a motor vehicle is
     /// the answer; only Core Motion's own cycling reading keeps it from being one.
@@ -1120,14 +1185,15 @@ final class SampleStayReconciliationTests: XCTestCase {
     private func makeRebuild(
         mode: TransportMode = .walking,
         steps: Int? = 400,
-        stepsPerMinute: Double? = nil
+        stepsPerMinute: Double? = nil,
+        motion: MotionClassifier? = nil
     ) throws -> Rebuild {
         let container = try makeContainer()
         let context = ModelContext(container)
         let repository = SwiftDataTimelineRepository(modelContext: context)
         let assembler = DefaultTimelineAssembler(
             repository: repository,
-            motionClassifier: RateMotionClassifier(mode: mode, steps: steps, stepsPerMinute: stepsPerMinute),
+            motionClassifier: motion ?? RateMotionClassifier(mode: mode, steps: steps, stepsPerMinute: stepsPerMinute),
             placeNameResolver: EmptyPlaceNameResolver(),
             automaticModes: { .init() }
         )
@@ -1242,6 +1308,98 @@ final class SampleStayReconciliationTests: XCTestCase {
         XCTAssertEqual(try rebuild.moves().count, 2)
         try rebuild.assertInvariants()
         try await rebuild.assertSettled()
+    }
+
+    /// A ride straight into a walk with no stop: one trip in two parts, each counted under
+    /// its own mode, kept by later passes, and correctable part by part.
+    private struct RideThenWalk {
+        let start: Date
+        var left: Date { start.addingTimeInterval(60 * 60) }
+        var switchAt: Date { left.addingTimeInterval(6 * 60) }
+        var atCafe: Date { switchAt.addingTimeInterval(15 * 60) }
+        var motion: ScriptedActivityClassifier {
+            ScriptedActivityClassifier(activities: [
+                TripModeSplit.Activity(start: start, mode: .stationary),
+                TripModeSplit.Activity(start: left.addingTimeInterval(60), mode: .automotive),
+                TripModeSplit.Activity(start: switchAt, mode: .walking),
+                TripModeSplit.Activity(start: atCafe.addingTimeInterval(30), mode: .stationary),
+            ])
+        }
+
+        /// Home, a six-minute ride, a fifteen-minute walk, then an hour at a café.
+        func seed(into rebuild: Rebuild) throws {
+            let home = CLLocationCoordinate2D(latitude: 10.76, longitude: 106.70)
+            let parked = offset(home, north: 1_500, east: 0)
+            let cafe = offset(parked, north: 0, east: 1_100)
+            _ = try rebuild.visit(home, from: start, to: left)
+            try rebuild.fixes(home, at: [5, 30, 59].map { start.addingTimeInterval($0 * 60) })
+            _ = try rebuild.repository.appendSamples(
+                from: track(from: home, north: 1_500, east: 0, start: left, seconds: 6 * 60)
+                    + track(from: parked, north: 0, east: 1_100, start: switchAt, seconds: 15 * 60),
+                source: .continuous
+            )
+            _ = try rebuild.visit(cafe, from: atCafe, to: atCafe.addingTimeInterval(60 * 60))
+            try rebuild.fixes(cafe, at: [10, 40, 59].map { atCafe.addingTimeInterval($0 * 60) })
+        }
+    }
+
+    /// Trips stored before the split rules existed get their parts once, from Core Motion's week.
+    func testLastWeeksTripsAreSplitOnce() async throws {
+        let scene = RideThenWalk(start: Date().addingTimeInterval(-26 * 60 * 60))
+        let rebuild = try makeRebuild(mode: .walking)
+        try scene.seed(into: rebuild)
+        await rebuild.assembler.reconcileSampleStays()
+        let trip = try XCTUnwrap(try rebuild.moves().first)
+        XCTAssertTrue(trip.modeParts.isEmpty, "No motion history, no parts")
+
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "mode-split-\(UUID().uuidString)"))
+        let upgraded = DefaultTimelineAssembler(
+            repository: rebuild.repository,
+            motionClassifier: scene.motion,
+            placeNameResolver: EmptyPlaceNameResolver(),
+            automaticModes: { .init() },
+            paceRulesDefaults: defaults
+        )
+        await upgraded.reconcileSampleStays()
+
+        XCTAssertEqual(trip.modeParts.map(\.mode), [.automotive, .walking])
+        XCTAssertEqual(defaults.integer(forKey: DefaultTimelineAssembler.modeSplitSweepVersionKey), DefaultTimelineAssembler.modeSplitSweepVersion)
+    }
+
+    func testRideIntoAWalkIsOneTripInTwoParts() async throws {
+        let scene = RideThenWalk(start: Date().addingTimeInterval(-6 * 60 * 60))
+        let switchAt = scene.switchAt
+        let rebuild = try makeRebuild(motion: scene.motion)
+        try scene.seed(into: rebuild)
+
+        await rebuild.assembler.reconcileSampleStays()
+
+        let trip = try XCTUnwrap(try rebuild.moves().first)
+        XCTAssertEqual(try rebuild.moves().count, 1, "Still one trip between the two stops")
+        let parts = trip.modeParts
+        XCTAssertEqual(parts.map(\.mode), [.automotive, .walking])
+        XCTAssertEqual(try XCTUnwrap(parts.first).end.timeIntervalSince(switchAt), 0, accuracy: 30)
+        XCTAssertEqual(parts.reduce(0) { $0 + $1.distanceMeters }, trip.distanceMeters, accuracy: 2)
+        XCTAssertGreaterThan(parts[1].stepCount ?? 0, 0)
+        XCTAssertEqual(trip.transportMode, .automotive, "The part that covered the most ground")
+        XCTAssertEqual(trip.reviewState, .none, "Motion and fixes agreed: nothing to ask")
+        let day = try XCTUnwrap(trip.dayTimeline)
+        let chips = ActivityBubbleMetrics.make(from: day)
+        XCTAssertEqual(try XCTUnwrap(chips.first { $0.mode == .walking }).distanceMeters, parts[1].distanceMeters, accuracy: 1)
+        XCTAssertEqual(try XCTUnwrap(chips.first { $0.mode == .automotive }).distanceMeters, parts[0].distanceMeters, accuracy: 1)
+        try rebuild.assertInvariants()
+        try await rebuild.assertSettled()
+
+        // The person says the ride was a bike: that part changes, and the rebuild keeps it.
+        try rebuild.repository.setTransportMode(.cycling, forPart: 0, of: trip)
+        XCTAssertEqual(trip.modeParts.map(\.mode), [.cycling, .walking])
+        XCTAssertEqual(trip.transportModeSource, .user)
+        await rebuild.assembler.reconcileSampleStays()
+        XCTAssertEqual(try XCTUnwrap(try rebuild.moves().first).modeParts.map(\.mode), [.cycling, .walking])
+        // Both parts the same is one mode again.
+        try rebuild.repository.setTransportMode(.cycling, forPart: 1, of: trip)
+        XCTAssertTrue(trip.modeParts.isEmpty)
+        XCTAssertEqual(trip.transportMode, .cycling)
     }
 
     private func makeBlipScene(
@@ -1973,6 +2131,34 @@ private struct RateMotionClassifier: MotionClassifier {
     }
 }
 
+/// Core Motion as a script: each activity runs until the next begins.
+private struct ScriptedActivityClassifier: MotionClassifier {
+    var activities: [TripModeSplit.Activity]
+    var stepsPerWalkingMinute: Double = 100
+
+    private func seconds(of mode: TransportMode, from start: Date, to end: Date) -> TimeInterval {
+        var total: TimeInterval = 0
+        for (index, activity) in activities.enumerated() where activity.mode == mode {
+            let next = index + 1 < activities.count ? activities[index + 1].start : .distantFuture
+            total += max(0, min(next, end).timeIntervalSince(max(activity.start, start)))
+        }
+        return total
+    }
+
+    func classifyTransport(start: Date, end: Date, locations: [CLLocation]) async -> (mode: TransportMode, confidence: Double) {
+        let best = TransportMode.allCases.max { seconds(of: $0, from: start, to: end) < seconds(of: $1, from: start, to: end) } ?? .unknown
+        return (best, 0.9)
+    }
+
+    func stepCount(start: Date, end: Date) async -> Int? {
+        Int(seconds(of: .walking, from: start, to: end) / 60 * stepsPerWalkingMinute)
+    }
+
+    func activities(start: Date, end: Date) async -> [TripModeSplit.Activity]? {
+        activities
+    }
+}
+
 private struct EmptyPlaceNameResolver: PlaceNameResolver {
     func resolveName(for coordinate: CLLocationCoordinate2D) async -> String? {
         nil
@@ -2041,6 +2227,21 @@ private func location(_ coordinate: CLLocationCoordinate2D, at date: Date) -> CL
         speed: -1,
         timestamp: date
     )
+}
+
+/// `track` with each fix's speed set from its spacing, as Core Location reports it.
+private func trackLocations(
+    from origin: CLLocationCoordinate2D,
+    north: Double,
+    east: Double,
+    start: Date,
+    seconds: TimeInterval
+) -> [CLLocation] {
+    let speed = (north * north + east * east).squareRoot() / seconds
+    return track(from: origin, north: north, east: east, start: start, seconds: seconds).map {
+        CLLocation(coordinate: $0.coordinate, altitude: 0, horizontalAccuracy: 5, verticalAccuracy: -1,
+                   course: -1, speed: speed, timestamp: $0.timestamp)
+    }
 }
 
 /// Dense fixes every 4 seconds along a straight line, the first one 4 seconds after `start`.

@@ -55,6 +55,8 @@ struct RenderedRoute: Identifiable {
     let speedFractions: [Float]?
     let confidence: RouteMatchConfidence
     let origin: TimelineItemOrigin
+    /// For a trip in parts: where along the line (0…1) each part ends, and its mode.
+    let modeSpans: [RouteModeSpan]
 
     init(
         id: String,
@@ -64,8 +66,10 @@ struct RenderedRoute: Identifiable {
         transportMode: TransportMode,
         speedFractions: [Float]? = nil,
         confidence: RouteMatchConfidence = .unknown,
-        origin: TimelineItemOrigin = .sensor
+        origin: TimelineItemOrigin = .sensor,
+        modeSpans: [RouteModeSpan] = []
     ) {
+        self.modeSpans = modeSpans
         self.id = id
         self.coordinates = coordinates
         self.usesHighAccuracyRouteTracking = usesHighAccuracyRouteTracking
@@ -99,7 +103,8 @@ struct RenderedRoute: Identifiable {
             transportMode: move.transportMode,
             speedFractions: fractions,
             confidence: resolvedConfidence(for: move),
-            origin: move.origin
+            origin: move.origin,
+            modeSpans: RouteModeSpan.spans(for: move.modeParts)
         )
     }
 
@@ -176,6 +181,9 @@ struct RenderedRoute: Identifiable {
     /// Opaque `Gradient` that follows the polyline. Always a plain `Gradient`.
     func strokeGradient(shadeBySpeed: Bool, emphasis: Double = 1) -> Gradient {
         let opacity = strokeOpacity * min(max(emphasis, 0), 1)
+        if modeSpans.count >= 2 {
+            return Gradient(stops: RouteGradientStops.make(modeSpans: modeSpans, opacity: opacity))
+        }
         let stops = RouteGradientStops.make(
             coordinates: coordinates,
             speedFractions: shadeBySpeed ? speedFractions : nil,
@@ -183,6 +191,25 @@ struct RenderedRoute: Identifiable {
             opacity: opacity
         )
         return Gradient(stops: stops)
+    }
+}
+
+/// One part of a trip in parts along its drawn line.
+struct RouteModeSpan: Equatable {
+    /// Where along the line the part ends, 0…1 by distance.
+    var end: Double
+    var mode: TransportMode
+
+    /// Spans from the parts' shares of the distance; empty for a trip in one mode.
+    static func spans(for parts: [TripModePart]) -> [RouteModeSpan] {
+        guard parts.count >= 2 else { return [] }
+        let total = parts.reduce(0) { $0 + max($1.distanceMeters, 0) }
+        guard total > 0 else { return [] }
+        var covered = 0.0
+        return parts.enumerated().map { index, part in
+            covered += max(part.distanceMeters, 0)
+            return RouteModeSpan(end: index == parts.count - 1 ? 1 : covered / total, mode: part.mode)
+        }
     }
 }
 
@@ -208,6 +235,19 @@ enum RouteStrokeStyle {
 }
 
 enum RouteGradientStops {
+    /// Each part solid in its mode's colour, changing sharply where the mode changed.
+    static func make(modeSpans: [RouteModeSpan], opacity: Double) -> [Gradient.Stop] {
+        var stops: [Gradient.Stop] = []
+        var start = 0.0
+        for span in modeSpans {
+            let color = MovesPalette.opaqueRouteColor(MovesPalette.transport(span.mode), opacity: opacity)
+            stops.append(Gradient.Stop(color: color, location: start))
+            stops.append(Gradient.Stop(color: color, location: span.end))
+            start = span.end
+        }
+        return stops
+    }
+
     static func make(
         coordinates: [CLLocationCoordinate2D],
         speedFractions: [Float]?,

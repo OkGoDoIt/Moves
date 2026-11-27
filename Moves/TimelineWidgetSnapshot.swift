@@ -77,9 +77,9 @@ extension TimelineWidgetSnapshot {
     static func make(from dayTimeline: DayTimeline) -> TimelineWidgetSnapshot {
         var distanceByMode: [TransportMode: Double] = [:]
 
-        for move in dayTimeline.moves {
-            let aggregatedMode = aggregatedDisplayMode(for: move.transportMode)
-            distanceByMode[aggregatedMode, default: 0] += max(move.distanceMeters, 0)
+        for part in dayTimeline.moves.flatMap(\.modeBreakdown) {
+            let aggregatedMode = aggregatedDisplayMode(for: part.mode)
+            distanceByMode[aggregatedMode, default: 0] += max(part.distanceMeters, 0)
         }
 
         let metrics = distanceByMode

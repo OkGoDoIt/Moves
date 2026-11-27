@@ -136,7 +136,7 @@ struct TimelineDayMapContent {
             .map { move in
                 let start = Int(move.timelineStartDate.timeIntervalSince1970.rounded())
                 let end = Int(move.endDate.timeIntervalSince1970.rounded())
-                return "\(move.id.uuidString)|\(move.transportMode.rawValue)|\(start)|\(end)|\(move.samples.count)|\(routeStateKey(for: move))"
+                return "\(move.id.uuidString)|\(move.transportMode.rawValue)|\(start)|\(end)|\(move.samples.count)|\(routeStateKey(for: move))|\(move.modePartsData?.hashValue ?? 0)"
             }
             .joined(separator: ",")
     }

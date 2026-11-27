@@ -378,7 +378,8 @@ struct DayTimelinePageContent: View {
             .map { move in
                 let start = move.timelineStartDate.timeIntervalSinceReferenceDate
                 let end = move.endDate.timeIntervalSinceReferenceDate
-                return "\(move.id.uuidString)|\(move.transportModeRawValue)|\(start)|\(end)|\(move.distanceMeters)"
+                // A part's mode can change while the trip's own mode stays.
+                return "\(move.id.uuidString)|\(move.transportModeRawValue)|\(start)|\(end)|\(move.distanceMeters)|\(move.modePartsData?.hashValue ?? 0)"
             }
             .joined(separator: ",")
     }
@@ -400,11 +401,11 @@ struct DayTimelinePageContent: View {
         var durationByBucket: [DayTransportBucket: TimeInterval] = [:]
         var distanceByBucket: [DayTransportBucket: CLLocationDistance] = [:]
 
-        for move in dayTimeline.moves {
-            guard let bucket = DayTransportBucket(move.transportMode) else { continue }
+        for part in dayTimeline.moves.flatMap(\.modeBreakdown) {
+            guard let bucket = DayTransportBucket(part.mode) else { continue }
 
-            durationByBucket[bucket, default: 0] += move.timelineDuration
-            distanceByBucket[bucket, default: 0] += max(move.distanceMeters, 0)
+            durationByBucket[bucket, default: 0] += part.duration
+            distanceByBucket[bucket, default: 0] += max(part.distanceMeters, 0)
         }
 
         return DayTransportBucket.allCases.compactMap { bucket in
@@ -1498,7 +1499,33 @@ struct StorylineRow: View {
         .accessibilityAddTraits(isHighlighted ? [.isSelected] : [])
     }
 
+    @ViewBuilder
     private var standardRow: some View {
+        if case .move(let segment) = entry, case let parts = segment.modeParts, parts.count >= 2 {
+            // A trip that changed mode with no stop reads as one row per part.
+            VStack(spacing: 0) {
+                ForEach(parts.indices, id: \.self) { index in
+                    HStack(alignment: .top, spacing: 0) {
+                        StorylineTimeColumn(date: index == 0 ? entry.startDate : parts[index].start)
+                        StorylineRail(
+                            tint: MovesPalette.transport(parts[index].mode),
+                            iconName: parts[index].mode.symbolName,
+                            isFirst: isFirst && index == 0,
+                            isLast: isLast && index == parts.count - 1,
+                            showsHealthBadge: false,
+                            showsEstimatedGlyph: false
+                        )
+                        StorylineTripPartBody(move: segment, parts: parts, index: index)
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+        } else {
+            singleRow
+        }
+    }
+
+    private var singleRow: some View {
         HStack(alignment: .top, spacing: 0) {
             StorylineTimeColumn(date: entry.startDate)
             StorylineRail(
@@ -1816,6 +1843,111 @@ private struct StorylineRowBody: View {
             .font(.system(size: 12, weight: .medium, design: .rounded))
             .foregroundStyle(Color.primary.opacity(0.68))
             .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// One part of a trip in parts: its own title, mode chip, time, and distance.
+private struct StorylineTripPartBody: View {
+    let move: MoveSegment
+    let parts: [TripModePart]
+    let index: Int
+    @Environment(\.timelineItemActions) private var actions
+
+    private var part: TripModePart { parts[index] }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(TripPartPresentation.title(of: index, in: move, parts: parts))
+                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .foregroundStyle(Color.primary.opacity(0.92))
+                .lineLimit(2)
+            if let actions {
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        TransportModeMenu(move: move, actions: actions, partIndex: index)
+                        details
+                    }
+                    .fixedSize(horizontal: true, vertical: false)
+                    VStack(alignment: .leading, spacing: 3) {
+                        TransportModeMenu(move: move, actions: actions, partIndex: index)
+                        details
+                    }
+                }
+            } else {
+                Text("\(part.mode.title)   \(TripPartPresentation.details(of: part))")
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(Color.primary.opacity(0.68))
+            }
+            if let tertiary = TripPartPresentation.tertiary(of: part) {
+                Text(tertiary)
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.leading, 8)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var details: some View {
+        Text(TripPartPresentation.details(of: part))
+            .font(.system(size: 12, weight: .medium, design: .rounded))
+            .foregroundStyle(Color.primary.opacity(0.68))
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// How the rows of a trip in parts read: "Home to Pasteur", then "Then on foot to Café".
+enum TripPartPresentation {
+    static func title(of index: Int, in move: MoveSegment, parts: [TripModePart]) -> String {
+        let isLast = index == parts.count - 1
+        let destination = isLast
+            ? (move.endPlace?.timelineTitle ?? String(localized: "Unknown destination"))
+            : parts[index].endName
+        if index == 0 {
+            let start = move.startPlace?.timelineTitle ?? String(localized: "Unknown start")
+            guard let destination else { return String(localized: "From \(start)") }
+            return String(localized: "\(start) to \(destination)")
+        }
+        switch (howPhrase(parts[index].mode), destination) {
+        case let (how?, destination?): return String(localized: "Then \(how) to \(destination)")
+        case let (how?, nil): return String(localized: "Then \(how)")
+        case let (nil, destination?): return String(localized: "Then to \(destination)")
+        case (nil, nil): return parts[index].mode.title
+        }
+    }
+
+    /// "6m   1.5 mi"
+    static func details(of part: TripModePart) -> String {
+        let distance = Measurement(value: max(part.distanceMeters, 0), unit: UnitLength.meters)
+            .formatted(.measurement(width: .abbreviated, usage: .road))
+        return "\(DurationFormatter.text(for: part.duration))   \(distance)"
+    }
+
+    /// "1,534 steps   2.2 mph" for a part on foot; the speed alone otherwise.
+    static func tertiary(of part: TripModePart) -> String? {
+        var details: [String] = []
+        if part.mode == .walking || part.mode == .running, let steps = part.stepCount, steps > 0 {
+            details.append("\(steps.formatted(.number)) steps")
+        }
+        if let speed = TimelineEntry.speedText(distance: part.distanceMeters, duration: part.duration) {
+            details.append(speed)
+        }
+        return details.isEmpty ? nil : details.joined(separator: "   ")
+    }
+
+    private static func howPhrase(_ mode: TransportMode) -> String? {
+        switch mode {
+        case .walking: return String(localized: "on foot")
+        case .running: return String(localized: "running")
+        case .cycling: return String(localized: "by bike")
+        case .automotive: return String(localized: "driving")
+        case .train: return String(localized: "by train")
+        case .boat: return String(localized: "by boat")
+        case .plane: return String(localized: "flying")
+        case .swimming: return String(localized: "swimming")
+        case .stationary, .unknown: return nil
+        }
     }
 }
 
@@ -2240,9 +2372,14 @@ enum TimelineEntry: Identifiable {
     }
 
     private static func averageSpeedText(for segment: MoveSegment) -> String? {
-        guard segment.timelineDuration > 0 else { return nil }
+        speedText(distance: segment.distanceMeters, duration: segment.timelineDuration)
+    }
 
-        let speed = Measurement(value: max(segment.distanceMeters, 0) / segment.timelineDuration, unit: UnitSpeed.metersPerSecond)
+    /// "2.2 mph" (or km/h where metric), or nil with no duration.
+    static func speedText(distance: CLLocationDistance, duration: TimeInterval) -> String? {
+        guard duration > 0 else { return nil }
+
+        let speed = Measurement(value: max(distance, 0) / duration, unit: UnitSpeed.metersPerSecond)
         let locale = Locale.autoupdatingCurrent
         let unit: UnitSpeed = locale.measurementSystem == .metric ? .kilometersPerHour : .milesPerHour
         // One per locale, not one per trip row on every render.

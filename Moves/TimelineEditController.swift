@@ -182,6 +182,16 @@ final class TimelineEditController: TimelineItemActions {
         }
     }
 
+    func setTransportMode(_ mode: TransportMode, forPart index: Int, of move: MoveSegment) {
+        guard isLive(move) else { return }
+        let payload = TimelineModeChangePayload(move: move)
+        performStructural(named: String(localized: "Changed mode")) { repo, context in
+            try repo.setTransportMode(mode, forPart: index, of: move)
+            move.reviewState = .confirmed
+            registerRestore(payload, on: context)
+        }
+    }
+
     func requestSplitMove(_ move: MoveSegment) {
         presentedSheet = .splitMove(move.id)
     }
@@ -881,17 +891,20 @@ private struct TimelineModeChangePayload: TimelineUndoRestoring {
     let mode: TransportMode
     let source: TransportModeSource
     let reviewState: ReviewState
+    let modePartsData: Data?
 
     init(move: MoveSegment) {
         id = move.id
         mode = move.transportMode
         source = move.transportModeSource
         reviewState = move.reviewState
+        modePartsData = move.modePartsData
     }
 
     func restore(in context: ModelContext) {
         guard let move = LiveTimelineRows.move(id, in: context) else { return }
         move.transportMode = mode
+        move.modePartsData = modePartsData
         move.transportModeSource = source
         move.reviewState = reviewState
         move.clearCachedRouteCoordinates()

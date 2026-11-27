@@ -71,7 +71,7 @@ enum InsightsSourceLoader {
         for move in try context.fetch(moveFetch) {
             moveCount += 1
             guard let day = move.dayTimeline?.persistentModelID else { continue }
-            moves[day, default: []].append(InsightsMoveRecord(move))
+            moves[day, default: []].append(contentsOf: InsightsMoveRecord.records(move))
         }
 
         var visitFetch = FetchDescriptor<VisitPlace>.live(sortBy: [SortDescriptor(\.arrivalDate)])
@@ -160,6 +160,23 @@ struct InsightsMoveRecord: Equatable, Sendable {
         modeRaw = move.transportMode.rawValue
         // The start stop only: `placeTimeZone` would fall back to walking the whole day.
         timeZone = move.startPlace.flatMap { PlaceTimeZone.timeZone(at: $0.coordinate) }
+    }
+
+    /// One record per way the trip was taken: a ride and the walk after it count as both.
+    static func records(_ move: MoveSegment) -> [InsightsMoveRecord] {
+        let parts = move.modeParts
+        guard !parts.isEmpty else { return [InsightsMoveRecord(move)] }
+        let timeZone = move.startPlace.flatMap { PlaceTimeZone.timeZone(at: $0.coordinate) }
+        return parts.map { part in
+            InsightsMoveRecord(
+                startDate: part.start,
+                endDate: part.end,
+                duration: part.duration,
+                distanceMeters: max(part.distanceMeters, 0),
+                mode: part.mode,
+                timeZone: timeZone
+            )
+        }
     }
 }
 

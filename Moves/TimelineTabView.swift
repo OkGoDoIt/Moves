@@ -306,7 +306,8 @@ enum ActivityBubbleMetrics {
     /// Groups a day’s moves by `TransportMode`. Every trip counts towards one chip, so the
     /// chips add up to the day's distance in the header; Other comes last.
     static func make(from dayTimeline: DayTimeline) -> [ActivityBubbleMetric] {
-        make(from: dayTimeline.moves.map { ($0.transportMode, $0.timelineDuration, $0.distanceMeters) })
+        // A trip in parts counts each part towards its own mode's chip.
+        make(from: dayTimeline.moves.flatMap(\.modeBreakdown).map { ($0.mode, $0.duration, $0.distanceMeters) })
     }
 
     static func make(from moves: [(mode: TransportMode, duration: TimeInterval, distance: CLLocationDistance)]) -> [ActivityBubbleMetric] {

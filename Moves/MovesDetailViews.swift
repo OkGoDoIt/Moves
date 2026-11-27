@@ -666,7 +666,10 @@ struct MoveMapDetailView: View {
         VStack(alignment: .leading, spacing: 6) {
                 Text(moveRouteTitle)
                     .font(.system(size: 18, weight: .bold, design: .rounded))
-                Text(segment.transportMode.title)
+                // "Automotive, then Walking" for a trip that changed mode with no stop.
+                Text(segment.modeParts.isEmpty
+                     ? segment.transportMode.title
+                     : segment.modeParts.map(\.mode.title).joined(separator: String(localized: ", then ")))
                     .font(.system(size: 14, weight: .semibold, design: .rounded))
                 if segment.usesHealthWorkoutRoute {
                     Label("Apple Health route", systemImage: "heart.fill")
@@ -969,6 +972,7 @@ struct MoveMapDetailView: View {
         let previousRouteCacheSignature = segment.routeCacheSignature
         let previousRouteCacheCoordinatesData = segment.routeCacheCoordinatesData
         let previousManualRouteCoordinatesData = segment.manualRouteCoordinatesData
+        let previousModePartsData = segment.modePartsData
         segment.transportMode = newMode
         // Marks this as the person's choice so background repair leaves it alone.
         segment.transportModeSource = .user
@@ -990,6 +994,7 @@ struct MoveMapDetailView: View {
             startRouteWork { await refreshRouteCoordinates() }
         } catch {
             segment.transportMode = previousMode
+            segment.modePartsData = previousModePartsData
             segment.transportModeSource = previousModeSource
             segment.reviewState = previousReviewState
             segment.routeCacheSignature = previousRouteCacheSignature

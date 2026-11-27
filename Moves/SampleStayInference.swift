@@ -753,3 +753,191 @@ enum LastBlockWalk {
         }
     }
 }
+
+/// Where a trip changed between riding and going on foot with no stop between: a ride
+/// straight into a walk, or a walk to a bus and the walk off it.
+///
+/// Core Motion says when the person rode and when they walked; the fixes must agree, or
+/// the trip stays one mode. Each part lasts at least `minimumPart` and covers ground.
+enum TripModeSplit {
+    /// What Core Motion reported: the activity from `start` until the next one began.
+    struct Activity: Equatable {
+        var start: Date
+        var mode: TransportMode
+    }
+
+    static let minimumPart: TimeInterval = 2 * 60
+    /// Unclear or still moments shorter than this belong to the activity around them:
+    /// a red light, or the seconds it takes to get off a bike.
+    static let bridgedGap: TimeInterval = 90
+    static let minimumPartDistance: CLLocationDistance = 150
+    /// A ride's fixes move faster than this; a walk's slower than `fastestOnFoot`.
+    static let slowestRide: CLLocationSpeed = 3
+    static let fastestOnFoot: CLLocationSpeed = 2.5
+    static let maximumParts = 5
+
+    private enum Kind: Equatable { case riding, onFoot, other }
+
+    private static func kind(of mode: TransportMode) -> Kind {
+        switch mode {
+        case .automotive, .cycling, .train, .boat: return .riding
+        case .walking, .running: return .onFoot
+        case .stationary, .unknown, .plane, .swimming: return .other
+        }
+    }
+
+    private struct Run {
+        var start: Date
+        var end: Date
+        var kind: Kind
+        /// Seconds of each mode Core Motion reported inside the run.
+        var modes: [TransportMode: TimeInterval]
+
+        var duration: TimeInterval { end.timeIntervalSince(start) }
+
+        mutating func absorb(_ other: Run) {
+            start = min(start, other.start)
+            end = max(end, other.end)
+            for (mode, seconds) in other.modes { modes[mode, default: 0] += seconds }
+        }
+    }
+
+    /// The trip's parts, or empty when it stays one mode. Distances share out
+    /// `totalDistance` by each part's own path, so the parts add up to the trip.
+    static func parts(
+        activities: [Activity],
+        locations: [CLLocation],
+        start: Date,
+        end: Date,
+        totalDistance: CLLocationDistance
+    ) -> [TripModePart] {
+        guard end.timeIntervalSince(start) >= 2 * minimumPart else { return [] }
+        var runs = initialRuns(activities.sorted { $0.start < $1.start }, start: start, end: end)
+        runs = bridge(runs)
+        runs = merged(runs.filter { $0.kind != .other }, start: start, end: end)
+        runs = withoutShortRuns(runs)
+        guard runs.count >= 2, runs.count <= maximumParts else { return [] }
+
+        let ordered = locations.sorted { $0.timestamp < $1.timestamp }
+        var paths: [CLLocationDistance] = []
+        for run in runs {
+            let inside = ordered.filter { $0.timestamp >= run.start && $0.timestamp <= run.end }
+            guard inside.count >= 3 else { return [] }
+            let path = zip(inside, inside.dropFirst()).reduce(0) { $0 + $1.0.distance(from: $1.1) }
+            guard path >= minimumPartDistance else { return [] }
+            let speed = TransportSpeedEvidence(locations: inside).typicalSpeed
+            switch run.kind {
+            case .riding: guard speed >= slowestRide else { return [] }
+            case .onFoot: guard speed > 0, speed <= fastestOnFoot else { return [] }
+            case .other: return []
+            }
+            paths.append(path)
+        }
+        let pathTotal = max(paths.reduce(0, +), 1)
+        let total = max(totalDistance, pathTotal)
+        return zip(runs, paths).map { run, path in
+            let mode = run.modes.filter { kind(of: $0.key) == run.kind }.max { $0.value < $1.value }?.key
+                ?? (run.kind == .riding ? .automotive : .walking)
+            return TripModePart(
+                start: run.start,
+                end: run.end,
+                mode: mode,
+                distanceMeters: (total * path / pathTotal).rounded()
+            )
+        }
+    }
+
+    /// `parts` kept on a trip whose start or end moved: the ends follow the trip, and a part
+    /// left shorter than `minimumPart`, or outside the trip, ends the split.
+    static func clamped(_ parts: [TripModePart], start: Date, end: Date, totalDistance: CLLocationDistance) -> [TripModePart] {
+        guard parts.count >= 2 else { return [] }
+        var result = parts
+        result[0].start = start
+        result[result.count - 1].end = end
+        guard result.allSatisfy({ $0.duration >= minimumPart }) else { return [] }
+        let partTotal = max(result.reduce(0) { $0 + $1.distanceMeters }, 1)
+        if abs(partTotal - totalDistance) >= 1 {
+            for index in result.indices {
+                result[index].distanceMeters = (totalDistance * result[index].distanceMeters / partTotal).rounded()
+            }
+        }
+        return result
+    }
+
+    private static func initialRuns(_ activities: [Activity], start: Date, end: Date) -> [Run] {
+        var runs: [Run] = []
+        for (index, activity) in activities.enumerated() {
+            let from = max(activity.start, start)
+            let to = min(index + 1 < activities.count ? activities[index + 1].start : end, end)
+            guard to > from else { continue }
+            runs.append(Run(start: from, end: to, kind: kind(of: activity.mode), modes: [activity.mode: to.timeIntervalSince(from)]))
+        }
+        return runs
+    }
+
+    /// Merges runs of one kind, and gives a short unclear stretch to the kind around it.
+    private static func bridge(_ runs: [Run]) -> [Run] {
+        var result: [Run] = []
+        for var run in runs {
+            if run.kind == .other, run.duration < bridgedGap, let previous = result.last {
+                run.kind = previous.kind
+            }
+            if let last = result.last, last.kind == run.kind {
+                result[result.count - 1].absorb(run)
+            } else {
+                result.append(run)
+            }
+        }
+        // A short unclear stretch at the very start goes to what follows it.
+        if result.count >= 2, result[0].kind == .other, result[0].duration < bridgedGap {
+            result[1].absorb(result[0])
+            result.removeFirst()
+        }
+        return result
+    }
+
+    /// Joins neighbours of one kind and closes the gaps between them, so the runs cover
+    /// the trip end to end: each gap is shared at its middle.
+    private static func merged(_ runs: [Run], start: Date, end: Date) -> [Run] {
+        var result: [Run] = []
+        for run in runs {
+            if let last = result.last, last.kind == run.kind {
+                result[result.count - 1].absorb(run)
+            } else {
+                result.append(run)
+            }
+        }
+        guard !result.isEmpty else { return [] }
+        result[0].start = start
+        result[result.count - 1].end = end
+        for index in result.indices.dropLast() where result[index].end < result[index + 1].start {
+            let middle = result[index].end.addingTimeInterval(result[index + 1].start.timeIntervalSince(result[index].end) / 2)
+            result[index].end = middle
+            result[index + 1].start = middle
+        }
+        return result
+    }
+
+    /// A part shorter than `minimumPart` joins its longer neighbour, shortest first.
+    private static func withoutShortRuns(_ runs: [Run]) -> [Run] {
+        var result = runs
+        while result.count >= 2,
+              let shortest = result.indices.min(by: { result[$0].duration < result[$1].duration }),
+              result[shortest].duration < minimumPart {
+            let run = result.remove(at: shortest)
+            let neighbour: Int
+            if shortest == 0 {
+                neighbour = 0
+            } else if shortest >= result.count {
+                neighbour = result.count - 1
+            } else {
+                neighbour = result[shortest - 1].duration >= result[shortest].duration ? shortest - 1 : shortest
+            }
+            let kind = result[neighbour].kind
+            result[neighbour].absorb(run)
+            result[neighbour].kind = kind
+            result = merged(result, start: result.first!.start, end: result.last!.end)
+        }
+        return result
+    }
+}

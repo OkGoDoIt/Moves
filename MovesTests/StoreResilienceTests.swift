@@ -239,7 +239,7 @@ final class StoreResilienceTests: XCTestCase {
                 // they happened, `dayStart` of a day east of the phone falls on the date
                 // before and would merge two days into one.
                 dayStart: day.calendarDate(),
-                moves: day.moves.map(InsightsMoveRecord.init),
+                moves: day.moves.flatMap(InsightsMoveRecord.records),
                 visits: day.places.map(InsightsVisitRecord.init)
             )
         }
