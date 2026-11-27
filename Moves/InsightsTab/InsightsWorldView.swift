@@ -105,7 +105,7 @@ struct InsightsWorldView: View {
             visited: visited,
             visitedBefore: everywhere.countryCodes.subtracting(visited),
             selected: selectedCountry,
-            dots: mode == .cities ? InsightsWorldDots.dots(for: geography) : []
+            dots: mode == .cities ? geography.cityDots : []
         )
     }
 
@@ -248,7 +248,7 @@ struct InsightsWorldView: View {
     }
 
     private func count(in groups: [InsightsGeography.ContinentGroup]) -> Int {
-        groups.reduce(0) { $0 + (mode == .countries ? $1.countries.count : $1.cities.count) }
+        groups.reduce(0) { $0 + (mode == .countries ? $1.countries.count : $1.cityCount) }
     }
 
     private func chip(_ title: String, count: Int, selects value: WorldContinent?) -> some View {
@@ -361,7 +361,7 @@ struct InsightsWorldView: View {
                 if mode == .countries {
                     Text("^[\(group.countries.count) country](inflect: true)")
                 } else {
-                    Text("^[\(group.cities.count) city](inflect: true)")
+                    Text("^[\(group.cityCount) city](inflect: true)")
                 }
             }
             .font(.system(.footnote, design: .rounded, weight: .medium))
@@ -375,8 +375,8 @@ struct InsightsWorldView: View {
 
 /// City dots for the world map, bigger for more days.
 enum InsightsWorldDots {
-    static func dots(for geography: InsightsGeography) -> [WorldMapContent.Dot] {
-        let cities = geography.countries.flatMap(\.cities)
+    static func dots(for countries: [InsightsGeography.Country]) -> [WorldMapContent.Dot] {
+        let cities = countries.flatMap(\.cities)
         let most = log(Double((cities.map(\.dayCount).max() ?? 1) + 1))
         return cities
             // The biggest go on last, over the towns around them.

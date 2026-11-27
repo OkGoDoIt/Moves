@@ -49,28 +49,43 @@ struct InsightsGeography: Equatable, Sendable {
         let continent: WorldContinent
         /// Most days first.
         let countries: [Country]
+        let dayCount: Int
+        let cityCount: Int
 
-        var dayCount: Int { countries.reduce(0) { $0 + $1.dayCount } }
-        var cities: [City] { countries.flatMap(\.cities) }
+        init(continent: WorldContinent, countries: [Country]) {
+            self.continent = continent
+            self.countries = countries
+            dayCount = countries.reduce(0) { $0 + $1.dayCount }
+            cityCount = countries.reduce(0) { $0 + $1.cities.count }
+        }
     }
 
     /// Most days first.
     let countries: [Country]
-
-    static let empty = InsightsGeography(countries: [])
-
-    var cityCount: Int { countries.reduce(0) { $0 + $1.cities.count } }
-    var countryCodes: Set<String> { Set(countries.map(\.code)) }
-
     /// Continents, the one with the most days first.
-    var continents: [ContinentGroup] {
-        Dictionary(grouping: countries, by: \.continent)
+    ///
+    /// Everything below is worked out once, where the snapshot is built: views read these
+    /// on every render, and the grouping asks `Locale` about each country.
+    let continents: [ContinentGroup]
+    let cityCount: Int
+    let countryCodes: Set<String>
+    /// Every city as a dot on the world map.
+    let cityDots: [WorldMapContent.Dot]
+
+    init(countries: [Country]) {
+        self.countries = countries
+        continents = Dictionary(grouping: countries, by: \.continent)
             .map { ContinentGroup(continent: $0.key, countries: $0.value) }
             .sorted {
                 if $0.dayCount != $1.dayCount { return $0.dayCount > $1.dayCount }
                 return $0.continent.name.localizedStandardCompare($1.continent.name) == .orderedAscending
             }
+        cityCount = countries.reduce(0) { $0 + $1.cities.count }
+        countryCodes = Set(countries.map(\.code))
+        cityDots = InsightsWorldDots.dots(for: countries)
     }
+
+    static let empty = InsightsGeography(countries: [])
 
     func country(_ code: String) -> Country? {
         countries.first { $0.code == code }

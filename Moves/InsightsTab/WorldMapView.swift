@@ -186,7 +186,7 @@ struct WorldMapGeometry: Sendable {
 
 /// What the map shows: which countries stand out, and any city dots.
 struct WorldMapContent: Equatable {
-    struct Dot: Equatable {
+    struct Dot: Equatable, Sendable {
         let point: CGPoint
         let weight: CGFloat
     }
@@ -201,7 +201,7 @@ struct WorldMapContent: Equatable {
 }
 
 /// The world, drawn. Visited countries are solid and the rest are dimmed.
-struct WorldMapCanvas: View, Animatable {
+struct WorldMapCanvas: View, Animatable, Equatable {
     let geometry: WorldMapGeometry
     let content: WorldMapContent
     var viewport: CGRect = WorldMapGeometry.bounds
@@ -214,6 +214,14 @@ struct WorldMapCanvas: View, Animatable {
                 width: newValue.second.first, height: newValue.second.second
             )
         }
+    }
+
+    /// Redrawing every outline is the costliest thing on the page, so the map draws again
+    /// only when what it shows changes. The geometry is built once per launch.
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.viewport == rhs.viewport
+            && lhs.content == rhs.content
+            && lhs.geometry.countries.count == rhs.geometry.countries.count
     }
 
     /// Smaller than this on screen, a visited country gets a dot so it can be seen.
@@ -292,6 +300,7 @@ struct WorldMapView: View {
     var body: some View {
         GeometryReader { proxy in
             WorldMapCanvas(geometry: geometry, content: content, viewport: viewport)
+                .equatable()
                 .contentShape(Rectangle())
                 .gesture(tap(in: proxy.size))
                 .gesture(pan(in: proxy.size), isEnabled: isZoomed)

@@ -503,7 +503,10 @@ struct InsightsTabView: View {
             .filter(TimelineSaveFilter.touchesTimeline)
             .merge(with: NotificationCenter.default.publisher(for: .NSPersistentStoreRemoteChange))
             .merge(with: NotificationCenter.default.publisher(for: .NSUndoManagerDidUndoChange))
-            .debounce(for: .milliseconds(350), scheduler: DispatchQueue.main)
+            // The first save shows at once; after it, at most one reload every few seconds.
+            // The place-name backfill saves after every lookup for as long as it runs, and
+            // each reload rereads the whole history.
+            .throttle(for: .seconds(4), scheduler: DispatchQueue.main, latest: true)
             .eraseToAnyPublisher()
     }
 
@@ -729,6 +732,9 @@ final class InsightsStore {
     private var loadGeneration = 0
     @ObservationIgnored
     private var records: [InsightsDayRecord] = []
+    /// The cache key of `snapshot`; nil while it is the empty placeholder.
+    @ObservationIgnored
+    private var snapshotKey: String?
 
     init(now: Date = .now, calendar: Calendar = .autoupdatingCurrent) {
         let year = calendar.component(.year, from: now)
@@ -741,6 +747,7 @@ final class InsightsStore {
     func reload(container: ModelContainer, now: Date = .now, calendar: Calendar = .autoupdatingCurrent) {
         loadGeneration += 1
         let load = loadGeneration
+        let current = hasLoaded ? InsightsSource(days: records, hasRecordedActivity: hasRecordedActivity) : nil
         isComputing = true
         Task.detached(priority: .userInitiated) {
             let source: InsightsSource
@@ -753,18 +760,29 @@ final class InsightsStore {
                 }
                 return
             }
+            // Most saves (a place name filled in, a fix on today) change nothing Insights
+            // shows. Comparing the whole history happens here, not on the main actor, and
+            // an unchanged read leaves the snapshot, and every view built on it, alone.
+            let daysChanged = source.days != current?.days
             await MainActor.run {
                 guard load == self.loadGeneration else { return }
-                self.apply(source, now: now, calendar: calendar)
+                self.apply(source, daysChanged: daysChanged, now: now, calendar: calendar)
             }
         }
     }
 
     /// Takes values already read off the store; tests and the loader both end here.
     func apply(_ source: InsightsSource, now: Date = .now, calendar: Calendar = .autoupdatingCurrent) {
-        hasLoaded = true
-        hasRecordedActivity = source.hasRecordedActivity
-        if source.days != records {
+        apply(source, daysChanged: source.days != records, now: now, calendar: calendar)
+    }
+
+    private func apply(_ source: InsightsSource, daysChanged: Bool, now: Date, calendar: Calendar) {
+        if !hasLoaded { hasLoaded = true }
+        // Observable properties tell their views on every write, equal or not.
+        if hasRecordedActivity != source.hasRecordedActivity {
+            hasRecordedActivity = source.hasRecordedActivity
+        }
+        if daysChanged {
             records = source.days
             cache.removeAll()
         }
@@ -777,7 +795,11 @@ final class InsightsStore {
         // Streaks and the activity grid depend on today as well as on the rows.
         let key = "\(period.id)|\(calendar.startOfDay(for: now).timeIntervalSinceReferenceDate)"
         if let cached = cache[key] {
-            snapshot = cached
+            // Writing the same snapshot again would still re-render every page built on it.
+            if key != snapshotKey {
+                snapshot = cached
+                snapshotKey = key
+            }
             isComputing = false
             return
         }
@@ -797,6 +819,7 @@ final class InsightsStore {
                 guard gen == self.generation else { return }
                 self.cache[key] = built
                 self.snapshot = built
+                self.snapshotKey = key
                 self.isComputing = false
             }
         }
@@ -904,6 +927,7 @@ private struct InsightsWorldThumbnail: View {
                     geometry: geometry,
                     content: WorldMapContent(visited: visited, visitedBefore: everVisited.subtracting(visited))
                 )
+                .equatable()
                 .aspectRatio(WorldMapGeometry.aspectRatio, contentMode: .fit)
                 .transition(.opacity)
             }

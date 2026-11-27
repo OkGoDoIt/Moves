@@ -1,3 +1,4 @@
+import Observation
 import SwiftData
 import XCTest
 @testable import Moves
@@ -230,6 +231,23 @@ final class InsightsSnapshotTests: XCTestCase {
         try context.save()
         store.reload(container: container, now: now, calendar: calendar)
         try await waitUntilSettled(store)
+        XCTAssertEqual(store.snapshot.modes.map(\.modeRaw), [TransportMode.cycling.rawValue])
+
+        // A save that changes nothing Insights reads (the place-name backfill saves every
+        // couple of seconds) must not hand the pages a new snapshot: each one re-renders
+        // the Countries and Cities lists and redraws the world map.
+        var snapshotWritten = false
+        withObservationTracking {
+            _ = store.snapshot
+            _ = store.hasRecordedActivity
+            _ = store.hasLoaded
+        } onChange: {
+            snapshotWritten = true
+        }
+        store.reload(container: container, now: now, calendar: calendar)
+        try await Task.sleep(for: .milliseconds(20))
+        try await waitUntilSettled(store)
+        XCTAssertFalse(snapshotWritten)
         XCTAssertEqual(store.snapshot.modes.map(\.modeRaw), [TransportMode.cycling.rawValue])
     }
 
