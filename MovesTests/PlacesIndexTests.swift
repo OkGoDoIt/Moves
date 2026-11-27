@@ -750,6 +750,51 @@ final class PlacesIndexTests: XCTestCase {
         XCTAssertNil(PlaceGeocodeBackfill.trouble(NSError(domain: kCLErrorDomain, code: CLError.Code.geocodeFoundNoResult.rawValue)))
     }
 
+    /// Every save wakes each screen that reloads on `didSave`. A save per cell made the
+    /// Places, Insights, and Timeline screens redo their work every couple of seconds for
+    /// as long as the backfill ran, and many times a second for cells already cached.
+    func testBackfillSavesOnceForABurstOfCachedCells() async throws {
+        let schema = Schema(MovesTimelineSchema.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)
+        )
+        let context = ModelContext(container)
+        var regions: [String: PlaceGeocodeRegion] = [:]
+        for index in 0..<12 {
+            let visit = VisitPlace(
+                arrivalDate: now.addingTimeInterval(Double(index) * 3_600),
+                departureDate: now.addingTimeInterval(Double(index) * 3_600 + 600),
+                latitude: 10.80 + Double(index) * 0.05,
+                longitude: 106.70,
+                horizontalAccuracy: 12
+            )
+            context.insertOnDay(visit)
+            regions[PlaceGeocodeCellCache.cellKey(for: visit.coordinate)] = PlaceGeocodeRegion(countryCode: "VN", locality: "City \(index)")
+        }
+        try context.save()
+
+        let saves = SaveCounter()
+        let observer = NotificationCenter.default.addObserver(forName: ModelContext.didSave, object: nil, queue: nil) { _ in
+            saves.increment()
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        let cacheURL = FileManager.default.temporaryDirectory.appendingPathComponent("places-burst-\(UUID().uuidString).json")
+        let filled = await PlaceGeocodeBackfill.run(
+            in: container,
+            geocoder: FakePlaceReverseGeocoder(region: PlaceGeocodeRegion(countryCode: "XX")),
+            cache: PlaceGeocodeCellCache(regions: regions, url: cacheURL)
+        )
+
+        XCTAssertEqual(filled, 12)
+        XCTAssertEqual(saves.count, 1)
+        let localities = Set(try ModelContext(container).fetch(FetchDescriptor<VisitPlace>()).compactMap(\.locality))
+        XCTAssertEqual(localities.count, 12)
+        // The cache file is written with the store, not once per cell.
+        XCTAssertEqual(PlaceGeocodeCellCache.load(from: cacheURL).regions.count, 12)
+    }
+
     func testMergeUsesPlaceLearningEngineAndDeletesSource() throws {
         let schema = Schema(MovesTimelineSchema.models)
         let container = try ModelContainer(
@@ -990,6 +1035,14 @@ private extension ModelContext {
         if existing == nil { insert(day) }
         visit.dayTimeline = day
     }
+}
+
+private final class SaveCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    var count: Int { lock.withLock { value } }
+    func increment() { lock.withLock { value += 1 } }
 }
 
 private struct FakePlaceReverseGeocoder: PlaceReverseGeocoding, Sendable {

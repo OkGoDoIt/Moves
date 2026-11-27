@@ -211,9 +211,9 @@ struct PlaceGeocodeCellCache: Sendable {
         return PlaceGeocodeCellCache(regions: regions, url: url)
     }
 
+    /// Kept in memory; the backfill writes the file when it writes the store.
     mutating func store(_ region: PlaceGeocodeRegion, for key: String) {
         regions[key] = region
-        persist()
     }
 
     func persist() {
@@ -234,6 +234,51 @@ struct PlaceGeocodeCellCache: Sendable {
             ?? FileManager.default.temporaryDirectory
         return folder.appendingPathComponent("Moves", isDirectory: true)
             .appendingPathComponent("PlaceGeocodeCache.json")
+    }
+}
+
+/// Geocoder answers waiting to go into the store together.
+///
+/// Every save wakes each screen that reloads on `ModelContext.didSave`. A save per cell
+/// meant one every two seconds for as long as the backfill ran, and a burst of them for
+/// cells already in the cache, and the Places, Insights, and Timeline screens redid their
+/// work each time. Answers are plain values, so nothing here holds a row across the
+/// geocoder's waits; each write reads the cells' rows again on a context of its own.
+struct PendingGeocodeAnswers {
+    static let writeInterval: Duration = .seconds(20)
+    static let writeBatch = 60
+
+    private(set) var items: [(cellKey: String, region: PlaceGeocodeRegion)] = []
+    private var lastWrite = ContinuousClock.now
+
+    var isDue: Bool {
+        items.count >= Self.writeBatch || ContinuousClock.now - lastWrite >= Self.writeInterval
+    }
+
+    mutating func add(_ region: PlaceGeocodeRegion, cellKey: String) {
+        guard region.hasAnyValue else { return }
+        items.append((cellKey, region))
+    }
+
+    /// Applies every waiting answer, saves once, and writes the cache file.
+    mutating func write(
+        cache: PlaceGeocodeCellCache,
+        in container: ModelContainer,
+        using apply: (PlaceGeocodeRegion, String, ModelContext) throws -> Int
+    ) throws {
+        defer { lastWrite = .now }
+        cache.persist()
+        guard !items.isEmpty else { return }
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        var applied = 0
+        for item in items {
+            applied += try apply(item.region, item.cellKey, context)
+        }
+        if applied > 0 {
+            try context.save()
+        }
+        items.removeAll()
     }
 }
 
@@ -308,6 +353,7 @@ enum PlaceGeocodeBackfill {
         let context = ModelContext(container)
         context.autosaveEnabled = false
         var cache = cache ?? PlaceGeocodeCellCache.load()
+        var answers = PendingGeocodeAnswers()
         var completed = 0
 
         do {
@@ -341,24 +387,25 @@ enum PlaceGeocodeBackfill {
                     region = resolved
                 }
 
-                // A context of its own per cell: rows read before the geocoder's wait could be
-                // gone by now, and one that outlived the wait would still hold them.
-                let cellContext = ModelContext(container)
-                cellContext.autosaveEnabled = false
-                let applied = try applyName(region, cellKey: next.cellKey, in: cellContext)
-                if applied > 0 {
-                    try cellContext.save()
+                answers.add(region, cellKey: next.cellKey)
+                if answers.isDue {
+                    try answers.write(cache: cache, in: container, using: applyName)
                 }
                 completed += 1
             }
         } catch is CancellationError {
-            return completed
+            // What was looked up still goes in below.
         } catch let error where trouble(error) != nil {
             log.notice("Place-name backfill stopped for now after \(completed) cells: \(error.localizedDescription, privacy: .public)")
         } catch {
             log.error("Place-name backfill failed: \(error.localizedDescription, privacy: .public)")
         }
 
+        do {
+            try answers.write(cache: cache, in: container, using: applyName)
+        } catch {
+            log.error("Place-name backfill could not save: \(error.localizedDescription, privacy: .public)")
+        }
         return completed
     }
 
@@ -374,6 +421,7 @@ enum PlaceGeocodeBackfill {
         let context = ModelContext(container)
         context.autosaveEnabled = false
         var cache = cache ?? PlaceGeocodeCellCache.load()
+        var answers = PendingGeocodeAnswers()
         var completed = 0
 
         do {
@@ -399,23 +447,25 @@ enum PlaceGeocodeBackfill {
                     region = resolved
                 }
 
-                // A context of its own per cell, as in `fillMissingNames`.
-                let cellContext = ModelContext(container)
-                cellContext.autosaveEnabled = false
-                let applied = try apply(region, cellKey: next.cellKey, in: cellContext)
-                if applied > 0 {
-                    try cellContext.save()
+                answers.add(region, cellKey: next.cellKey)
+                if answers.isDue {
+                    try answers.write(cache: cache, in: container, using: apply)
                 }
                 completed += 1
             }
         } catch is CancellationError {
-            return completed
+            // What was looked up still goes in below.
         } catch let error where trouble(error) != nil {
             log.notice("Geocode backfill stopped for now after \(completed) cells: \(error.localizedDescription, privacy: .public)")
         } catch {
             log.error("Geocode backfill failed: \(error.localizedDescription, privacy: .public)")
         }
 
+        do {
+            try answers.write(cache: cache, in: container, using: apply)
+        } catch {
+            log.error("Geocode backfill could not save: \(error.localizedDescription, privacy: .public)")
+        }
         return completed
     }
 
