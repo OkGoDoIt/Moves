@@ -1045,8 +1045,11 @@ final class PlacesIndex {
     private var generation = 0
     @ObservationIgnored
     private var loadGeneration = 0
+    /// When the snapshot was last grouped; "Yesterday" and stay lengths read the clock.
     @ObservationIgnored
-    private var ingested:(known: [PlacesKnownRecord], visits: [PlacesVisitRecord], userCoordinate: CLLocationCoordinate2D?)?
+    private var builtAt = Date.distantPast
+    @ObservationIgnored
+    private var ingested: (known: [PlacesKnownRecord], visits: [PlacesVisitRecord], userCoordinate: CLLocationCoordinate2D?)?
 
     /// Copies SwiftData rows into sendable records, then groups off-main.
     func ingest(
@@ -1084,12 +1087,16 @@ final class PlacesIndex {
             let unchanged = current.map { $0.known == source.known && $0.visits == source.visits } ?? false
             await MainActor.run {
                 guard load == self.loadGeneration else { return }
-                if unchanged {
-                    // The rows are the same; only a moved user can change the distances.
-                    guard let userCoordinate, let ingested = self.ingested,
-                          ingested.userCoordinate.map({ !Self.isNear($0, userCoordinate) }) ?? true
-                    else { return }
-                    self.ingested = (ingested.known, ingested.visits, userCoordinate)
+                if unchanged, let ingested = self.ingested {
+                    // The rows are the same. Only a moved user (distances) or the clock moving
+                    // on ("Yesterday", an open stay's length) can change what the tab shows.
+                    let moved = userCoordinate.map { new in
+                        ingested.userCoordinate.map { !Self.isNear($0, new) } ?? true
+                    } ?? false
+                    let isStale = Date.now.timeIntervalSince(self.builtAt) > 10 * 60
+                        || !Calendar.autoupdatingCurrent.isDateInToday(self.builtAt)
+                    guard moved || isStale else { return }
+                    self.ingested = (ingested.known, ingested.visits, userCoordinate ?? ingested.userCoordinate)
                     self.refilter()
                     return
                 }
@@ -1123,6 +1130,7 @@ final class PlacesIndex {
     ) {
         generation += 1
         let generation = generation
+        builtAt = now
         let sort = sort
         let query = query
         Task.detached(priority: .userInitiated) {

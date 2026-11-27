@@ -2091,15 +2091,15 @@ private struct RequestedMoveDetailView: View {
     }
 }
 
-/// Whether a save changed a visit or a learned place. Location batches don't, so Spotlight
-/// and calendar sync skip them. Unknown payloads count as a change, so older OS versions
-/// still pick up renamed and deleted places.
 /// The fingerprint of what Spotlight last indexed.
 @MainActor
 final class SpotlightIndexMemo {
     var signature: Int?
 }
 
+/// Whether a save changed a visit or a learned place. Location batches don't, so Spotlight
+/// and calendar sync skip them. Unknown payloads count as a change, so older OS versions
+/// still pick up renamed and deleted places.
 enum PlaceSaveFilter {
     static func touchesPlaces(_ notification: Notification) -> Bool {
         let keys: [ModelContext.NotificationKey] = [.insertedIdentifiers, .updatedIdentifiers, .deletedIdentifiers]
