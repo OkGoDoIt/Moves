@@ -245,6 +245,32 @@ final class MapTileTests: XCTestCase {
         }
     }
 
+    func testAWorldViewReachingPastTheAntimeridianStillDrawsTheHistory() throws {
+        // Zoomed out to most of the world, the padded bitmap starts west of the antimeridian. The
+        // coarse levels hold the world in one to four tiles, and a tile can then be needed twice,
+        // a world apart. Drawing only the westmost copy once left Heat empty and Fog unrevealed.
+        var generator = SeededGenerator(seed: 17)
+        let values = syntheticValues(trips: 60, stays: 20, start: date(2026, 1, 5, calendar: calendar), seed: &generator, modes: [.walking, .automotive])
+        let database = try makeDatabase()
+        let built = MapTileBuilder.build(month: 202_601, values: values, calendar: calendar)
+        try database.commit([MapTileDatabase.MonthBuild(bucket: 202_601, signature: "s", summary: built.summary, tiles: built.tiles)])
+        let input = MapTileCompositor.Input(database: database, plan: MapTileRangePlan(buckets: [0], partial: [], includeUndated: false), loose: nil, modes: nil)
+        // About half the world on screen and a bitmap a whole world wide, from just west of the
+        // antimeridian to just west of the history, so only the copy east of it is in view.
+        let farWest = CLLocationCoordinate2D(latitude: center.latitude, longitude: -40)
+        for metersPerPoint in [45_000.0, 49_000] {
+            let heatRequest = request(.heat, metersPerPoint: metersPerPoint, around: farWest)
+            XCTAssertLessThan(heatRequest.viewport.minX - heatRequest.viewport.width * MapCoverageRenderer.paddingFraction, 0)
+            let heat = try XCTUnwrap(MapTileCompositor.render(heatRequest, input: input))
+            XCTAssertGreaterThan(alphaSum(heat.image), 0, "Heat at \(metersPerPoint) m/pt")
+
+            let fogRequest = request(.fog, metersPerPoint: metersPerPoint, around: farWest)
+            let fog = try XCTUnwrap(MapTileCompositor.render(fogRequest, input: input))
+            let empty = try XCTUnwrap(MapTileCompositor.render(fogRequest, input: .init(database: nil, plan: input.plan, loose: nil, modes: nil)))
+            XCTAssertLessThan(alphaSum(fog.image), alphaSum(empty.image), "Fog at \(metersPerPoint) m/pt reveals nothing")
+        }
+    }
+
     func testTilesLookLikeTheIndexRenderer() throws {
         var generator = SeededGenerator(seed: 11)
         let values = syntheticValues(trips: 400, stays: 200, start: Date(timeIntervalSince1970: 1_700_000_000), seed: &generator,

@@ -151,7 +151,10 @@ enum MapTileCompositor {
         let size = MapTileLevels.tileSize(level)
         let n = MapTileLevels.tilesPerSide(level)
         let cell = MapTileLevels.cellSize(level)
-        let xMin = Int(floor(cull.minX / size)), xMax = min(Int(floor(cull.maxX / size)), Int(floor(cull.minX / size)) + n - 1)
+        // A zoomed-out bitmap can reach past the antimeridian, so one stored tile may be drawn a
+        // world apart as well: at the top level the whole world is one tile, and capping the
+        // columns at one world's worth drew only the copy to the west, leaving the screen empty.
+        let xMin = Int(floor(cull.minX / size)), xMax = min(Int(floor(cull.maxX / size)), xMin + 3 * n - 1)
         let yMin = max(Int(floor(cull.minY / size)), 0), yMax = min(Int(floor(cull.maxY / size)), n - 1)
         guard xMin <= xMax, yMin <= yMax else { return [] }
         var columns: [Int: [Int]] = [:]
