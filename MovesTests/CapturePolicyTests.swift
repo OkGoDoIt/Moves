@@ -117,6 +117,31 @@ final class CapturePolicyTests: XCTestCase {
         XCTAssertTrue(gate.pass(Array(repeating: everySecond[59], count: 30), minimumDistance: 5).isEmpty)
     }
 
+    /// Past incident (builds 67–72): following a trip held a background activity session,
+    /// and iOS showed the blue location indicator in the Dynamic Island all day. Only manual
+    /// route tracking may show it; everyday capture never does, at any level or phase.
+    func testOnlyRouteTrackingShowsTheLocationIndicator() {
+        let energies = [
+            CaptureEnergyState.unconstrained,
+            CaptureEnergyState(isLowPowerModeEnabled: true, batteryLevel: 0.1, isCharging: false),
+        ]
+        let motions: [CaptureMotionState] = [.stationary, .walking, .running, .cycling, .automotive, .unknown]
+        for level in [CaptureDetailLevel.batterySaver, .balanced, .detailed] {
+            for phase in [CaptureStateMachine.Phase.off, .settled, .moving] {
+                for motion in motions {
+                    for energy in energies {
+                        let session = configuration(level, phase: phase, motion: motion, energy: energy)
+                        XCTAssertFalse(session.showsLocationIndicator, "\(level) \(phase) \(motion): \(session.logDescription)")
+                    }
+                }
+            }
+        }
+        XCTAssertFalse(CapturePolicy.lastMile.showsLocationIndicator)
+        XCTAssertFalse(CapturePolicy.lowPower.showsLocationIndicator)
+        XCTAssertFalse(CapturePolicy.departureWatch.showsLocationIndicator)
+        XCTAssertTrue(CapturePolicy.routeTracking.showsLocationIndicator)
+    }
+
     func testSettledKeepsACoarseSessionAndBatterySaverKeepsTheOriginalBehaviour() {
         let watch = configuration(.balanced, phase: .settled)
         XCTAssertEqual(watch.mode, .departureWatch)

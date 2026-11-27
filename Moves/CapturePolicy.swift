@@ -162,16 +162,26 @@ struct CaptureConfiguration: Equatable, Sendable {
 
     var usesStandardLocationUpdates: Bool { mode != .lowPower }
 
+    /// Whether this session may show the blue location indicator and hold a
+    /// `CLBackgroundActivitySession`. Only manual route tracking may: the person turned it
+    /// on and expects to see it. Everyday capture never does, at any level.
+    ///
+    /// Past incident (builds 67–72): following a trip held a background activity session.
+    /// iOS showed the indicator in the Dynamic Island for the whole trip, and a process
+    /// ended while holding one (an install mid-trip) left it showing all day until a restart.
+    var showsLocationIndicator: Bool { mode == .routeTracking }
+
     /// Whether Core Location is asked for every fix, with `distanceFilter` applied by the
     /// capture manager (`CaptureDistanceGate`) instead.
     ///
     /// Since iOS 16.4 an app that monitors significant changes and also sets a distance
     /// filter on its standard session is suspended in the background, and then only runs
-    /// for a few seconds at each significant change. Apple's stated way to keep running is
-    /// no distance filter and an accuracy of a hundred meters or better. The two sessions
-    /// that must keep the app running are the one that follows a trip and the one that
-    /// waits for the next. Route tracking and the last-mile burst show the location
-    /// indicator, which keeps them running without this.
+    /// for a few seconds at each significant change. Apple's stated way to keep running
+    /// without the location indicator is Always authorization, no distance filter, and an
+    /// accuracy of a hundred meters or better. The two sessions that must keep the app
+    /// running are the one that follows a trip and the one that waits for the next. Route
+    /// tracking shows the indicator instead. The last-mile burst turns significant changes
+    /// off while it runs, so the rule does not reach it.
     var asksForEveryFix: Bool { mode == .continuous || mode == .departureWatch }
 
     /// The distance filter Core Location is given.

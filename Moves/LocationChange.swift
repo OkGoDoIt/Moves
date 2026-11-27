@@ -1077,10 +1077,9 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
     private var appliedConfiguration: CaptureConfiguration?
     /// The distance filter for sessions that ask Core Location for every fix.
     private var distanceGate = CaptureDistanceGate()
-    /// Held while a trip is followed or a route is tracked. On iOS 27 a standard location
-    /// session alone no longer keeps the app running in the background: the phone
-    /// suspended it seconds after it left the screen, even with no distance filter. iOS
-    /// shows its location indicator while this is held and the app is in the background.
+    /// Held only while manual route tracking runs. iOS shows the location indicator in the
+    /// Dynamic Island while one is held, and everyday capture must never show it
+    /// (`CaptureConfiguration.showsLocationIndicator`).
     private var backgroundActivitySession: CLBackgroundActivitySession?
     private var appliedShowsIndicator = false
     private let motionActivityManager = CMMotionActivityManager()
@@ -1565,10 +1564,7 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         if isTemporaryRouteTrackingActive {
             // Manual route tracking overrides every level, exactly as before.
             manager.stopMonitoringSignificantLocationChanges()
-            applyLocationConfiguration(
-                CapturePolicy.routeTracking,
-                showsIndicator: authorizationStatus == .authorizedAlways
-            )
+            applyLocationConfiguration(CapturePolicy.routeTracking)
             updateSettleChecks()
             return
         }
@@ -1589,13 +1585,10 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
                 energy: currentEnergyState,
                 isRouteTrackingActive: false
             )
-            // Following a trip shows the location indicator: on iOS 27 the app is suspended
-            // in the background without it. Waiting at a stop shows nothing, and automatic
-            // capture never starts a Live Activity.
-            applyLocationConfiguration(
-                configuration,
-                showsIndicator: configuration.mode == .continuous && authorizationStatus == .authorizedAlways
-            )
+            // Automatic capture never shows the location indicator or a Live Activity. The
+            // standard session runs from the stop through the trip without restarting, so
+            // it is never started anew in the background.
+            applyLocationConfiguration(configuration)
             updateSettleChecks()
             ensureDepartureRegion()
             return
@@ -1609,10 +1602,7 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
             // Visits stay on so a real stop still closes. Continuous fixes are
             // only for this short walk, at pedestrian accuracy.
             manager.stopMonitoringSignificantLocationChanges()
-            applyLocationConfiguration(
-                CapturePolicy.lastMile,
-                showsIndicator: authorizationStatus == .authorizedAlways
-            )
+            applyLocationConfiguration(CapturePolicy.lastMile)
         } else {
             if isBackgroundLocationListeningEnabled {
                 manager.startMonitoringSignificantLocationChanges()
@@ -1621,11 +1611,12 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
                 manager.stopMonitoringVisits()
                 isMonitoring = false
             }
-            applyLocationConfiguration(CapturePolicy.lowPower, showsIndicator: false)
+            applyLocationConfiguration(CapturePolicy.lowPower)
         }
     }
 
-    private func applyLocationConfiguration(_ configuration: CaptureConfiguration, showsIndicator: Bool) {
+    private func applyLocationConfiguration(_ configuration: CaptureConfiguration) {
+        let showsIndicator = configuration.showsLocationIndicator && authorizationStatus == .authorizedAlways
         let isRunningAsWanted = isStandardLocationRunning == configuration.usesStandardLocationUpdates
         if configuration == appliedConfiguration, showsIndicator == appliedShowsIndicator, isRunningAsWanted {
             return
@@ -1888,6 +1879,7 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
             + ", memory \(Int(MapPerformanceProbe.memoryMegabytes())) MB"
             + ", background updates \(manager.allowsBackgroundLocationUpdates ? "allowed" : "not allowed")"
             + ", activity session \(backgroundActivitySession == nil ? "off" : "on")"
+            + ", indicator \(manager.showsBackgroundLocationIndicator ? "on" : "off")"
             + ", updates \(isStandardLocationRunning ? "running" : "stopped")"
         if isMoving {
             Self.captureLog.notice(
@@ -1914,14 +1906,11 @@ final class MovesLocationCaptureManager: NSObject, ObservableObject, LocationCap
         }
     }
 
-    /// Holds a background activity session for the configurations that must keep the app
-    /// running, and ends it for the others. Returns true when one was just created.
+    /// Holds a background activity session while manual route tracking runs, and ends it
+    /// otherwise. Returns true when one was just created. iOS shows the location indicator
+    /// for as long as a session is held, so everyday capture never holds one.
     private func updateBackgroundActivitySession(for configuration: CaptureConfiguration) -> Bool {
-        let wanted: Bool
-        switch configuration.mode {
-        case .continuous, .routeTracking, .lastMile: wanted = isAuthorizedForTracking
-        case .departureWatch, .lowPower: wanted = false
-        }
+        let wanted = configuration.showsLocationIndicator && isAuthorizedForTracking
         if wanted, backgroundActivitySession == nil {
             backgroundActivitySession = CLBackgroundActivitySession()
             Self.captureLog.notice("Background activity session started")
