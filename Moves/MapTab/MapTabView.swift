@@ -11,7 +11,11 @@ struct MapTabView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var controller: MovesRootController
-    @Query(sort: \DayTimeline.dayStart, order: .forward) private var dayTimelines: [DayTimeline]
+    /// How many days the store holds, so a new day reloads the range. A count, not a
+    /// `@Query` of every day refetched on the main context with each save.
+    @State private var dayCount = 0
+    /// Where All Time starts.
+    @State private var firstRecordedDate: Date?
     @AppStorage(MapRouteShadingSettings.shadeRoutesBySpeedKey) private var shadeRoutesBySpeed = true
 
     @State private var selection = MapRangeSelection.allTime()
@@ -87,9 +91,38 @@ struct MapTabView: View {
         return true
     }
 
-    /// Where All Time starts.
-    private var firstRecordedDate: Date? {
-        dayTimelines.first(where: \.hasRecordedActivity)?.dayStart
+    /// Reads the day count and the first day with anything on it: two small fetches.
+    private func refreshDayFacts() {
+        let count = (try? modelContext.fetchCount(FetchDescriptor<DayTimeline>())) ?? 0
+        if count != dayCount { dayCount = count }
+        var earliest = FetchDescriptor<DayTimeline>(sortBy: [SortDescriptor(\.dayStart, order: .forward)])
+        earliest.fetchLimit = 60
+        let days = (try? modelContext.fetch(earliest)) ?? []
+        let first = (days.first(where: \.hasRecordedActivity) ?? days.first)?.dayStart
+        if first != firstRecordedDate { firstRecordedDate = first }
+    }
+
+    /// Whether the range has a day to share: a count, not a fetch of the days.
+    private var hasShareableDays: Bool {
+        guard dayCount > 0 else { return false }
+        guard selection.granularity != .allTime else { return true }
+        let keys = selection.overlappingDayStarts(calendar: calendar).map { DayTimeline.makeDayKey(for: $0) }
+        let descriptor = FetchDescriptor<DayTimeline>(predicate: #Predicate { keys.contains($0.dayKey) })
+        return ((try? modelContext.fetchCount(descriptor)) ?? 0) > 0
+    }
+
+    /// The days the share gallery covers, read when it opens.
+    private func fetchShareTimelines() -> [DayTimeline] {
+        let all = FetchDescriptor<DayTimeline>(sortBy: [SortDescriptor(\.dayStart, order: .forward)])
+        if selection.granularity == .allTime {
+            return (try? modelContext.fetch(all)) ?? []
+        }
+        let keys = selection.overlappingDayStarts(calendar: calendar).map { DayTimeline.makeDayKey(for: $0) }
+        let descriptor = FetchDescriptor<DayTimeline>(
+            predicate: #Predicate { keys.contains($0.dayKey) },
+            sortBy: [SortDescriptor(\.dayStart, order: .forward)]
+        )
+        return (try? modelContext.fetch(descriptor)) ?? []
     }
 
     /// Honors `MOVES_MAP_LAYER` so agents can screenshot Heat / Fog without tapping.
@@ -233,8 +266,12 @@ struct MapTabView: View {
         .onReceive(Self.coverageChanges) { _ in
             coverageRevision += 1
             coverage.noteRevision(coverageRevision, container: modelContext.container)
+            refreshDayFacts()
         }
-        .onAppear { coverageRevision += 1 }
+        .onAppear {
+            coverageRevision += 1
+            refreshDayFacts()
+        }
         .onChange(of: loader.cameraFitKey) { _, _ in
             fitCamera()
             if layer == .routes, !routesAsBitmap, let opened = MapPerformanceProbe.shared.openedAt {
@@ -293,7 +330,7 @@ struct MapTabView: View {
         }
         .sheet(isPresented: $isShowingShare) {
             MovesShareGalleryView(
-                dayTimelines: shareTimelines,
+                dayTimelines: fetchShareTimelines(),
                 initialDate: selection.focus.start,
                 initialPeriod: selection.sharePeriod
             )
@@ -346,7 +383,7 @@ struct MapTabView: View {
             zoomBucket,
             rangeIsLarge ? "large" : "small",
             scenePhase == .active ? "active" : "away",
-            String(dayTimelines.count)
+            String(dayCount)
         ]
         .joined(separator: "|")
     }
@@ -354,14 +391,6 @@ struct MapTabView: View {
     private var filteredHistogram: [MapHistogramBucket] {
         let hidden: Set<TransportMode> = enabledModes.isEmpty ? [] : Set(loader.presentModes).subtracting(enabledModes)
         return loader.filteredBuckets(hiding: hidden, selection: selection, calendar: calendar)
-    }
-
-    private var shareTimelines: [DayTimeline] {
-        if selection.granularity == .allTime {
-            return Array(dayTimelines)
-        }
-        let starts = Set(selection.overlappingDayStarts(calendar: calendar).map { DayTimeline.makeDayKey(for: $0) })
-        return dayTimelines.filter { starts.contains($0.dayKey) }
     }
 
     private var topBar: some View {
@@ -394,7 +423,7 @@ struct MapTabView: View {
             .buttonStyle(.plain)
             .glassEffect(.regular, in: Circle())
             .accessibilityLabel(String(localized: "Share"))
-            .disabled(shareTimelines.isEmpty)
+            .disabled(!hasShareableDays)
         }
     }
 
@@ -702,7 +731,8 @@ struct MapTabView: View {
 
     private func waitForSeededDays() async {
         for _ in 0..<60 {
-            if dayTimelines.contains(where: { !$0.places.isEmpty || !$0.moves.isEmpty }) {
+            if ((try? modelContext.fetchCount(FetchDescriptor<VisitPlace>.live())) ?? 0) > 0 {
+                refreshDayFacts()
                 return
             }
             try? await Task.sleep(for: .milliseconds(500))

@@ -79,12 +79,20 @@ struct MovesSearchView: View {
             corpus = try? await MovesSearchCorpus.load(from: modelContext.container)
             guard !Task.isCancelled else { return }
         }
-        sections = MovesSearchIndex.results(
-            parsed: SearchQueryParser.parse(text, now: .now, calendar: calendar),
-            corpus: corpus ?? MovesSearchCorpus(),
-            now: .now,
-            calendar: calendar
-        )
+        // Matching walks every day and stay in the history and formats each day's date,
+        // so it runs off the main actor; typing stays smooth while it works.
+        let corpus = corpus ?? MovesSearchCorpus()
+        let calendar = calendar
+        let found = await Task.detached(priority: .userInitiated) {
+            MovesSearchIndex.results(
+                parsed: SearchQueryParser.parse(text, now: .now, calendar: calendar),
+                corpus: corpus,
+                now: .now,
+                calendar: calendar
+            )
+        }.value
+        guard !Task.isCancelled else { return }
+        sections = found
         searchedQuery = text
     }
 
@@ -154,7 +162,7 @@ enum MovesSearchAction: Equatable, Sendable {
     case moment(Date)
 }
 
-struct MovesSearchHit: Identifiable, Equatable {
+struct MovesSearchHit: Identifiable, Equatable, Sendable {
     let id: String
     let kind: MovesSearchKind
     let title: String
@@ -172,7 +180,7 @@ struct MovesSearchHit: Identifiable, Equatable {
     }
 }
 
-struct MovesSearchSection: Identifiable, Equatable {
+struct MovesSearchSection: Identifiable, Equatable, Sendable {
     var id: String { title }
     let title: String
     let hits: [MovesSearchHit]

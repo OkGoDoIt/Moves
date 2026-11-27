@@ -352,6 +352,7 @@ struct InsightsTabView: View {
     private var calendarCard: some View {
         InsightsCard(title: String(localized: "Activity calendar")) {
             InsightsActivityCalendar(days: store.snapshot.calendarDays, calendar: calendar)
+                .equatable()
         }
     }
 
@@ -941,9 +942,15 @@ private struct InsightsWorldThumbnail: View {
 }
 
 /// GitHub-style year grid, colored by distance. Future days stay empty.
-private struct InsightsActivityCalendar: View {
+private struct InsightsActivityCalendar: View, Equatable {
     let days: [InsightsSnapshot.CalendarDay]
     var calendar: Calendar = .autoupdatingCurrent
+
+    /// The grid places a year of days by calendar arithmetic, so it is laid out again only
+    /// when the days change, not each time the Insights page re-renders around it.
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.days == rhs.days && lhs.calendar == rhs.calendar
+    }
 
     var body: some View {
         if days.isEmpty {

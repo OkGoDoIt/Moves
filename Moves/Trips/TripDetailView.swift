@@ -15,7 +15,6 @@ struct TripDetailView: View {
     @AppStorage(MapRouteShadingSettings.shadeRoutesBySpeedKey) private var shadeRoutesBySpeed = true
 
     @Query private var trips: [NamedTrip]
-    @Query(sort: \DayTimeline.dayStart, order: .forward) private var dayTimelines: [DayTimeline]
 
     @State private var loader = MapWindowLoader()
     @State private var camera: MapCameraPosition = .automatic
@@ -215,9 +214,17 @@ struct TripDetailView: View {
         // Road matching can take a while, so everything that doesn't need it goes first.
         let interval = trip.interval
         photos = (try? TripRangeStats.photos(in: interval, context: modelContext)) ?? []
+        // Only the trip's own days, with a day either side for days filed east or west of
+        // the phone; the page used to hold a `@Query` of every day in the history.
+        let from = interval.start.addingTimeInterval(-2 * 86_400)
+        let to = interval.end.addingTimeInterval(2 * 86_400)
+        let days = (try? modelContext.fetch(FetchDescriptor<DayTimeline>(
+            predicate: #Predicate { $0.dayStart >= from && $0.dayStart < to },
+            sortBy: [SortDescriptor(\.dayStart, order: .forward)]
+        ))) ?? []
         daySections = Self.makeDaySections(
             interval: interval,
-            dayTimelines: dayTimelines,
+            dayTimelines: days,
             calendar: calendar
         )
         let selection = MapRangeSelection.custom(

@@ -76,13 +76,26 @@ final class MovesCalendarSync: ObservableObject {
         lastSync = defaults.object(forKey: Keys.lastSync) as? Date
         // Capture saves a location batch every few minutes. Only a change to a visit or a
         // place name can change the calendar, so the rest skip a read of every synced visit.
+        // The stay rebuild and the name backfill save often; a calendar a few seconds behind
+        // is fine, so those come at most every 15 seconds.
         NotificationCenter.default.publisher(for: ModelContext.didSave)
             .filter(PlaceSaveFilter.touchesPlaces)
-            .merge(with: NotificationCenter.default.publisher(for: .EKEventStoreChanged))
-            .debounce(for: .seconds(2), scheduler: DispatchQueue.main)
+            .throttle(for: .seconds(15), scheduler: DispatchQueue.main, latest: true)
             .sink { [weak self] _ in self?.schedule() }
             .store(in: &observers)
+        // A change in the calendar itself is checked against the events whatever the stays.
+        NotificationCenter.default.publisher(for: .EKEventStoreChanged)
+            .debounce(for: .seconds(2), scheduler: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.syncedFingerprint = nil
+                self?.schedule()
+            }
+            .store(in: &observers)
     }
+
+    /// The stays the calendar last matched. Equal stays and no calendar change since mean
+    /// there is nothing to do, so a save that only touched other rows reads no events.
+    private var syncedFingerprint: Int?
 
     func refreshAccess() {
         hasAccess = EKEventStore.authorizationStatus(for: .event) == .fullAccess
@@ -133,11 +146,14 @@ final class MovesCalendarSync: ObservableObject {
             isEnabled = true
             defaults.set(true, forKey: Keys.enabled)
             calendarTitle = "\(calendar.title) · \(calendar.source.title)"
+            // A new or reconnected calendar is checked against every event, whatever the stays.
+            syncedFingerprint = nil
             await sync()
         } catch { message = error.localizedDescription }
     }
 
     func disable() {
+        syncedFingerprint = nil
         isEnabled = false
         defaults.set(false, forKey: Keys.enabled)
         scheduledSync?.cancel()
@@ -171,12 +187,34 @@ final class MovesCalendarSync: ObservableObject {
         do {
             let now = Date.now
             let start = since
-            let context = ModelContext(container)
-            // Copied out at once with the learned place prefetched: the reconciler deletes
-            // visits on its own context, and a lazy fault on a deleted row aborts.
-            var fetch = FetchDescriptor<VisitPlace>(predicate: #Predicate { $0.arrivalDate >= start && $0.dayTimeline != nil })
-            fetch.relationshipKeyPathsForPrefetching = [\.knownPlace]
-            let visits = try context.fetch(fetch).compactMap { CalendarVisit(visit: $0, since: start, now: now) }
+            let container = container
+            // Read and copied out off the main actor, with the learned place prefetched: the
+            // reconciler deletes visits on its own context, and a lazy fault on a deleted row
+            // aborts. Every synced stay since the start date is read, years of them.
+            let (visits, fingerprint) = try await Task.detached(priority: .utility) { () throws -> ([CalendarVisit], Int) in
+                let context = ModelContext(container)
+                var fetch = FetchDescriptor<VisitPlace>(
+                    predicate: #Predicate { $0.arrivalDate >= start && $0.dayTimeline != nil },
+                    sortBy: [SortDescriptor(\.arrivalDate)]
+                )
+                fetch.relationshipKeyPathsForPrefetching = [\.knownPlace]
+                let visits = try context.fetch(fetch).compactMap { CalendarVisit(visit: $0, since: start, now: now) }
+                var hasher = Hasher()
+                hasher.combine(start)
+                for visit in visits {
+                    hasher.combine(visit.id)
+                    hasher.combine(visit.title)
+                    hasher.combine(visit.start)
+                    hasher.combine(visit.end)
+                }
+                return (visits, hasher.finalize())
+            }.value
+            guard isEnabled, !Task.isCancelled else { return }
+            if fingerprint == syncedFingerprint {
+                lastSync = now
+                defaults.set(now, forKey: Keys.lastSync)
+                return
+            }
             let wanted = Dictionary(visits.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
             var events: [EKEvent] = []
             var window = start
@@ -214,6 +252,7 @@ final class MovesCalendarSync: ObservableObject {
                 changed = true
             }
             if changed { try store.commit() }
+            syncedFingerprint = fingerprint
             lastSync = now
             defaults.set(now, forKey: Keys.lastSync)
             message = nil

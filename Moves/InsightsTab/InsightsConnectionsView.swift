@@ -42,6 +42,27 @@ struct InsightsConnectionsView: View {
     @State private var includesIndirectConnections = true
     @State private var includesReturnTrips = false
     @State private var endpointBeingSelected: Endpoint?
+    /// The journeys for `journeyQuery`, found off the main actor. Finding them walks every
+    /// trip in the history (twice with return trips), so it runs when the choices change,
+    /// not on every render.
+    @State private var found: (query: JourneyQuery, journeys: [MovesConnectionJourney])?
+
+    private struct JourneyQuery: Hashable, Sendable {
+        let origin: String
+        let destination: String
+        let includesIndirect: Bool
+        let includesReturns: Bool
+    }
+
+    private var journeyQuery: JourneyQuery? {
+        guard let originKey, let destinationKey, originKey != destinationKey else { return nil }
+        return JourneyQuery(
+            origin: originKey,
+            destination: destinationKey,
+            includesIndirect: includesIndirectConnections,
+            includesReturns: includesReturnTrips
+        )
+    }
 
     var body: some View {
         ScrollView {
@@ -110,26 +131,49 @@ struct InsightsConnectionsView: View {
             )
         }
         .onAppear(perform: selectCommuteDefaultsIfAvailable)
+        .task(id: journeyQuery) {
+            guard let query = journeyQuery else { return }
+            let snapshot = snapshot
+            let journeys = await Task.detached(priority: .userInitiated) {
+                let forward = snapshot.journeys(
+                    from: query.origin,
+                    to: query.destination,
+                    includingIndirect: query.includesIndirect
+                )
+                let reverse = query.includesReturns
+                    ? snapshot.journeys(from: query.destination, to: query.origin, includingIndirect: query.includesIndirect)
+                    : []
+                return (forward + reverse).sorted { $0.startDate > $1.startDate }
+            }.value
+            guard !Task.isCancelled else { return }
+            found = (query, journeys)
+        }
     }
 
     @ViewBuilder
     private var connectionResults: some View {
-        if let originKey, let destinationKey, originKey != destinationKey {
-            let forward = snapshot.journeys(
-                from: originKey,
-                to: destinationKey,
-                includingIndirect: includesIndirectConnections
-            )
-            let reverse = includesReturnTrips
-                ? snapshot.journeys(
-                    from: destinationKey,
-                    to: originKey,
-                    includingIndirect: includesIndirectConnections
-                )
-                : []
-            let journeys = (forward + reverse).sorted { $0.startDate > $1.startDate }
-            let statistics = MovesConnectionStatistics(journeys: journeys)
+        if let query = journeyQuery {
+            if let found, found.query == query {
+                journeyResults(found.journeys)
+            } else {
+                ProgressView()
+                    .frame(maxWidth: .infinity, minHeight: 120)
+            }
+        } else {
+            SettingsCard(title: String(localized: "Connection Search")) {
+                Label(String(localized: "Choose two different locations"), systemImage: "arrow.triangle.branch")
+                    .foregroundStyle(.secondary)
+                Text(String(localized: "You will see when you traveled between them, plus minimum, average, and maximum journey times."))
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
 
+    @ViewBuilder
+    private func journeyResults(_ journeys: [MovesConnectionJourney]) -> some View {
+        let statistics = MovesConnectionStatistics(journeys: journeys)
+        Group {
             if journeys.isEmpty {
                 ContentUnavailableView(
                     String(localized: "No Connections Found"),
@@ -169,14 +213,6 @@ struct InsightsConnectionsView: View {
                         .buttonStyle(.plain)
                     }
                 }
-            }
-        } else {
-            SettingsCard(title: String(localized: "Connection Search")) {
-                Label(String(localized: "Choose two different locations"), systemImage: "arrow.triangle.branch")
-                    .foregroundStyle(.secondary)
-                Text(String(localized: "You will see when you traveled between them, plus minimum, average, and maximum journey times."))
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
-                    .foregroundStyle(.secondary)
             }
         }
     }
