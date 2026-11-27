@@ -392,11 +392,23 @@ enum PlaceLearningEngine {
         onto place: KnownPlace,
         calendar: Calendar = .autoupdatingCurrent
     ) {
-        guard visit.assignmentSource == .user else { return }
-        guard visit.knownPlace?.id == place.id else { return }
-        let visits = confirmedVisits(on: place, including: visit)
+        learn(fromBatch: [visit], onto: place, calendar: calendar)
+    }
+
+    /// `learn(from:onto:)` for many stays the person confirmed at once: the footprint is
+    /// rebuilt once, not once per stay, and "earlier" means the confirmed stays from
+    /// before this batch.
+    static func learn(
+        fromBatch batch: [VisitPlace],
+        onto place: KnownPlace,
+        calendar: Calendar = .autoupdatingCurrent
+    ) {
+        let joined = batch.filter { $0.assignmentSource == .user && $0.knownPlace?.id == place.id }
+        guard !joined.isEmpty else { return }
+        let joinedIDs = Set(joined.map(\.id))
+        let visits = confirmedVisits(on: place, including: joined)
         var footprint = learnedFootprint(from: visits, calendar: calendar)
-        let earlier = visits.filter { $0.id != visit.id }
+        let earlier = visits.filter { !joinedIDs.contains($0.id) }
         if !earlier.isEmpty {
             let rebuilt = learnedFootprint(from: earlier, calendar: calendar)
             let rebuiltCenter = CLLocationCoordinate2D(
@@ -412,7 +424,8 @@ enum PlaceLearningEngine {
                     latitude: footprint.centerLatitude,
                     longitude: footprint.centerLongitude
                 )
-                let reach = distance(from: center, to: visit.coordinate) * radiusGrowthFactor
+                let reach = (joined.map { distance(from: center, to: $0.coordinate) }.max() ?? 0)
+                    * radiusGrowthFactor
                 footprint.footprintRadius = max(place.footprintRadius, reach)
             }
         }
@@ -658,12 +671,12 @@ enum PlaceLearningEngine {
         PlaceDisplayNamer.labelComparisonKey(lhs) == PlaceDisplayNamer.labelComparisonKey(rhs)
     }
 
-    private static func confirmedVisits(on place: KnownPlace, including visit: VisitPlace) -> [VisitSnapshot] {
+    private static func confirmedVisits(on place: KnownPlace, including joined: [VisitPlace]) -> [VisitSnapshot] {
         var snapshots = place.visits
             .filter { $0.assignmentSource == .user }
             .map(VisitSnapshot.init)
-        if visit.assignmentSource == .user,
-           !snapshots.contains(where: { $0.id == visit.id }) {
+        var seen = Set(snapshots.map(\.id))
+        for visit in joined where visit.assignmentSource == .user && seen.insert(visit.id).inserted {
             snapshots.append(VisitSnapshot(visit))
         }
         return snapshots
@@ -809,11 +822,35 @@ extension PlaceLearningEngine {
         among candidates: [StaySnapshot],
         radius: CLLocationDistance = clusterRadius
     ) -> [StaySnapshot] {
+        cluster(around: [seed], among: candidates, radius: radius)
+    }
+
+    /// Stays reachable from any of `seeds` one same-spot step at a time, each within
+    /// `radius` of some seed. Seeds are not returned. Naming a thousand stays at once
+    /// grows one cluster from all of them instead of a thousand overlapping ones.
+    static func cluster(
+        around seeds: [StaySnapshot],
+        among candidates: [StaySnapshot],
+        radius: CLLocationDistance = clusterRadius
+    ) -> [StaySnapshot] {
+        guard !seeds.isEmpty else { return [] }
+        let seedIDs = Set(seeds.map(\.id))
+        // A box around the seeds first, so the per-seed distance test only sees stays near them.
+        let latitudeSpan = radius / 111_320
+        let minLatitude = seeds.map(\.latitude).min()! - latitudeSpan
+        let maxLatitude = seeds.map(\.latitude).max()! + latitudeSpan
+        let longitudeSpan = radius / max(111_320 * cos(max(abs(minLatitude), abs(maxLatitude)) * .pi / 180), 1)
+        let minLongitude = seeds.map(\.longitude).min()! - longitudeSpan
+        let maxLongitude = seeds.map(\.longitude).max()! + longitudeSpan
         var remaining = candidates.filter { candidate in
-            candidate.id != seed.id && distance(from: seed.coordinate, to: candidate.coordinate) <= radius
+            guard !seedIDs.contains(candidate.id),
+                  candidate.latitude >= minLatitude, candidate.latitude <= maxLatitude,
+                  candidate.longitude >= minLongitude, candidate.longitude <= maxLongitude
+            else { return false }
+            return seeds.contains { distance(from: $0.coordinate, to: candidate.coordinate) <= radius }
         }
         var members: [StaySnapshot] = []
-        var frontier = [seed]
+        var frontier = seeds
         while let current = frontier.popLast() {
             var index = 0
             while index < remaining.count {

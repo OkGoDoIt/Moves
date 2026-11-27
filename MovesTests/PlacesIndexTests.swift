@@ -359,6 +359,89 @@ final class PlacesIndexTests: XCTestCase {
         XCTAssertFalse(created.arrivalHourHistogram.allSatisfy { $0 == 0 })
     }
 
+    /// A place visited a thousand times (Roger's theatre has 1,109 stays) confirms in one
+    /// pass: every stay named, the unplaced stays beside it adopted, Undo putting all of it
+    /// back, and Rename relabelling every stay. Confirming used to learn, adopt, and save
+    /// once per stay and froze the app.
+    func testConfirmAndRenameAPlaceWithAThousandStays() throws {
+        let schema = Schema(MovesTimelineSchema.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)
+        )
+        let context = ModelContext(container)
+        context.undoManager = UndoManager()
+        let latitude = 37.7962, longitude = -122.4068
+        var stays: [VisitPlace] = []
+        for index in 0..<1_200 {
+            let arrival = now.addingTimeInterval(TimeInterval(-index) * 86_400)
+            let jitter = Double(index % 7 - 3) * 0.00003
+            let visit = VisitPlace(
+                arrivalDate: arrival,
+                departureDate: arrival.addingTimeInterval(4 * 3_600),
+                latitude: latitude + jitter,
+                longitude: longitude - jitter,
+                horizontalAccuracy: 15
+            )
+            context.insertOnDay(visit)
+            stays.append(visit)
+        }
+        var neighbors: [VisitPlace] = []
+        for index in 0..<30 {
+            let arrival = now.addingTimeInterval(TimeInterval(-index) * 86_400 + 6 * 3_600)
+            let visit = VisitPlace(
+                arrivalDate: arrival,
+                departureDate: arrival.addingTimeInterval(1_800),
+                latitude: latitude + 0.0003,
+                longitude: longitude,
+                horizontalAccuracy: 10
+            )
+            context.insertOnDay(visit)
+            neighbors.append(visit)
+        }
+        let far = VisitPlace(
+            arrivalDate: now.addingTimeInterval(8 * 3_600),
+            departureDate: now.addingTimeInterval(9 * 3_600),
+            latitude: latitude + 0.01,
+            longitude: longitude,
+            horizontalAccuracy: 10
+        )
+        context.insertOnDay(far)
+        try context.save()
+
+        var step: AppUndoStep?
+        let started = Date()
+        let place = try PlacesLibrary.confirmSuggested(
+            visitIDs: stays.map(\.id),
+            name: "The Great Star Theater",
+            in: context,
+            undoStep: { step = $0 }
+        )
+        let elapsed = Date().timeIntervalSince(started)
+        XCTAssertLessThan(elapsed, 5, "Confirming 1,200 stays took \(elapsed) s")
+
+        XCTAssertTrue(stays.allSatisfy { $0.knownPlace?.id == place.id && $0.assignmentSource == .user })
+        XCTAssertTrue(stays.allSatisfy { $0.userLabel == "The Great Star Theater" })
+        XCTAssertEqual(place.confirmedVisitCount, 1_200)
+        XCTAssertTrue(neighbors.allSatisfy { $0.knownPlace?.id == place.id && $0.assignmentSource == .auto })
+        XCTAssertNil(far.knownPlace)
+        XCTAssertEqual(far.assignmentSource, .none)
+
+        let renamed = try PlacesLibrary.rename(place, to: "Great Star", in: context)
+        XCTAssertNotNil(renamed)
+        XCTAssertEqual(place.name, "Great Star")
+        XCTAssertTrue(stays.allSatisfy { $0.userLabel == "Great Star" })
+        renamed?.undo()
+        XCTAssertEqual(place.name, "The Great Star Theater")
+        XCTAssertTrue(stays.allSatisfy { $0.userLabel == "The Great Star Theater" })
+
+        let placeID = place.id
+        try XCTUnwrap(step).undo()
+        XCTAssertTrue(try context.fetch(FetchDescriptor<KnownPlace>(predicate: #Predicate { $0.id == placeID })).isEmpty)
+        XCTAssertTrue(stays.allSatisfy { $0.knownPlace == nil && $0.assignmentSource == .none && $0.userLabel == nil })
+        XCTAssertTrue(neighbors.allSatisfy { $0.knownPlace == nil && $0.assignmentSource == .none })
+    }
+
     func testSuggestedClusterExposesDisplayNameAndAddressForUnconfirmedVisits() {
         let first = PlacesVisitRecord(
             name: "10.81393, 106.71000",

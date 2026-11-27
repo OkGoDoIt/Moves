@@ -4558,6 +4558,26 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         }
     }
 
+    /// The person's own answer for many stays at once, as `assign(_:to:source: .user, ...)`
+    /// gives each one, in one pass and one save. Confirming a place with a thousand stays
+    /// used to learn, adopt, and save a thousand times.
+    func assignConfirmed(_ visits: [VisitPlace], to place: KnownPlace) throws {
+        guard !visits.isEmpty else { return }
+        try performingUndoableChange(named: "Name Place") {
+            let trimmed = place.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            for visit in visits {
+                visit.knownPlace = place
+                visit.assignmentSource = .user
+                visit.assignmentConfidence = 1
+                if !trimmed.isEmpty {
+                    visit.userLabel = trimmed
+                }
+            }
+            PlaceLearningEngine.learn(fromBatch: visits, onto: place)
+            try adoptPastVisits(into: place, around: visits, seedsFootprint: false)
+        }
+    }
+
     func createKnownPlace(from visit: VisitPlace, name: String) throws -> KnownPlace {
         try performingUndoableChange(named: "Add Place") {
             let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -4612,16 +4632,30 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         around seed: VisitPlace,
         seedsFootprint: Bool
     ) throws -> [VisitPlace] {
+        try adoptPastVisits(into: place, around: [seed], seedsFootprint: seedsFootprint)
+    }
+
+    /// `adoptPastVisits(into:around:seedsFootprint:)` grown from several named stays at
+    /// once: one fetch and one cluster for all of them.
+    @discardableResult
+    func adoptPastVisits(
+        into place: KnownPlace,
+        around seeds: [VisitPlace],
+        seedsFootprint: Bool
+    ) throws -> [VisitPlace] {
+        guard !seeds.isEmpty else { return [] }
         let placeID = place.id
         let nameKey = PlaceDisplayNamer.labelComparisonKey(place.name)
         let movedAway = Set(
-            try modelContext.fetch(FetchDescriptor<PlaceCorrectionEvent>())
-                .filter { $0.fromKnownPlaceID == placeID }
-                .map(\.visitPlaceID)
+            try modelContext.fetch(FetchDescriptor<PlaceCorrectionEvent>(
+                predicate: #Predicate { $0.fromKnownPlaceID == placeID }
+            ))
+            .map(\.visitPlaceID)
         )
+        let seedIDs = Set(seeds.map(\.id))
         let reach = PlaceLearningEngine.clusterRadius + PlaceLearningEngine.sameSpotMaximumDistance
-        let candidates = try visitsInBox(around: seed.coordinate, meters: reach).filter { visit in
-            guard visit.id != seed.id,
+        let candidates = try visitsInBox(around: seeds.map(\.coordinate), meters: reach).filter { visit in
+            guard !seedIDs.contains(visit.id),
                   visit.knownPlace == nil,
                   visit.assignmentSource == .none,
                   !movedAway.contains(visit.id)
@@ -4631,7 +4665,7 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         }
         let byID = Dictionary(candidates.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let members = PlaceLearningEngine.cluster(
-            around: PlaceLearningEngine.StaySnapshot(seed, label: nil),
+            around: seeds.map { PlaceLearningEngine.StaySnapshot($0, label: nil) },
             among: candidates.map { PlaceLearningEngine.StaySnapshot($0, label: nil) }
         )
         .compactMap { byID[$0.id] }
@@ -4700,12 +4734,27 @@ final class SwiftDataTimelineRepository: TimelineRepository {
 
     /// Visits whose centre falls in a square `meters` either side of `coordinate`.
     private func visitsInBox(around coordinate: CLLocationCoordinate2D, meters: CLLocationDistance) throws -> [VisitPlace] {
+        try visitsInBox(around: [coordinate], meters: meters)
+    }
+
+    /// Visits in the box around all of `coordinates`, `meters` past the outermost.
+    private func visitsInBox(around coordinates: [CLLocationCoordinate2D], meters: CLLocationDistance) throws -> [VisitPlace] {
+        guard let first = coordinates.first else { return [] }
+        var minLatitude = first.latitude, maxLatitude = first.latitude
+        var minLongitude = first.longitude, maxLongitude = first.longitude
+        for coordinate in coordinates.dropFirst() {
+            minLatitude = min(minLatitude, coordinate.latitude)
+            maxLatitude = max(maxLatitude, coordinate.latitude)
+            minLongitude = min(minLongitude, coordinate.longitude)
+            maxLongitude = max(maxLongitude, coordinate.longitude)
+        }
         let latitudeSpan = meters / 111_320
-        let longitudeSpan = meters / max(111_320 * cos(coordinate.latitude * .pi / 180), 1)
-        let minLatitude = coordinate.latitude - latitudeSpan
-        let maxLatitude = coordinate.latitude + latitudeSpan
-        let minLongitude = coordinate.longitude - longitudeSpan
-        let maxLongitude = coordinate.longitude + longitudeSpan
+        let widestLatitude = max(abs(minLatitude), abs(maxLatitude))
+        let longitudeSpan = meters / max(111_320 * cos(widestLatitude * .pi / 180), 1)
+        minLatitude -= latitudeSpan
+        maxLatitude += latitudeSpan
+        minLongitude -= longitudeSpan
+        maxLongitude += longitudeSpan
         return try modelContext.fetch(FetchDescriptor<VisitPlace>(
             predicate: #Predicate { visit in
                 visit.latitude >= minLatitude && visit.latitude <= maxLatitude

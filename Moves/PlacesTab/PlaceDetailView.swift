@@ -17,7 +17,6 @@ struct PlaceDetailView: View {
 
     @State private var camera: MapCameraPosition
     @State private var isRenaming = false
-    @State private var draftName = ""
     @State private var isMerging = false
     @State private var isConfirmingDelete = false
 
@@ -86,14 +85,14 @@ struct PlaceDetailView: View {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     Button(String(localized: "Rename"), systemImage: "pencil") {
-                        draftName = place?.name ?? ""
                         isRenaming = true
                     }
                     categoryMenu
                     Button(String(localized: "Merge into…"), systemImage: "arrow.triangle.merge") {
                         isMerging = true
                     }
-                    .disabled(mergeCandidates.isEmpty)
+                    // A count, not the sorted list: this runs on every render.
+                    .disabled(((try? modelContext.fetchCount(FetchDescriptor<KnownPlace>())) ?? 0) < 2)
                     Button(String(localized: "Shrink footprint"), systemImage: "minus.circle") {
                         shrink()
                     }
@@ -107,11 +106,7 @@ struct PlaceDetailView: View {
                 .disabled(place == nil)
             }
         }
-        .alert(String(localized: "Rename"), isPresented: $isRenaming) {
-            TextField(String(localized: "Name"), text: $draftName)
-            Button(String(localized: "Save")) { rename() }
-            Button(String(localized: "Cancel"), role: .cancel) {}
-        }
+        .modifier(PlaceRenameAlert(isPresented: $isRenaming, currentName: place?.name ?? "") { rename(to: $0) })
         .confirmationDialog(
             String(localized: "Delete this place?"),
             isPresented: $isConfirmingDelete,
@@ -216,7 +211,6 @@ struct PlaceDetailView: View {
     private func identity(summary: PlacesPlaceSummary) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Button {
-                draftName = summary.name
                 isRenaming = true
             } label: {
                 HStack(spacing: 8) {
@@ -290,10 +284,10 @@ struct PlaceDetailView: View {
         }
     }
 
-    private func rename() {
+    private func rename(to name: String) {
         guard let place else { return }
         do {
-            let step = try PlacesLibrary.rename(place, to: draftName, in: modelContext)
+            let step = try PlacesLibrary.rename(place, to: name, in: modelContext)
             toast(String(localized: "Renamed"), step)
         } catch {}
     }
@@ -339,11 +333,6 @@ struct SuggestedPlaceDetailView: View {
     let cluster: PlacesSuggestedCluster
     var onConfirmed: (UUID) -> Void
 
-    @EnvironmentObject private var rootController: MovesRootController
-
-    @Query(filter: #Predicate<VisitPlace> { $0.dayTimeline != nil }, sort: \VisitPlace.arrivalDate, order: .reverse)
-    private var allVisits: [VisitPlace]
-
     /// The one name on this screen: the title shows exactly what Confirm will save.
     @State private var name: String
 
@@ -351,11 +340,6 @@ struct SuggestedPlaceDetailView: View {
         self.cluster = cluster
         self.onConfirmed = onConfirmed
         _name = State(initialValue: PlaceConfirmForm.initialName(for: cluster))
-    }
-
-    private var visits: [VisitPlace] {
-        let wanted = Set(cluster.visitIDs)
-        return allVisits.filter { wanted.contains($0.id) }
     }
 
     var body: some View {
@@ -376,26 +360,7 @@ struct SuggestedPlaceDetailView: View {
                     .id(PlaceConfirmFormAnchor.id)
                 }
 
-                if !visits.isEmpty {
-                    Section {
-                        ForEach(visits) { visit in
-                            Button {
-                                rootController.selectedTab = .timeline
-                                rootController.requestedJumpDate = PlaceVisitRow.timelineDay(of: visit)
-                            } label: {
-                                PlaceVisitRow(visit: visit)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    } header: {
-                        Text(PlaceVisitRow.withZone(
-                            visits.count == 1
-                                ? String(localized: "1 visit")
-                                : String(localized: "\(visits.count) visits"),
-                            visits: visits
-                        ))
-                    }
-                }
+                SuggestedVisitsSection(visitIDs: cluster.visitIDs)
             }
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
@@ -412,6 +377,70 @@ struct SuggestedPlaceDetailView: View {
         }
         .navigationTitle(PlaceDisplayNamer.meaningful(name) ?? String(localized: "New place"))
         .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+/// The Rename alert. It keeps the draft itself, so typing re-renders only the alert and
+/// not the page with its stats over every visit.
+private struct PlaceRenameAlert: ViewModifier {
+    @Binding var isPresented: Bool
+    let currentName: String
+    let onSave: (String) -> Void
+    @State private var draft = ""
+
+    func body(content: Content) -> some View {
+        content
+            .alert(String(localized: "Rename"), isPresented: $isPresented) {
+                TextField(String(localized: "Name"), text: $draft)
+                Button(String(localized: "Save")) { onSave(draft) }
+                Button(String(localized: "Cancel"), role: .cancel) {}
+            }
+            .onChange(of: isPresented) { _, presented in
+                if presented { draft = currentName }
+            }
+    }
+}
+
+/// The suggested cluster's stays, newest first. Its own view, with inputs that typing a
+/// name does not change, so a keystroke never re-reads or re-lists a thousand stays.
+private struct SuggestedVisitsSection: View {
+    @EnvironmentObject private var rootController: MovesRootController
+    @Query private var visits: [VisitPlace]
+    @State private var visibleVisitCount = 100
+
+    init(visitIDs: [UUID]) {
+        _visits = Query(
+            filter: #Predicate<VisitPlace> { visitIDs.contains($0.id) && $0.dayTimeline != nil },
+            sort: \VisitPlace.arrivalDate,
+            order: .reverse
+        )
+    }
+
+    var body: some View {
+        if !visits.isEmpty {
+            Section {
+                ForEach(visits.prefix(visibleVisitCount)) { visit in
+                    Button {
+                        rootController.selectedTab = .timeline
+                        rootController.requestedJumpDate = PlaceVisitRow.timelineDay(of: visit)
+                    } label: {
+                        PlaceVisitRow(visit: visit)
+                    }
+                    .buttonStyle(.plain)
+                }
+                if visibleVisitCount < visits.count {
+                    Button(String(localized: "Show more visits")) { visibleVisitCount += 100 }
+                        .font(.system(.body, design: .rounded).weight(.medium))
+                }
+            } header: {
+                Text(PlaceVisitRow.withZone(
+                    visits.count == 1
+                        ? String(localized: "1 visit")
+                        : String(localized: "\(visits.count) visits"),
+                    visits: visits
+                ))
+            }
+        }
     }
 }
 

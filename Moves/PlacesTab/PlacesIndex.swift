@@ -1111,8 +1111,10 @@ enum PlacesLibrary {
         undoStep: ((AppUndoStep) -> Void)? = nil
     ) throws -> KnownPlace {
         var created: KnownPlace?
-        // Every visit's assignment and the new place are one step on the Undo pill.
-        let visitsBefore = VisitAssignmentSnapshot(try fetchVisits(ids: visitIDs, in: context))
+        // Every visit's assignment, the stays it adopts nearby, and the new place are one
+        // step on the Undo pill.
+        let clusterVisits = try fetchVisits(ids: visitIDs, in: context)
+        let visitsBefore = VisitAssignmentSnapshot(clusterVisits + adoptableVisits(around: clusterVisits, in: context))
         let existingBefore = try existingPlaceID.flatMap { id in
             try context.fetch(FetchDescriptor<KnownPlace>(predicate: #Predicate { $0.id == id })).first
         }.map(KnownPlaceUndoPayload.init)
@@ -1166,12 +1168,14 @@ enum PlacesLibrary {
         let resolvedName = trimmedName.isEmpty ? first.placesDisplayName : trimmedName
 
         let place: KnownPlace
+        let rest: [VisitPlace]
         if let existingPlaceID,
-           let existing = try context.fetch(FetchDescriptor<KnownPlace>()).first(where: { $0.id == existingPlaceID }) {
+           let existing = try context.fetch(FetchDescriptor<KnownPlace>(predicate: #Predicate { $0.id == existingPlaceID })).first {
             place = existing
-            try repository.assign(first, to: place, source: .user, confidence: 1)
+            rest = visits
         } else {
             place = try repository.createKnownPlace(from: first, name: resolvedName)
+            rest = Array(visits.dropFirst())
         }
 
         if let center, CLLocationCoordinate2DIsValid(center) {
@@ -1195,9 +1199,7 @@ enum PlacesLibrary {
             }
         }
 
-        for visit in visits.dropFirst() {
-            try repository.assign(visit, to: place, source: .user, confidence: 1)
-        }
+        try repository.assignConfirmed(rest, to: place)
         if context.hasChanges {
             try context.save()
         }
@@ -1271,13 +1273,13 @@ enum PlacesLibrary {
     }
 
     private static func fetchVisits(ids: [UUID], in context: ModelContext) throws -> [VisitPlace] {
-        let wanted = Set(ids)
-        let all = try context.fetch(FetchDescriptor<VisitPlace>.live())
-        let byID = Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0) })
-        return ids.compactMap { id in
-            guard wanted.contains(id) else { return nil }
-            return byID[id]
-        }
+        guard !ids.isEmpty else { return [] }
+        // Only these stays, not the whole history. Retired stays are left out in code, as
+        // in `nearbyVisits`.
+        let found = try context.fetch(FetchDescriptor<VisitPlace>(predicate: #Predicate { ids.contains($0.id) }))
+            .filter { !TimelineRetirement.isRetired($0) }
+        let byID = Dictionary(found.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return ids.compactMap { byID[$0] }
     }
 
     /// An edit to one place and its visits' names, put back from a copy taken first.
@@ -1288,9 +1290,8 @@ enum PlacesLibrary {
         _ body: () throws -> Void
     ) throws -> AppUndoStep {
         let payload = KnownPlaceUndoPayload(place)
-        // Labelling can also assign the earlier stays at the place, so the stays around it
-        // are copied too, not only the ones matched to it now.
-        let visits = VisitAssignmentSnapshot(place.visits + nearbyVisits(of: place, in: context))
+        // These edits touch only the place and its own stays; nothing is adopted.
+        let visits = VisitAssignmentSnapshot(place.visits)
         return try performingRestorableDelete(
             named: name,
             in: context,
@@ -1302,18 +1303,29 @@ enum PlacesLibrary {
         )
     }
 
-    /// Stays within a kilometer of the place's center.
-    private static func nearbyVisits(of place: KnownPlace, in context: ModelContext) -> [VisitPlace] {
-        let latitudeDelta = 1_000.0 / 111_000
-        let longitudeDelta = latitudeDelta / max(cos(place.centerLatitude * .pi / 180), 0.01)
-        let minLat = place.centerLatitude - latitudeDelta, maxLat = place.centerLatitude + latitudeDelta
-        let minLon = place.centerLongitude - longitudeDelta, maxLon = place.centerLongitude + longitudeDelta
+    /// Unplaced stays that confirming `visits` could adopt: within adoption reach of them,
+    /// with no place and no answer yet.
+    private static func adoptableVisits(around visits: [VisitPlace], in context: ModelContext) -> [VisitPlace] {
+        guard let first = visits.first else { return [] }
+        let reach = PlaceLearningEngine.clusterRadius + PlaceLearningEngine.sameSpotMaximumDistance
+        var minLat = first.latitude, maxLat = first.latitude
+        var minLon = first.longitude, maxLon = first.longitude
+        for visit in visits.dropFirst() {
+            minLat = min(minLat, visit.latitude); maxLat = max(maxLat, visit.latitude)
+            minLon = min(minLon, visit.longitude); maxLon = max(maxLon, visit.longitude)
+        }
+        let latitudeDelta = reach / 111_000
+        let longitudeDelta = latitudeDelta / max(cos(max(abs(minLat), abs(maxLat)) * .pi / 180), 0.01)
+        minLat -= latitudeDelta; maxLat += latitudeDelta
+        minLon -= longitudeDelta; maxLon += longitudeDelta
         // Retired stays are left out in code. A predicate that compares `dayTimeline` with
         // nil does not compile in this file on an incremental build.
         let inBox = (try? context.fetch(FetchDescriptor<VisitPlace>(predicate: #Predicate {
             $0.latitude >= minLat && $0.latitude <= maxLat && $0.longitude >= minLon && $0.longitude <= maxLon
         }))) ?? []
-        return inBox.filter { !TimelineRetirement.isRetired($0) }
+        return inBox.filter {
+            !TimelineRetirement.isRetired($0) && $0.knownPlace == nil && $0.assignmentSource == .none
+        }
     }
 
     /// SwiftData auto-undo of a delete can crash, so these changes run with undo registration
