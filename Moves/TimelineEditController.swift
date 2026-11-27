@@ -120,6 +120,50 @@ final class TimelineEditController: TimelineItemActions {
         deletePlace(visit)
     }
 
+    /// Takes stops the person says never happened off the timeline, as one Undo step.
+    ///
+    /// A stop between two trips is folded into them, the way Not a Stop does, so a bogus
+    /// stop under a flight leaves one flight. Each removal is recorded, so neither the stay
+    /// rebuild nor a later photo or file import brings it back.
+    func removeVisits(ids: [UUID]) {
+        let visits = ids.compactMap(visit(id:)).sorted { $0.arrivalDate < $1.arrivalDate }
+        guard !visits.isEmpty else { return }
+        var refresh: [UUID] = []
+        performStructural(named: String(localized: "Removed")) { repo, context in
+            var payloads: [any TimelineUndoRestoring] = []
+            for visit in visits where isLive(visit) {
+                let incoming = visit.incomingMoves.sorted { $0.endDate < $1.endDate }.last
+                let outgoing = visit.outgoingMoves.sorted { $0.startDate < $1.startDate }.first
+                if let incoming, let outgoing, incoming.id != outgoing.id {
+                    payloads.append(DissolvedVisitUndoPayload(
+                        visit: visit,
+                        incoming: incoming,
+                        outgoing: outgoing,
+                        didDeleteOutgoing: incoming.transportMode == outgoing.transportMode
+                    ))
+                    let result = try repo.dissolveVisit(visit)
+                    for move in result.movesNeedingRouteRefresh {
+                        move.clearCachedRouteCoordinates()
+                        refresh.append(move.id)
+                    }
+                } else {
+                    payloads.append(TimelineDeletedPlacePayload(place: visit))
+                    repo.recordRemoval(of: visit)
+                    visit.keepPhotosOnDay()
+                    context.delete(visit)
+                }
+            }
+            try context.save()
+            registerRestore(RemovedVisitsUndoPayload(parts: payloads), on: context)
+        }
+        guard let context = modelContext, !refresh.isEmpty else { return }
+        Task { @MainActor in
+            for id in Set(refresh) {
+                _ = await RoadRouteMatcher.matchedCoordinates(moveID: id, in: context)
+            }
+        }
+    }
+
     // MARK: - Move actions
 
     func requestChangeMode(_ move: MoveSegment) {
@@ -1152,6 +1196,17 @@ struct TimelineDeletedMovePayload: TimelineUndoRestoring {
         context.insert(restored)
         for sample in LiveTimelineRows.samples(sampleKeys, in: context) {
             sample.moveSegment = restored
+        }
+    }
+}
+
+/// Several removals put back as one step, last first, so each finds the trips it left.
+private struct RemovedVisitsUndoPayload: TimelineUndoRestoring {
+    let parts: [any TimelineUndoRestoring]
+
+    func restore(in context: ModelContext) {
+        for part in parts.reversed() {
+            part.restore(in: context)
         }
     }
 }

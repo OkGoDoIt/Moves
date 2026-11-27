@@ -93,6 +93,26 @@ enum TemporaryRouteTrackingDuration: String, CaseIterable, Identifiable {
     }
 }
 
+/// Tells a stop iOS reports in mid-air from a real one.
+///
+/// On 1 Oct 2026 a Bangkok to Saigon flight logged a fix at 236 m/s over Cambodia and,
+/// sixteen seconds later, a fifteen-minute visit at that spot. Nothing slows from airliner
+/// speed to standing still that fast: from 100 m/s a plane is minutes from touchdown and
+/// more from the gate.
+enum MidFlightVisitFilter {
+    /// About 360 km/h: faster than any train or car, slower than a plane in the air.
+    static let airSpeed: CLLocationSpeed = 100
+    static let window: TimeInterval = 5 * 60
+
+    static func isMidFlight(arrival: Date, samples: [LocationSample]) -> Bool {
+        samples.contains { sample in
+            sample.speed >= airSpeed
+                && sample.timestamp <= arrival
+                && arrival.timeIntervalSince(sample.timestamp) <= window
+        }
+    }
+}
+
 enum TemporaryRouteTrackingStopNotificationPermissionResult: Equatable {
     case enabled
     case needsSettings
@@ -593,6 +613,15 @@ final class DefaultTimelineAssembler: TimelineAssembler {
 
             do {
                 if try repository.visitWasRemoved(visit) {
+                    await reconcileSampleStays()
+                    return
+                }
+                let arrival = visit.arrivalDate
+                if arrival != .distantPast, MidFlightVisitFilter.isMidFlight(
+                    arrival: arrival,
+                    samples: try repository.samples(from: arrival.addingTimeInterval(-MidFlightVisitFilter.window), to: arrival)
+                ) {
+                    Self.timelineLog.info("Skipped a visit reported during a flight")
                     await reconcileSampleStays()
                     return
                 }

@@ -1,5 +1,6 @@
 import CoreLocation
 import Foundation
+import SwiftData
 
 /// Countries and cities a person has been to, with the dates they were there.
 struct InsightsGeography: Equatable, Sendable {
@@ -246,7 +247,7 @@ enum InsightsGeographyBuilder {
     /// The days are the dates on the clock where the visit happened, each held as midnight
     /// of that date on `calendar`: a night in Tokyo counts for its two Tokyo dates,
     /// whatever zone the phone is in now.
-    private static func daySpan(of visit: InsightsVisitRecord, dayStart: Date, calendar: Calendar) -> Set<Date> {
+    static func daySpan(of visit: InsightsVisitRecord, dayStart: Date, calendar: Calendar) -> Set<Date> {
         guard let arrival = visit.arrivalDate else { return [calendar.startOfDay(for: dayStart)] }
         var zone = calendar.timeZone
         if let latitude = visit.latitude, let longitude = visit.longitude,
@@ -315,5 +316,71 @@ enum InsightsGeographyBuilder {
         guard case .year(let year) = period,
               let start = calendar.date(from: DateComponents(year: year, month: 1, day: 1)) else { return nil }
         return calendar.dateInterval(of: .year, for: start)
+    }
+}
+
+/// Days in a country or city the person says they never spent there, and the stops that
+/// put them there.
+struct InsightsRemoval: Identifiable, Equatable {
+    enum Scope: Hashable {
+        case country(String)
+        case city(String)
+    }
+
+    let scope: Scope
+    let placeName: String
+    let stays: [InsightsGeography.Stay]
+    /// Ids, not rows: the removal runs after a confirmation, and rows can go meanwhile.
+    let visitIDs: [UUID]
+
+    var id: String { "\(scope)-\(stays.map(\.start.timeIntervalSince1970))" }
+    var dayCount: Int { stays.reduce(0) { $0 + $1.dayCount } }
+
+    /// The live stops that count toward `stays` in that country or city.
+    @MainActor
+    static func make(
+        scope: Scope,
+        placeName: String,
+        stays: [InsightsGeography.Stay],
+        in context: ModelContext,
+        calendar: Calendar = .autoupdatingCurrent
+    ) -> InsightsRemoval {
+        InsightsRemoval(
+            scope: scope,
+            placeName: placeName,
+            stays: stays,
+            visitIDs: (try? visitIDs(scope: scope, stays: stays, in: context, calendar: calendar)) ?? []
+        )
+    }
+
+    static func visitIDs(
+        scope: Scope,
+        stays: [InsightsGeography.Stay],
+        in context: ModelContext,
+        calendar: Calendar
+    ) throws -> [UUID] {
+        guard let first = stays.map(\.start).min(), let last = stays.map(\.end).max() else { return [] }
+        // A stop is filed on its arrival date where it happened, which can sit a day off
+        // the phone's calendar either way.
+        let from = calendar.date(byAdding: .day, value: -2, to: first) ?? first
+        let through = calendar.date(byAdding: .day, value: 3, to: last) ?? last
+        var fetch = FetchDescriptor<VisitPlace>(
+            predicate: #Predicate { $0.arrivalDate >= from && $0.arrivalDate < through && $0.dayTimeline != nil },
+            sortBy: [SortDescriptor(\.arrivalDate)]
+        )
+        fetch.relationshipKeyPathsForPrefetching = [\.dayTimeline, \.knownPlace]
+
+        return try context.fetch(fetch).compactMap { visit in
+            guard let day = visit.dayTimeline else { return nil }
+            let record = InsightsVisitRecord(visit)
+            let place = VisitGeography.resolve(record)
+            switch scope {
+            case .country(let code): guard place.countryCode == code else { return nil }
+            case .city(let id): guard place.cityID == id else { return nil }
+            }
+            let days = InsightsGeographyBuilder.daySpan(of: record, dayStart: day.calendarDate(in: calendar), calendar: calendar)
+            let inStays = days.contains { day in stays.contains { $0.start <= day && day <= $0.end } }
+            return inStays ? visit.id : nil
+        }
     }
 }

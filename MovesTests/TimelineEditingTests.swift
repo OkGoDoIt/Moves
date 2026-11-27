@@ -1199,6 +1199,63 @@ final class TimelineEditingTests: XCTestCase {
         XCTAssertEqual(Set(walk.samples.map(\.persistentModelID)), Set(fixes.map(\.persistentModelID)))
     }
 
+    /// A stop iOS reported under a flight shows up as a country the person never visited.
+    /// Removing that country's day from Insights takes off only its stop, joins the flight,
+    /// keeps the removal for later rebuilds and imports, and Undo puts it all back.
+    func testRemovingAStrayCountryDayFoldsItsStopIntoTheFlight() throws {
+        let (_, context, container) = try makeRepository()
+        let bangkok = insertPlace(in: context, arrival: date(1, 0), departure: date(6, 0), latitude: 13.69, longitude: 100.75)
+        bangkok.countryCode = "TH"
+        let overCambodia = insertPlace(in: context, arrival: date(7, 0), departure: date(7, 15), latitude: 12.63, longitude: 104.10)
+        overCambodia.countryCode = "KH"
+        let saigon = insertPlace(in: context, arrival: date(8, 0), departure: date(12, 0), latitude: 10.81, longitude: 106.65)
+        saigon.countryCode = "VN"
+        _ = insertMove(in: context, from: bangkok, to: overCambodia, start: date(6, 0), end: date(7, 0), mode: .plane, distance: 380_000)
+        _ = insertMove(in: context, from: overCambodia, to: saigon, start: date(7, 15), end: date(8, 0), mode: .plane, distance: 330_000)
+        try context.save()
+        let strayID = overCambodia.id
+
+        let geography = InsightsGeographyBuilder.build(days: try InsightsSourceLoader.load(from: container).days)
+        let cambodia = try XCTUnwrap(geography.country("KH"))
+        let ids = try InsightsRemoval.visitIDs(scope: .country("KH"), stays: cambodia.stays, in: context, calendar: .autoupdatingCurrent)
+        XCTAssertEqual(ids, [strayID])
+
+        let (controller, undoController) = makeEditController(for: context)
+        grouped(undoController) { controller.removeVisits(ids: ids) }
+
+        let visits = try context.fetch(FetchDescriptor<VisitPlace>())
+        XCTAssertEqual(Set(visits.map(\.id)), [bangkok.id, saigon.id])
+        let flights = try context.fetch(FetchDescriptor<MoveSegment>())
+        XCTAssertEqual(flights.count, 1)
+        XCTAssertEqual(flights.first?.startPlace?.id, bangkok.id)
+        XCTAssertEqual(flights.first?.endPlace?.id, saigon.id)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<RemovedTimelineSpan>()), 1)
+        let after = InsightsGeographyBuilder.build(days: try InsightsSourceLoader.load(from: container).days)
+        XCTAssertNil(after.country("KH"))
+        XCTAssertNotNil(after.country("TH"))
+        XCTAssertNotNil(after.country("VN"))
+
+        controller.undoLastChange()
+        XCTAssertNotNil(try context.fetch(FetchDescriptor<VisitPlace>()).first { $0.id == strayID })
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<MoveSegment>()), 2)
+    }
+
+    /// iOS reported a fifteen-minute visit sixteen seconds after a fix at 236 m/s.
+    func testAVisitStraightAfterAirlinerSpeedIsMidFlight() {
+        func fix(_ secondsBefore: TimeInterval, speed: Double, before arrival: Date) -> LocationSample {
+            LocationSample(location: CLLocation(
+                coordinate: CLLocationCoordinate2D(latitude: 12.64, longitude: 104.09),
+                altitude: 10_000, horizontalAccuracy: 13, verticalAccuracy: -1,
+                course: -1, speed: speed, timestamp: arrival.addingTimeInterval(-secondsBefore)
+            ), source: .significantChange, dedupeKey: UUID().uuidString)
+        }
+        let arrival = date(8, 15)
+        XCTAssertTrue(MidFlightVisitFilter.isMidFlight(arrival: arrival, samples: [fix(16, speed: 236, before: arrival)]))
+        // A fast train or the landing roll long before the gate is not a reason.
+        XCTAssertFalse(MidFlightVisitFilter.isMidFlight(arrival: arrival, samples: [fix(16, speed: 85, before: arrival)]))
+        XCTAssertFalse(MidFlightVisitFilter.isMidFlight(arrival: arrival, samples: [fix(20 * 60, speed: 236, before: arrival)]))
+    }
+
     private func makeEditController(for context: ModelContext) -> (TimelineEditController, AppUndoController) {
         let controller = TimelineEditController()
         let undoController = AppUndoController()

@@ -14,6 +14,17 @@ struct InsightsTabView: View {
     @State private var isShowingYearReview = false
     @State private var connectionsSnapshot: MovesStatisticsSnapshot?
     @State private var isScrolled = false
+    @State private var pendingRemoval: PendingRemoval?
+    @Environment(\.timelineEditController) private var editController
+
+    private struct PendingRemoval: Identifiable {
+        let removal: InsightsRemoval
+        let closesPage: Bool
+        var id: String { removal.id }
+    }
+
+    /// One day with a stop or three is taken off at once; Undo is right there. More asks first.
+    private static let removalsWithoutAsking = 3
 
     private var calendar: Calendar { Calendar.autoupdatingCurrent }
 
@@ -83,6 +94,20 @@ struct InsightsTabView: View {
                 TripDetailView(tripID: tripID)
             }
         }
+        .environment(\.requestInsightsRemoval, InsightsRemovalRequest(perform: requestRemoval))
+        .confirmationDialog(
+            pendingRemoval.map(removalTitle) ?? Text(verbatim: ""),
+            isPresented: Binding(get: { pendingRemoval != nil }, set: { if !$0 { pendingRemoval = nil } }),
+            titleVisibility: .visible,
+            presenting: pendingRemoval
+        ) { pending in
+            Button(String(localized: "Remove"), role: .destructive) {
+                performRemoval(pending.removal, closesPage: pending.closesPage)
+            }
+            Button(String(localized: "Cancel"), role: .cancel) {}
+        } message: { pending in
+            Text("This takes ^[\(pending.removal.visitIDs.count) stop](inflect: true) off your timeline.")
+        }
         .onAppear {
             reload()
             applyRequestedTrip()
@@ -99,6 +124,42 @@ struct InsightsTabView: View {
         }
         .task {
             await PlaceGeocodeBackfill.runForegroundTrickle(in: modelContext.container)
+        }
+    }
+
+    private func requestRemoval(
+        _ scope: InsightsRemoval.Scope,
+        placeName: String,
+        stays: [InsightsGeography.Stay],
+        closesPage: Bool
+    ) {
+        let removal = InsightsRemoval.make(scope: scope, placeName: placeName, stays: stays, in: modelContext)
+        guard !removal.visitIDs.isEmpty else { return }
+        if removal.dayCount == 1, removal.visitIDs.count <= Self.removalsWithoutAsking {
+            performRemoval(removal, closesPage: closesPage)
+        } else {
+            pendingRemoval = PendingRemoval(removal: removal, closesPage: closesPage)
+        }
+    }
+
+    /// A dialog title is drawn as plain text and shows `inflect` markup as typed, so the
+    /// agreement ("1 day", "16 days") is worked out here first.
+    private func removalTitle(_ pending: PendingRemoval) -> Text {
+        let title = AttributedString(
+            localized: "Remove ^[\(pending.removal.dayCount) day](inflect: true) in \(pending.removal.placeName)?"
+        )
+        return Text(verbatim: String(title.characters))
+    }
+
+    private func performRemoval(_ removal: InsightsRemoval, closesPage: Bool) {
+        // The page would be left showing a place that is no longer in the history.
+        if closesPage, !path.isEmpty {
+            path.removeLast()
+        }
+        Task { @MainActor in
+            await store.deleteWhenNotReading {
+                editController?.removeVisits(ids: removal.visitIDs)
+            }
         }
     }
 
@@ -730,6 +791,17 @@ final class InsightsStore {
     /// The cache key of `snapshot`; nil while it is the empty placeholder.
     @ObservationIgnored
     private var snapshotKey: String?
+    /// Reads of the store still running. Each holds rows on a context of its own, and a
+    /// stop deleted under one of them aborts the app the moment it reads that row.
+    @ObservationIgnored
+    private var readsInFlight = 0
+    @ObservationIgnored
+    private var readWaiters: [CheckedContinuation<Void, Never>] = []
+    /// While a delete waits for the reads above, new ones wait for it.
+    @ObservationIgnored
+    private var readHolds = 0
+    @ObservationIgnored
+    private var heldReload: ModelContainer?
 
     init(now: Date = .now, calendar: Calendar = .autoupdatingCurrent) {
         let year = calendar.component(.year, from: now)
@@ -740,16 +812,22 @@ final class InsightsStore {
 
     /// Re-reads the store. Never touches a model on the main actor.
     func reload(container: ModelContainer, now: Date = .now, calendar: Calendar = .autoupdatingCurrent) {
+        guard readHolds == 0 else {
+            heldReload = container
+            return
+        }
         loadGeneration += 1
         let load = loadGeneration
         let current = hasLoaded ? InsightsSource(days: records, hasRecordedActivity: hasRecordedActivity) : nil
         isComputing = true
+        readsInFlight += 1
         Task.detached(priority: .userInitiated) {
             let source: InsightsSource
             do {
                 source = try InsightsSourceLoader.load(from: container)
             } catch {
                 await MainActor.run {
+                    self.finishRead()
                     guard load == self.loadGeneration else { return }
                     self.isComputing = false
                 }
@@ -760,10 +838,34 @@ final class InsightsStore {
             // an unchanged read leaves the snapshot, and every view built on it, alone.
             let daysChanged = source.days != current?.days
             await MainActor.run {
+                self.finishRead()
                 guard load == self.loadGeneration else { return }
                 self.apply(source, daysChanged: daysChanged, now: now, calendar: calendar)
             }
         }
+    }
+
+    /// Runs `delete` once the reads already running have finished, holding back any that
+    /// would start meanwhile, then lets a held reload go.
+    func deleteWhenNotReading(_ delete: () -> Void) async {
+        readHolds += 1
+        if readsInFlight > 0 {
+            await withCheckedContinuation { readWaiters.append($0) }
+        }
+        delete()
+        readHolds -= 1
+        if readHolds == 0, let container = heldReload {
+            heldReload = nil
+            reload(container: container)
+        }
+    }
+
+    private func finishRead() {
+        readsInFlight -= 1
+        guard readsInFlight == 0 else { return }
+        let waiters = readWaiters
+        readWaiters = []
+        waiters.forEach { $0.resume() }
     }
 
     /// Takes values already read off the store; tests and the loader both end here.

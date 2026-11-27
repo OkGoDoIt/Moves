@@ -1,6 +1,25 @@
 import MapKit
 import SwiftUI
 
+/// Asks the Insights tab to take days in a country or city off the timeline.
+struct InsightsRemovalRequest {
+    var perform: (InsightsRemoval.Scope, String, [InsightsGeography.Stay], Bool) -> Void = { _, _, _, _ in }
+
+    /// `closesPage` when the page asking shows nothing else once these days are gone.
+    func callAsFunction(
+        _ scope: InsightsRemoval.Scope,
+        placeName: String,
+        stays: [InsightsGeography.Stay],
+        closesPage: Bool = false
+    ) {
+        perform(scope, placeName, stays, closesPage)
+    }
+}
+
+extension EnvironmentValues {
+    @Entry var requestInsightsRemoval = InsightsRemovalRequest()
+}
+
 /// One country: where in it, how long, and when.
 struct InsightsCountryView: View {
     let country: InsightsGeography.Country
@@ -24,7 +43,8 @@ struct InsightsCountryView: View {
                     }
                 }
             }
-            InsightsStaySections(stays: country.stays)
+            InsightsStaySections(scope: .country(country.code), placeName: country.name, stays: country.stays)
+            InsightsRemoveAllSection(scope: .country(country.code), placeName: country.name, stays: country.stays)
         }
         .insightsRegionList()
         .task(id: country.code) {
@@ -84,7 +104,8 @@ struct InsightsCityView: View {
                 stays: city.stays,
                 extra: (String(localized: "Visits"), city.visitCount.formatted())
             )
-            InsightsStaySections(stays: city.stays)
+            InsightsStaySections(scope: .city(city.id), placeName: city.name, stays: city.stays)
+            InsightsRemoveAllSection(scope: .city(city.id), placeName: city.name, stays: city.stays)
         }
         .insightsRegionList()
     }
@@ -169,8 +190,11 @@ private struct InsightsRegionSummary: View {
 
 /// When the person was there, newest first, by year. A row opens that day on the timeline.
 private struct InsightsStaySections: View {
+    let scope: InsightsRemoval.Scope
+    let placeName: String
     let stays: [InsightsGeography.Stay]
     @EnvironmentObject private var rootController: MovesRootController
+    @Environment(\.requestInsightsRemoval) private var requestRemoval
     @State private var visibleCount = 40
 
     var body: some View {
@@ -180,8 +204,7 @@ private struct InsightsStaySections: View {
             Section(String(year)) {
                 ForEach(years[year] ?? [], id: \.self) { stay in
                     Button {
-                        rootController.selectedTab = .timeline
-                        rootController.requestedJumpDate = stay.start
+                        openInTimeline(stay)
                     } label: {
                         HStack(spacing: 8) {
                             Text(dates(of: stay))
@@ -197,6 +220,30 @@ private struct InsightsStaySections: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityHint(String(localized: "Opens the day on the timeline"))
+                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                        Button {
+                            remove(stay)
+                        } label: {
+                            Label(String(localized: "Remove"), systemImage: "trash")
+                        }
+                        .tint(.red)
+                    }
+                    .contextMenu {
+                        Button {
+                            openInTimeline(stay)
+                        } label: {
+                            Label(String(localized: "Show in Timeline"), systemImage: "calendar")
+                        }
+                        Button(role: .destructive) {
+                            remove(stay)
+                        } label: {
+                            Label(
+                                stay.dayCount == 1 ? String(localized: "Remove This Day") : String(localized: "Remove These Days"),
+                                systemImage: "trash"
+                            )
+                        }
+                    }
+                    .accessibilityAction(named: Text("Remove")) { remove(stay) }
                 }
             }
         }
@@ -208,6 +255,15 @@ private struct InsightsStaySections: View {
         }
     }
 
+    private func openInTimeline(_ stay: InsightsGeography.Stay) {
+        rootController.selectedTab = .timeline
+        rootController.requestedJumpDate = stay.start
+    }
+
+    private func remove(_ stay: InsightsGeography.Stay) {
+        requestRemoval(scope, placeName: placeName, stays: [stay], closesPage: stays.count == 1)
+    }
+
     /// The year is in the section header, unless the stay runs into another one.
     private func dates(of stay: InsightsGeography.Stay) -> String {
         let calendar = Calendar.autoupdatingCurrent
@@ -216,6 +272,26 @@ private struct InsightsStaySections: View {
         let sameYear = calendar.isDate(stay.start, equalTo: stay.end, toGranularity: .year)
         let style = Date.IntervalFormatStyle().month(.abbreviated).day()
         return (stay.start..<stay.end).formatted(sameYear ? style : style.year())
+    }
+}
+
+/// For a place the person was never at: every day there comes off the timeline.
+private struct InsightsRemoveAllSection: View {
+    let scope: InsightsRemoval.Scope
+    let placeName: String
+    let stays: [InsightsGeography.Stay]
+    @Environment(\.requestInsightsRemoval) private var requestRemoval
+
+    var body: some View {
+        Section {
+            Button(role: .destructive) {
+                requestRemoval(scope, placeName: placeName, stays: stays, closesPage: true)
+            } label: {
+                Text(String(localized: "Remove \(placeName)"))
+                    .font(.system(.callout, design: .rounded, weight: .semibold))
+                    .frame(maxWidth: .infinity)
+            }
+        }
     }
 }
 

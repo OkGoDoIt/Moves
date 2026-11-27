@@ -305,6 +305,7 @@ struct InsightsWorldView: View {
                 NavigationLink(value: InsightsRoute.country(country.code)) {
                     InsightsCountryRow(country: country)
                 }
+                .insightsRemoveSwipe(.country(country.code), placeName: country.name, stays: country.stays)
             }
         } header: {
             continentHeader(group)
@@ -325,6 +326,7 @@ struct InsightsWorldView: View {
                     NavigationLink(value: InsightsRoute.city(city.id)) {
                         InsightsCityRow(city: city)
                     }
+                    .insightsRemoveSwipe(.city(city.id), placeName: city.name, stays: city.stays)
                 }
                 if limit < country.cities.count {
                     Button(String(localized: "Show all \(country.cities.count)")) {
@@ -465,6 +467,39 @@ struct InsightsCityRow: View {
             InsightsDayCount(days: city.dayCount)
         }
         .accessibilityElement(children: .combine)
+    }
+}
+
+private struct InsightsRemoveSwipe: ViewModifier {
+    let scope: InsightsRemoval.Scope
+    let placeName: String
+    let stays: [InsightsGeography.Stay]
+    @Environment(\.requestInsightsRemoval) private var requestRemoval
+
+    func body(content: Content) -> some View {
+        content
+            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                Button {
+                    requestRemoval(scope, placeName: placeName, stays: stays)
+                } label: {
+                    Label(String(localized: "Remove"), systemImage: "trash")
+                }
+                .tint(.red)
+            }
+            .accessibilityAction(named: Text("Remove")) {
+                requestRemoval(scope, placeName: placeName, stays: stays)
+            }
+    }
+}
+
+private extension View {
+    /// The days the row counts, which in a year are only that year's.
+    func insightsRemoveSwipe(
+        _ scope: InsightsRemoval.Scope,
+        placeName: String,
+        stays: [InsightsGeography.Stay]
+    ) -> some View {
+        modifier(InsightsRemoveSwipe(scope: scope, placeName: placeName, stays: stays))
     }
 }
 
