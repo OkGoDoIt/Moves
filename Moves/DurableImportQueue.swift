@@ -107,6 +107,12 @@ final class DurableImportQueue: ObservableObject {
         for publisher in [routes.objectWillChange, google.objectWillChange, archive.objectWillChange] {
             publisher.sink { [weak self] in self?.objectWillChange.send() }.store(in: &observers)
         }
+        NotificationCenter.default.publisher(for: Notification.Name.NSProcessInfoPowerStateDidChange)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                MainActor.assumeIsolated { self?.stopIfBackgroundWorkIsNotAllowed() }
+            }
+            .store(in: &observers)
     }
 
     var current: SavedImport? { jobs.first { $0.state == .running } }
@@ -175,7 +181,20 @@ final class DurableImportQueue: ObservableObject {
     }
     func sceneChanged(_ phase: ScenePhase) {
         isActive = phase == .active
-        if isActive { startIfNeeded() }
+        if isActive { startIfNeeded() } else { stopIfBackgroundWorkIsNotAllowed() }
+    }
+
+    /// While Moves is open an import always runs; after the person leaves it goes on only
+    /// with a continued task and while Low Power Mode is off.
+    private var mayWork: Bool {
+        isActive || (continuedTask != nil && !ProcessInfo.processInfo.isLowPowerModeEnabled)
+    }
+
+    /// Low Power Mode in the background: stop now, and carry on the next time Moves is open.
+    private func stopIfBackgroundWorkIsNotAllowed() {
+        guard !isActive, ProcessInfo.processInfo.isLowPowerModeEnabled else { return }
+        systemInterrupted()
+        releaseContinuedTask(success: false)
     }
     @discardableResult private func update(_ id: UUID, _ change: (inout SavedImport) -> Void) -> Bool {
         guard storageError == nil, let index = jobs.firstIndex(where: { $0.id == id }) else { return false }
@@ -185,11 +204,11 @@ final class DurableImportQueue: ObservableObject {
         catch { storageError = error.localizedDescription; runner?.cancel(); return false }
     }
     private func startIfNeeded() {
-        guard runner == nil, isActive || continuedTask != nil, storageError == nil,
+        guard runner == nil, mayWork, storageError == nil,
               jobs.contains(where: { $0.state == .queued }) else { return }
         runner = Task {
             await TimelineSchemaUpgrader.waitUntilFinished()
-            while !Task.isCancelled, isActive || continuedTask != nil, let job = jobs.first(where: { $0.state == .queued }) {
+            while !Task.isCancelled, mayWork, let job = jobs.first(where: { $0.state == .queued }) {
                 guard update(job.id, { $0.state = .running }) else { break }
                 if isActive, continuedTask == nil {
                     requestContinuing(for: job)
@@ -278,6 +297,11 @@ final class DurableImportQueue: ObservableObject {
     private func hold(_ task: BGContinuedProcessingTask) {
         guard current != nil || jobs.contains(where: { $0.state == .queued }) else {
             task.setTaskCompleted(success: true)
+            return
+        }
+        if !isActive, ProcessInfo.processInfo.isLowPowerModeEnabled {
+            task.setTaskCompleted(success: false)
+            stopIfBackgroundWorkIsNotAllowed()
             return
         }
         continuedTask = task

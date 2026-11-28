@@ -244,7 +244,9 @@ The upstream tree committed `build/`, `.DS_Store`, and `xcuserdata/`. This fork 
 
 Read `UPSTREAM.md` before pulling upstream again. Reviewed tip is not merged ancestry.
 The local `DurableImportQueue` owns route/Google/archive imports. A running import holds a
-continued-processing task (`importNow.*`), so it goes on after the person leaves. Work the
+continued-processing task (`importNow.*`), so it goes on after the person leaves, but only
+while Low Power Mode is off (Roger's rule; turning it on stops the import until Moves is
+next open). Work the
 system or a relaunch interrupted starts again by itself the next time Moves is open; only
 the person's own Pause waits for Resume, and a job cut off three times in a row stops as
 failed. Re-running must preserve corrections and removal tombstones. `DetailedExploration`
