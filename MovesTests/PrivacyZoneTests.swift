@@ -482,10 +482,26 @@ extension PrivacyZoneTests {
         interrupted.state = .running
         var finished = SavedImport(kind: .routes, names: ["route.gpx"])
         finished.state = .completed
-        try store.save([interrupted, finished])
+        var systemPaused = SavedImport(kind: .archive, names: ["moves.zip"])
+        systemPaused.state = .paused
+        systemPaused.pausedByPerson = false
+        var personPaused = SavedImport(kind: .routes, names: ["ride.gpx"])
+        personPaused.state = .paused
+        personPaused.pausedByPerson = true
+        var legacyPaused = SavedImport(kind: .routes, names: ["old.gpx"])
+        legacyPaused.state = .paused
+        try store.save([interrupted, finished, systemPaused, personPaused, legacyPaused])
         let restored = try store.load()
-        XCTAssertEqual(restored.map(\.state), [.paused, .completed])
+        XCTAssertEqual(restored.map(\.state), [.queued, .completed, .queued, .paused, .paused],
+                       "interrupted and system-paused work carries on; the person's own pause stays")
         XCTAssertEqual(restored.first?.id, interrupted.id)
+        XCTAssertEqual(restored.first?.interruptions, 1)
+
+        // A job that keeps getting cut off stops instead of trying on every launch.
+        var crashing = interrupted
+        crashing.interruptions = SavedImportStore.interruptionLimit - 1
+        try store.save([crashing])
+        XCTAssertEqual(try store.load().first?.state, .failed)
         XCTAssertEqual(store.sources(for: interrupted).first?.lastPathComponent, "Timeline.json")
         let corrupt = Data("not JSON".utf8)
         try corrupt.write(to: store.manifest)
@@ -599,8 +615,8 @@ extension PrivacyZoneTests {
         try FileManager.default.removeItem(at: source)
         let restored = DurableImportQueue(container: container, directory: directory)
         let id = try XCTUnwrap(restored.jobs.first?.id)
-        XCTAssertEqual(restored.jobs.first?.state, .paused)
-        restored.resume(id)
+        XCTAssertEqual(restored.jobs.first?.state, .queued, "waiting work starts by itself once Moves is open")
+        restored.sceneChanged(.active)
         for _ in 0..<200 {
             if restored.jobs.first?.state == .completed || restored.jobs.first?.state == .failed { break }
             try await Task.sleep(for: .milliseconds(100))

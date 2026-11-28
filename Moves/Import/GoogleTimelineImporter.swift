@@ -11,6 +11,10 @@ struct GoogleTimelineImportReport: Sendable {
     var recordsRead = 0
     var recordsSkippedAsDuplicate = 0
     var skippedSegmentCount = 0
+    /// Records.json fixes left out because another device on the account recorded them.
+    var recordsFromOtherDevices = 0
+    /// Photo-based stops and trips the imported history replaced.
+    var photoItemsReplaced = 0
     var formats: Set<GoogleTimelineFormat> = []
     /// True when a Records.json ended before its `locations` array did.
     var recordsWereIncomplete = false
@@ -23,6 +27,14 @@ struct GoogleTimelineImportReport: Sendable {
                 text += " and skipped \(recordsSkippedAsDuplicate) already covered by semantic history"
             }
             text += "."
+        }
+        if recordsFromOtherDevices > 0 {
+            text += " Left out \(recordsFromOtherDevices.formatted()) point\(recordsFromOtherDevices == 1 ? "" : "s") from another device on your Google account."
+        }
+        if photoItemsReplaced > 0 {
+            text += photoItemsReplaced == 1
+                ? " Replaced 1 photo-based stop or trip with your Google history."
+                : " Replaced \(photoItemsReplaced.formatted()) photo-based stops and trips with your Google history."
         }
         if skippedSegmentCount > 0 {
             text += " Ignored \(skippedSegmentCount) empty activity segment\(skippedSegmentCount == 1 ? "" : "s")."
@@ -170,7 +182,7 @@ enum GoogleTimelineSourceCollector {
 
     private static func appendFile(_ url: URL, into collected: inout GoogleTimelineCollectedSources) throws {
         let name = url.lastPathComponent.lowercased()
-        if name == "settings.json" || name == "archive_browser.html" {
+        if name == "settings.json" || name == "archive_browser.html" || name.hasPrefix("._") {
             return
         }
         guard name.hasSuffix(".json") else { return }
@@ -239,8 +251,9 @@ enum GoogleTimelineImportPipeline {
 
         for (index, url) in collected.semanticURLs.enumerated() {
             try Task.checkCancellation()
+            // Fractions follow where the time goes: saving is about three quarters of it.
             progress(
-                0.02 + 0.28 * Double(index) / Double(semanticTotal),
+                0.005 + 0.02 * Double(index) / Double(semanticTotal),
                 "Reading \(url.lastPathComponent)…"
             )
             let data = try Data(contentsOf: url, options: [.mappedIfSafe])
@@ -252,7 +265,7 @@ enum GoogleTimelineImportPipeline {
 
         for url in collected.onDeviceURLs {
             try Task.checkCancellation()
-            progress(0.32, "Reading \(url.lastPathComponent)…")
+            progress(0.025, "Reading \(url.lastPathComponent)…")
             let data = try Data(contentsOf: url, options: [.mappedIfSafe])
             draft.append(try GoogleTimelineParser.parseOnDevice(data: data))
             report.formats.insert(.onDevice)
@@ -260,69 +273,95 @@ enum GoogleTimelineImportPipeline {
 
         report.skippedSegmentCount += draft.skippedSegmentCount
         let occupancy = GoogleOccupancyIndex(windows: draft.occupancy)
-        let semanticTimeline = draft.makeTimeline()
 
-        let repository = SwiftDataTimelineRepository(modelContainer: container)
-        if !semanticTimeline.isEmpty {
-            progress(0.35, "Saving places and trips…")
-            let partial = try repository.importLocationLog(
-                semanticTimeline,
-                source: .googleTimelineImport
-            ) { fraction, text in
-                progress(0.35 + 0.30 * fraction, text)
-            }
-            report.merge(partial)
-        }
-
+        // Records fill only the hours semantic history leaves out, one gap at a time.
+        var gapRecords: [Int: [GoogleTimelineRecord]] = [:]
         for url in collected.recordsURLs {
             try Task.checkCancellation()
-            progress(0.66, "Streaming \(url.lastPathComponent)…")
-            var gapPoints: [LocationLogPoint] = []
+            progress(0.03, "Reading \(url.lastPathComponent)…")
             var read = 0
-            var skipped = 0
+            var covered = 0
             var incomplete = false
-            _ = try GoogleTimelineRecordsScanner.forEachRecord(at: url, progress: { count, bytes in
-                let fraction = min(Double(bytes) / 350_000_000, 1)
-                progress(0.66 + 0.16 * fraction, "Streaming Records.json… \(count) points")
+            let fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Double.init) ?? 350_000_000
+            _ = try GoogleTimelineRecordsScanner.forEachDeviceRecord(at: url, progress: { count, bytes in
+                let fraction = min(Double(bytes) / max(fileSize, 1), 1)
+                progress(0.03 + 0.20 * fraction, "Reading Records.json… \(count.formatted()) points")
             }, onIncomplete: {
                 incomplete = true
-            }) { point in
+            }) { record in
                 if Task.isCancelled { return false }
                 read += 1
-                if occupancy.covers(point) {
-                    skipped += 1
+                if occupancy.covers(record.point) {
+                    covered += 1
                 } else {
-                    gapPoints.append(point)
+                    gapRecords[occupancy.gapNumber(for: record.point.timestamp), default: []].append(record)
                 }
                 return true
             }
             try Task.checkCancellation()
             report.recordsRead += read
-            report.recordsSkippedAsDuplicate += skipped
+            report.recordsSkippedAsDuplicate += covered
             report.formats.insert(.records)
             if incomplete {
                 report.recordsWereIncomplete = true
             }
+        }
 
-            if !gapPoints.isEmpty {
-                progress(0.83, "Finding stays in Records.json…")
-                let timeline = LocationLogSegmenter().segment(gapPoints)
-                if !timeline.isEmpty {
-                    let partial = try repository.importLocationLog(
-                        timeline,
-                        source: .googleTimelineImport
-                    ) { fraction, text in
-                        progress(0.84 + 0.12 * fraction, text)
+        if !gapRecords.isEmpty {
+            progress(0.23, "Finding stays in Records.json…")
+            let segmenter = LocationLogSegmenter()
+            for records in gapRecords.values {
+                try Task.checkCancellation()
+                let (points, dropped) = GoogleTimelineDeviceFilter.mainDevicePoints(records)
+                report.recordsFromOtherDevices += dropped
+                for segment in segmenter.segment(points).segments {
+                    switch segment {
+                    case .stay(let stay):
+                        draft.stays.append(stay)
+                    case .move(let move):
+                        draft.moves.append(move)
                     }
-                    report.merge(partial)
                 }
             }
+            gapRecords = [:]
         }
 
-        if report.log.placeCount == 0 && report.log.moveCount == 0 && report.recordsRead == 0
-            && draft.stays.isEmpty && draft.moves.isEmpty {
-            throw GoogleTimelineImportError.noTimelineData
+        let timeline = draft.makeTimeline()
+        if timeline.isEmpty {
+            if report.recordsRead == 0 {
+                throw GoogleTimelineImportError.noTimelineData
+            }
+            progress(1, "Done")
+            return report
         }
+
+        let repository = SwiftDataTimelineRepository(modelContainer: container)
+        progress(0.25, "Saving places and trips…")
+        // Saving runs oldest first, so say how far through the history it has got.
+        let segmentDates = timeline.segments.map { segment -> Date in
+            switch segment {
+            case .stay(let stay): stay.arrivalDate
+            case .move(let move): move.startDate
+            }
+        }
+        let monthFormat = Date.FormatStyle().month(.wide).year()
+        let partial = try repository.importLocationLog(
+            timeline,
+            source: .googleTimelineImport
+        ) { fraction, text in
+            let index = min(Int(fraction * Double(segmentDates.count)), segmentDates.count - 1)
+            let shown = fraction < 0.98 && index >= 0
+                ? String(localized: "Saved your history through \(segmentDates[index].formatted(monthFormat))")
+                : text
+            progress(0.25 + 0.68 * fraction, shown)
+        }
+        report.merge(partial)
+
+        try Task.checkCancellation()
+        progress(0.94, "Replacing photo-based stops…")
+        let windows = draft.stays.map { DateInterval(start: $0.arrivalDate, end: max($0.departureDate, $0.arrivalDate)) }
+            + draft.moves.map { DateInterval(start: $0.startDate, end: max($0.endDate, $0.startDate)) }
+        report.photoItemsReplaced = try repository.retirePhotoInferredItems(coveredBy: windows)
 
         try repository.saveIfNeeded()
 
@@ -334,7 +373,7 @@ enum GoogleTimelineImportPipeline {
                 resolver: resolver,
                 progress: { done, total in
                     progress(
-                        total > 0 ? 0.96 + 0.03 * Double(done) / Double(total) : 0.99,
+                        total > 0 ? 0.95 + 0.045 * Double(done) / Double(total) : 0.995,
                         "Naming places… \(done) of \(total)"
                     )
                 },
@@ -349,6 +388,37 @@ enum GoogleTimelineImportPipeline {
 
         progress(1, "Done")
         return report
+    }
+}
+
+/// Keeps one device's fixes where several on the account report the same hours.
+///
+/// A tablet left at home keeps sending its spot while the phone travels, which draws a
+/// zigzag between them. In each hour, the device with the most fixes is the one being
+/// carried (a moving phone reports far more often); hour by hour, so a new phone takes
+/// over when the old one stops. Fixes without a device tag (older exports) count as one device.
+enum GoogleTimelineDeviceFilter {
+    static let window: TimeInterval = 60 * 60
+
+    static func mainDevicePoints(_ records: [GoogleTimelineRecord]) -> (points: [LocationLogPoint], dropped: Int) {
+        var hours: [Int: [GoogleTimelineRecord]] = [:]
+        for record in records {
+            hours[Int((record.point.timestamp.timeIntervalSince1970 / window).rounded(.down)), default: []].append(record)
+        }
+        var points: [LocationLogPoint] = []
+        points.reserveCapacity(records.count)
+        for hour in hours.values {
+            var counts: [Int?: Int] = [:]
+            for record in hour {
+                counts[record.deviceTag, default: 0] += 1
+            }
+            let main = counts.max { lhs, rhs in
+                lhs.value != rhs.value ? lhs.value < rhs.value : (lhs.key ?? .min) > (rhs.key ?? .min)
+            }?.key
+            points.append(contentsOf: hour.lazy.filter { $0.deviceTag == main }.map(\.point))
+        }
+        points.sort { $0.timestamp < $1.timestamp }
+        return (points, records.count - points.count)
     }
 }
 

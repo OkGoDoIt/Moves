@@ -21,14 +21,27 @@ enum GoogleTimelineRecordsScanner {
         onIncomplete: (() -> Void)? = nil,
         body: (LocationLogPoint) throws -> Bool
     ) throws -> Int {
+        try forEachDeviceRecord(at: url, progress: progress, onIncomplete: onIncomplete) { record in
+            try body(record.point)
+        }
+    }
+
+    /// Same walk, keeping the `deviceTag` of the phone or tablet that recorded each fix.
+    @discardableResult
+    static func forEachDeviceRecord(
+        at url: URL,
+        progress: ((Int, Int64) -> Void)? = nil,
+        onIncomplete: (() -> Void)? = nil,
+        body: (GoogleTimelineRecord) throws -> Bool
+    ) throws -> Int {
         let stream = try InputStream(url: url).unwrapped(url.lastPathComponent)
         var emitted = 0
         _ = try forEachObject(in: stream, arrayKey: "locations", progress: progress, onIncomplete: onIncomplete) { objectData in
-            guard let point = GoogleTimelineParser.parseRecordObject(data: objectData) else {
-                return true
-            }
+            // A million records each leave a parsed dictionary behind until the pool drains.
+            let record = autoreleasepool { GoogleTimelineParser.parseRecordWithDevice(data: objectData) }
+            guard let record else { return true }
             emitted += 1
-            return try body(point)
+            return try body(record)
         }
         return emitted
     }

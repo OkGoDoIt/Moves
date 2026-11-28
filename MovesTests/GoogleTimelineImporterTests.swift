@@ -186,7 +186,7 @@ final class GoogleTimelineImporterTests: XCTestCase {
 
     func testSemanticMonthCoversEdgeCases() throws {
         let draft = try GoogleTimelineParser.parseSemanticMonth(data: try fixtureData("semantic-month.json"))
-        XCTAssertEqual(draft.stays.count, 5, "Home, Cafe, Mall, Bookstore child, Office")
+        XCTAssertEqual(draft.stays.count, 4, "Home, Cafe, Mall, Office; the Bookstore child is inside the Mall stay")
         XCTAssertEqual(draft.moves.count, 5, "walk, car, bus, flight, empty-start vehicle")
         XCTAssertEqual(draft.skippedSegmentCount, 1, "empty start/end with no path is skipped")
 
@@ -194,7 +194,7 @@ final class GoogleTimelineImporterTests: XCTestCase {
         XCTAssertTrue(names.contains("Home"))
         XCTAssertTrue(names.contains("Cafe"))
         XCTAssertTrue(names.contains("Mall"))
-        XCTAssertTrue(names.contains("Bookstore"))
+        XCTAssertFalse(names.contains("Bookstore"), "a child visit would overlap its parent")
         XCTAssertTrue(names.contains("Office"))
 
         XCTAssertTrue(draft.stays.contains { $0.name == "Cafe" && $0.isUserConfirmed })
@@ -240,6 +240,94 @@ final class GoogleTimelineImporterTests: XCTestCase {
             timestamp: date("2020-01-02T08:05:00Z")
         )
         XCTAssertTrue(index.covers(walkTime), "Records during a semantic trip are skipped by time")
+
+        let farDuringHome = LocationLogPoint(latitude: 48.0, longitude: 2.0, timestamp: date("2020-01-02T03:00:00Z"))
+        XCTAssertTrue(index.covers(farDuringHome), "a far fix during a semantic visit is noise or another device")
+
+        let beforeHome = index.gapNumber(for: date("2019-12-30T03:00:00Z"))
+        let afterAll = index.gapNumber(for: date("2020-01-04T03:00:00Z"))
+        XCTAssertNotEqual(beforeHome, afterAll, "fixes either side of semantic history are separate gaps")
+    }
+
+    func testDeviceFilterKeepsTheCarriedPhoneEachHour() {
+        let start = date("2015-06-01T08:00:00Z")
+        var records: [GoogleTimelineRecord] = []
+        // The phone walks east and reports every minute; the tablet at home every ten.
+        for minute in 0..<120 {
+            let time = start.addingTimeInterval(TimeInterval(minute * 60))
+            records.append(GoogleTimelineRecord(point: LocationLogPoint(latitude: 37.77, longitude: -122.42 + Double(minute) * 0.0005, timestamp: time), deviceTag: 1))
+            if minute.isMultiple(of: 10) {
+                records.append(GoogleTimelineRecord(point: LocationLogPoint(latitude: 37.70, longitude: -122.47, timestamp: time), deviceTag: 2))
+            }
+        }
+        // Next day the person has a new phone.
+        let nextDay = start.addingTimeInterval(24 * 60 * 60)
+        for minute in 0..<30 {
+            records.append(GoogleTimelineRecord(point: LocationLogPoint(latitude: 37.80, longitude: -122.40, timestamp: nextDay.addingTimeInterval(TimeInterval(minute * 60))), deviceTag: 3))
+        }
+
+        let (points, dropped) = GoogleTimelineDeviceFilter.mainDevicePoints(records)
+        XCTAssertEqual(dropped, 12)
+        XCTAssertEqual(points.count, 150)
+        XCTAssertFalse(points.contains { $0.latitude == 37.70 })
+        XCTAssertEqual(points.map(\.timestamp), points.map(\.timestamp).sorted())
+    }
+
+    func testGoogleHistoryReplacesOverlappingPhotoStopsAndKeepsTheirPhotos() async throws {
+        let container = try makeInMemoryContainer()
+        let seed = ModelContext(container)
+        let day = DayTimeline(dayStart: date("2020-03-01T00:00:00Z"))
+        seed.insert(day)
+        func photoVisit(_ from: String, _ to: String, latitude: Double, longitude: Double) -> VisitPlace {
+            let visit = VisitPlace(arrivalDate: date(from), departureDate: date(to), latitude: latitude, longitude: longitude, horizontalAccuracy: 50)
+            visit.origin = .photoInferred
+            visit.dayTimeline = day
+            seed.insert(visit)
+            return visit
+        }
+        // Google says the person spent 10:00–12:00 at a museum.
+        let duringMuseum = photoVisit("2020-03-01T10:30:00Z", "2020-03-01T11:30:00Z", latitude: 48.875, longitude: 2.35)
+        let named = photoVisit("2020-03-01T11:00:00Z", "2020-03-01T11:20:00Z", latitude: 48.84, longitude: 2.30)
+        named.userLabel = "Picnic"
+        let later = photoVisit("2020-03-01T18:00:00Z", "2020-03-01T19:00:00Z", latitude: 48.80, longitude: 2.20)
+        let photo = PhotoAttachment(assetLocalIdentifier: "museum-photo", capturedAt: date("2020-03-01T11:00:00Z"), latitude: 48.875, longitude: 2.35)
+        photo.visitPlace = duringMuseum
+        photo.dayTimeline = day
+        seed.insert(photo)
+        let walk = MoveSegment(dedupeKey: "photo-walk", startDate: date("2020-03-01T11:30:00Z"), endDate: date("2020-03-01T18:00:00Z"), transportMode: .walking, distanceMeters: 9_000, stepCount: nil)
+        walk.origin = .photoInferred
+        walk.startPlace = duringMuseum
+        walk.endPlace = later
+        walk.dayTimeline = day
+        seed.insert(walk)
+        try seed.save()
+        let museumPhotoVisitID = duringMuseum.id
+        let namedID = named.id
+        let laterID = later.id
+
+        let semantic = #"{"timelineObjects":[{"placeVisit":{"location":{"latitudeE7":488606111,"longitudeE7":23376362,"name":"Louvre Museum"},"duration":{"startTimestamp":"2020-03-01T10:00:00Z","endTimestamp":"2020-03-01T12:00:00Z"}}}]}"#
+        let url = FileManager.default.temporaryDirectory.appending(path: "photo-yield-\(UUID().uuidString).json")
+        try Data(semantic.utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let report = try await GoogleTimelineImportPipeline.run(
+            collected: GoogleTimelineCollectedSources(semanticURLs: [url]),
+            container: container,
+            skipNaming: true,
+            progress: { _, _ in }
+        )
+        XCTAssertEqual(report.photoItemsReplaced, 2, "the stop inside the museum visit and the walk that left it")
+
+        let context = ModelContext(container)
+        let visits = try context.fetch(FetchDescriptor<VisitPlace>())
+        let museumPhotoVisit = try XCTUnwrap(visits.first { $0.id == museumPhotoVisitID })
+        XCTAssertNil(museumPhotoVisit.dayTimeline, "retired, not deleted")
+        XCTAssertNotNil(visits.first { $0.id == namedID }?.dayTimeline, "a stop the person named stays")
+        XCTAssertNotNil(visits.first { $0.id == laterID }?.dayTimeline, "a stop outside the Google history stays")
+        let moved = try XCTUnwrap(context.fetch(FetchDescriptor<PhotoAttachment>()).first)
+        XCTAssertEqual(moved.visitPlace?.autoLabel, "Louvre Museum", "the photo moves to the stay that covers it")
+        let liveMoves = try context.fetch(FetchDescriptor<MoveSegment>.live())
+        XCTAssertFalse(liveMoves.contains { $0.dedupeKey == "photo-walk" })
     }
 
     // MARK: On-device
@@ -272,7 +360,7 @@ final class GoogleTimelineImporterTests: XCTestCase {
         )
 
         XCTAssertEqual(report.semanticFileCount, 1)
-        XCTAssertGreaterThanOrEqual(report.log.placeCount, 5)
+        XCTAssertGreaterThanOrEqual(report.log.placeCount, 4)
         XCTAssertGreaterThanOrEqual(report.log.moveCount, 5)
 
         let context = ModelContext(container)
@@ -280,7 +368,7 @@ final class GoogleTimelineImporterTests: XCTestCase {
         let moves = try context.fetch(FetchDescriptor<MoveSegment>())
         XCTAssertTrue(places.contains { $0.autoLabel == "Home" && $0.origin == .imported })
         XCTAssertTrue(places.contains { $0.autoLabel == "Cafe" })
-        XCTAssertTrue(places.contains { $0.autoLabel == "Bookstore" }, "childVisits become extra stays")
+        XCTAssertFalse(places.contains { $0.autoLabel == "Bookstore" }, "a child visit is inside its parent's stay")
         XCTAssertTrue(moves.contains { $0.transportMode == .train && $0.origin == .imported })
         XCTAssertTrue(moves.contains { $0.transportMode == .plane })
         XCTAssertTrue(moves.allSatisfy { $0.transportModeSource == .imported })
@@ -529,4 +617,261 @@ private extension Data {
         append(UInt8((value >> 16) & 0xFF))
         append(UInt8((value >> 24) & 0xFF))
     }
+}
+
+// MARK: - Full Takeout on the real store
+
+/// Runs the whole Google Takeout export from `import-staging/GoogleTimeline/full-2024-12/`
+/// against a copy of the latest phone backup, the way the phone would, and audits the result.
+///
+/// Opt-in, because it takes minutes: pass `TEST_RUNNER_MOVES_GOOGLE_FULL=1` to `xcodebuild test`.
+/// The imported store is kept in `import-staging/google-full-result/` for a look in the Simulator
+/// (`SIMCTL_CHILD_MOVES_SIMULATOR_STORE=<that folder>/default.store`).
+final class GoogleTimelineFullImportTests: XCTestCase {
+    @MainActor
+    func testFullTakeoutImportsOntoTheRealStore() async throws {
+        guard ProcessInfo.processInfo.environment["MOVES_GOOGLE_FULL"] == "1" else {
+            throw XCTSkip("Set TEST_RUNNER_MOVES_GOOGLE_FULL=1 to run the full Google Timeline import")
+        }
+        let staging = Self.stagingRoot()
+        let export = staging.appending(path: "GoogleTimeline/full-2024-12", directoryHint: .isDirectory)
+        guard FileManager.default.fileExists(atPath: export.path) else {
+            throw XCTSkip("Copy the Takeout Location History folder into import-staging/GoogleTimeline/full-2024-12/")
+        }
+
+        let result = staging.appending(path: "google-full-result", directoryHint: .isDirectory)
+        try? FileManager.default.removeItem(at: result)
+        try FileManager.default.createDirectory(at: result, withIntermediateDirectories: true)
+        let backup = try Self.latestDeviceBackupStore(in: staging)
+        for suffix in ["", "-wal", "-shm"] {
+            let source = URL(fileURLWithPath: backup.path + suffix)
+            guard FileManager.default.fileExists(atPath: source.path) else { continue }
+            try FileManager.default.copyItem(at: source, to: result.appending(path: "default.store" + suffix))
+        }
+        let storeURL = result.appending(path: "default.store")
+        print("FULL backup: \(backup.path)")
+
+        let container = try Self.makeContainer(storeURL: storeURL)
+        let before = try Self.audit(container)
+        print("FULL before: \(before)")
+
+        let collected = try GoogleTimelineSourceCollector.collect(from: [export])
+        print("FULL sources: semantic=\(collected.semanticURLs.count) records=\(collected.recordsURLs.count) onDevice=\(collected.onDeviceURLs.count)")
+
+        let meter = MemoryMeter()
+        meter.start()
+        let clock = ContinuousClock()
+        let stages = StageLog(clock: clock, meter: meter)
+        let began = clock.now
+        let report = try await GoogleTimelineImportPipeline.run(
+            collected: collected,
+            container: container,
+            skipNaming: true,
+            progress: { fraction, text in stages.note(fraction, text) }
+        )
+        let elapsed = clock.now - began
+        meter.stop()
+        print("FULL elapsed: \(elapsed), peak footprint \(meter.peakMB) MB")
+        print("FULL report: \(report.summary)")
+        print("FULL report detail: places=\(report.log.placeCount) merged=\(report.log.mergedPlaceCount) moves=\(report.log.moveCount) mergedMoves=\(report.log.mergedMoveCount) samples=\(report.log.sampleCount) recordsRead=\(report.recordsRead) recordsCovered=\(report.recordsSkippedAsDuplicate) skippedSegments=\(report.skippedSegmentCount)")
+
+        let after = try Self.audit(container)
+        print("FULL after: \(after)")
+
+        XCTAssertGreaterThan(after.visits, before.visits)
+        XCTAssertEqual(after.movesWithoutEnds, before.movesWithoutEnds, "every imported trip has both ends")
+
+        // A second import of the same export must add nothing.
+        let again = try await GoogleTimelineImportPipeline.run(
+            collected: try GoogleTimelineSourceCollector.collect(from: [export]),
+            container: container,
+            skipNaming: true,
+            progress: { _, _ in }
+        )
+        let afterAgain = try Self.audit(container)
+        print("FULL second run: \(again.summary)")
+        print("FULL after second run: \(afterAgain)")
+        XCTAssertEqual(afterAgain.visits, after.visits, "re-importing adds no visits")
+        XCTAssertEqual(afterAgain.moves, after.moves, "re-importing adds no trips")
+        XCTAssertEqual(afterAgain.samples, after.samples, "re-importing adds no fixes")
+    }
+
+    // MARK: Audit
+
+    struct Audit: CustomStringConvertible {
+        var days = 0
+        var visits = 0
+        var importedVisits = 0
+        var moves = 0
+        var importedMoves = 0
+        var samples = 0
+        var googleSamples = 0
+        var movesWithoutEnds = 0
+        /// Live visits that overlap the previous one by more than five minutes.
+        var overlappingVisits = 0
+        /// Live trips that overlap a visit (other than their own ends) by more than five minutes.
+        var tripsOverlappingVisits = 0
+        var importedVisitsByYear: [Int: Int] = [:]
+
+        var description: String {
+            let years = importedVisitsByYear.sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" }.joined(separator: " ")
+            return "days=\(days) visits=\(visits) (imported \(importedVisits)) moves=\(moves) (imported \(importedMoves)) samples=\(samples) (google \(googleSamples)) movesWithoutEnds=\(movesWithoutEnds) overlappingVisits=\(overlappingVisits) tripsOverlappingVisits=\(tripsOverlappingVisits) importedByYear=[\(years)]"
+        }
+    }
+
+    @MainActor
+    static func audit(_ container: ModelContainer) throws -> Audit {
+        let context = ModelContext(container)
+        var audit = Audit()
+        audit.days = try context.fetchCount(FetchDescriptor<DayTimeline>())
+        audit.samples = try context.fetchCount(FetchDescriptor<LocationSample>())
+        let google = LocationSampleSource.googleTimelineImport.rawValue
+        audit.googleSamples = try context.fetchCount(FetchDescriptor<LocationSample>(predicate: #Predicate { $0.sourceRawValue == google }))
+
+        let visits = try context.fetch(FetchDescriptor<VisitPlace>.live(sortBy: [SortDescriptor(\.arrivalDate)]))
+        audit.visits = visits.count
+        let calendar = Calendar(identifier: .gregorian)
+        var latestEnd: Date?
+        for visit in visits {
+            if visit.origin == .imported {
+                audit.importedVisits += 1
+                audit.importedVisitsByYear[calendar.component(.year, from: visit.arrivalDate), default: 0] += 1
+            }
+            let end = visit.departureDate ?? visit.arrivalDate
+            if let latestEnd, latestEnd.timeIntervalSince(visit.arrivalDate) > 5 * 60 {
+                audit.overlappingVisits += 1
+            }
+            latestEnd = max(latestEnd ?? end, end)
+        }
+
+        let moves = try context.fetch(FetchDescriptor<MoveSegment>.live(sortBy: [SortDescriptor(\.startDate)]))
+        audit.moves = moves.count
+        var visitIndex = 0
+        for move in moves {
+            if move.origin == .imported { audit.importedMoves += 1 }
+            if move.startPlace == nil || move.endPlace == nil { audit.movesWithoutEnds += 1 }
+            while visitIndex < visits.count, (visits[visitIndex].departureDate ?? visits[visitIndex].arrivalDate) < move.startDate {
+                visitIndex += 1
+            }
+            var index = visitIndex
+            while index < visits.count, visits[index].arrivalDate < move.endDate {
+                let visit = visits[index]
+                if visit !== move.startPlace, visit !== move.endPlace {
+                    let overlap = min(move.endDate, visit.departureDate ?? visit.arrivalDate)
+                        .timeIntervalSince(max(move.startDate, visit.arrivalDate))
+                    if overlap > 5 * 60 {
+                        audit.tripsOverlappingVisits += 1
+                        break
+                    }
+                }
+                index += 1
+            }
+        }
+        return audit
+    }
+
+    // MARK: Helpers
+
+    static func stagingRoot() -> URL {
+        // A worktree sits inside the main checkout, which holds the private files.
+        var directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        var staging = directory.appending(path: "import-staging")
+        while !FileManager.default.fileExists(atPath: staging.path), directory.pathComponents.count > 1 {
+            directory = directory.deletingLastPathComponent()
+            staging = directory.appending(path: "import-staging")
+        }
+        return staging
+    }
+
+    static func latestDeviceBackupStore(in staging: URL) throws -> URL {
+        let backups = try FileManager.default.contentsOfDirectory(atPath: staging.path)
+            .filter { $0.hasPrefix("device-backup-") }
+            .sorted()
+        for name in backups.reversed() {
+            let store = staging.appending(path: name)
+                .appending(path: "group-container/Library/Application Support/default.store")
+            if FileManager.default.fileExists(atPath: store.path) { return store }
+        }
+        throw XCTSkip("No device backup with a timeline store under import-staging")
+    }
+
+    static func makeContainer(storeURL: URL) throws -> ModelContainer {
+        let timelineSchema = Schema(MovesTimelineSchema.models)
+        let cacheSchema = Schema([ShareMapAggregate.self])
+        return try ModelContainer(
+            for: Schema(MovesTimelineSchema.models + [ShareMapAggregate.self]),
+            configurations: [
+                ModelConfiguration(schema: timelineSchema, url: storeURL, cloudKitDatabase: .none),
+                ModelConfiguration(
+                    "ShareMapCache",
+                    schema: cacheSchema,
+                    url: storeURL.deletingLastPathComponent().appending(path: "ShareMapCache.store"),
+                    cloudKitDatabase: .none
+                ),
+            ]
+        )
+    }
+}
+
+/// Prints each new import stage with how long the last one took and the memory in use.
+private final class StageLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private let clock: ContinuousClock
+    private let meter: MemoryMeter
+    private var lastStage = ""
+    private var stageStart: ContinuousClock.Instant
+
+    init(clock: ContinuousClock, meter: MemoryMeter) {
+        self.clock = clock
+        self.meter = meter
+        stageStart = clock.now
+    }
+
+    func note(_ fraction: Double, _ text: String) {
+        let stage = text.components(separatedBy: CharacterSet.decimalDigits).first ?? text
+        lock.lock()
+        defer { lock.unlock() }
+        guard stage != lastStage else { return }
+        print("FULL stage \(String(format: "%.3f", fraction)) after \(clock.now - stageStart) [\(meter.currentMB) MB]: \(text)")
+        lastStage = stage
+        stageStart = clock.now
+    }
+}
+
+/// Samples this process's memory footprint (what jetsam counts on the phone).
+private final class MemoryMeter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var peak: UInt64 = 0
+    private var running = false
+
+    static func footprint() -> UInt64 {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        return result == KERN_SUCCESS ? info.phys_footprint : 0
+    }
+
+    var peakMB: Int { lock.lock(); defer { lock.unlock() }; return Int(peak / 1_048_576) }
+    var currentMB: Int { Int(Self.footprint() / 1_048_576) }
+
+    func start() {
+        lock.lock(); running = true; peak = Self.footprint(); lock.unlock()
+        Thread.detachNewThread { [self] in
+            while true {
+                let value = Self.footprint()
+                lock.lock()
+                peak = max(peak, value)
+                let keepGoing = running
+                lock.unlock()
+                if !keepGoing { return }
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+        }
+    }
+
+    func stop() { lock.lock(); running = false; lock.unlock() }
 }

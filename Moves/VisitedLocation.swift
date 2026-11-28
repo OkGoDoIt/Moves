@@ -2237,6 +2237,132 @@ final class SwiftDataTimelineRepository: TimelineRepository {
         return report
     }
 
+    /// Retires photo-built stops and trips that a continuous history now accounts for.
+    ///
+    /// Photo history yields to any recorded stop when it is built, so this keeps that rule
+    /// when the recorded history (a Google Timeline import) arrives second. A stop or trip
+    /// the person named, commented on, confirmed, or dismissed stays, and so does a stop the
+    /// new history already uses as a trip's end. Photos move to the recorded stop that covers
+    /// them, or stay on the day.
+    ///
+    /// - Parameter windows: The stays and trips the new history covers, in any order.
+    /// - Returns: How many stops and trips were retired.
+    @discardableResult
+    func retirePhotoInferredItems(coveredBy windows: [DateInterval]) throws -> Int {
+        let minimumOverlap: TimeInterval = 5 * 60
+        let covered = Self.mergedIntervals(windows)
+        guard let first = covered.first, let last = covered.last else { return 0 }
+        let rangeStart = first.start.addingTimeInterval(-24 * 60 * 60)
+        let rangeEnd = last.end.addingTimeInterval(24 * 60 * 60)
+        let photoOrigin = TimelineItemOrigin.photoInferred.rawValue
+
+        func coveredTime(from start: Date, to end: Date) -> TimeInterval {
+            var low = 0
+            var high = covered.count
+            while low < high {
+                let middle = (low + high) / 2
+                if covered[middle].end <= start { low = middle + 1 } else { high = middle }
+            }
+            var total: TimeInterval = 0
+            var index = low
+            while index < covered.count, covered[index].start < end {
+                total += max(0, min(end, covered[index].end).timeIntervalSince(max(start, covered[index].start)))
+                index += 1
+            }
+            return total
+        }
+        func isCovered(from start: Date, to end: Date) -> Bool {
+            let length = max(end.timeIntervalSince(start), 0)
+            return coveredTime(from: start, to: end) >= min(minimumOverlap, max(length, 1))
+        }
+
+        let photoVisits = try modelContext.fetch(FetchDescriptor<VisitPlace>(predicate: #Predicate {
+            $0.dayTimeline != nil && $0.originRaw == photoOrigin
+                && $0.arrivalDate >= rangeStart && $0.arrivalDate <= rangeEnd
+        }))
+        let photoMoves = try modelContext.fetch(FetchDescriptor<MoveSegment>(predicate: #Predicate {
+            $0.dayTimeline != nil && $0.originRaw == photoOrigin
+                && $0.startDate >= rangeStart && $0.startDate <= rangeEnd
+        }))
+        guard !photoVisits.isEmpty || !photoMoves.isEmpty else { return 0 }
+        let recordedVisits = try modelContext.fetch(FetchDescriptor<VisitPlace>(
+            predicate: #Predicate {
+                $0.dayTimeline != nil && $0.originRaw != photoOrigin
+                    && $0.arrivalDate >= rangeStart && $0.arrivalDate <= rangeEnd
+            },
+            sortBy: [SortDescriptor(\.arrivalDate)]
+        ))
+
+        func recordedVisit(at date: Date) -> VisitPlace? {
+            var low = 0
+            var high = recordedVisits.count
+            while low < high {
+                let middle = (low + high) / 2
+                if recordedVisits[middle].arrivalDate <= date { low = middle + 1 } else { high = middle }
+            }
+            var index = low - 1
+            // Stays may overlap a little; look back over a few.
+            while index >= 0, index >= low - 4 {
+                let visit = recordedVisits[index]
+                if (visit.departureDate ?? visit.arrivalDate) >= date { return visit }
+                index -= 1
+            }
+            return nil
+        }
+
+        var retiredVisitIDs = Set<PersistentIdentifier>()
+        var orphanedMoveIDs = Set<PersistentIdentifier>()
+        for visit in photoVisits {
+            let departure = visit.departureDate ?? visit.arrivalDate
+            guard isCovered(from: visit.arrivalDate, to: departure) else { continue }
+            if visit.userLabel != nil || visit.comment != nil
+                || visit.reviewState == .confirmed || visit.reviewState == .dismissed {
+                continue
+            }
+            let usedByRecordedTrip = (visit.incomingMovesStorage ?? []).contains { $0.origin != .photoInferred && $0.dayTimeline != nil }
+                || (visit.outgoingMovesStorage ?? []).contains { $0.origin != .photoInferred && $0.dayTimeline != nil }
+            if usedByRecordedTrip { continue }
+            for photo in visit.photoAttachments where photo.visitPlace?.persistentModelID == visit.persistentModelID {
+                if let target = recordedVisit(at: photo.capturedAt) {
+                    photo.visitPlace = target
+                    photo.dayTimeline = target.dayTimeline
+                }
+            }
+            // Retiring clears the trips' ends, so note which trips lose one first.
+            for move in (visit.incomingMovesStorage ?? []) + (visit.outgoingMovesStorage ?? []) {
+                orphanedMoveIDs.insert(move.persistentModelID)
+            }
+            retiredVisitIDs.insert(visit.persistentModelID)
+            retire(visit)
+        }
+
+        var retiredMoveCount = 0
+        for move in photoMoves {
+            let lostAnEnd = orphanedMoveIDs.contains(move.persistentModelID)
+            let protected = move.comment != nil || move.reviewState == .confirmed || move.reviewState == .dismissed
+                || move.transportModeSource == .user
+            guard !protected, lostAnEnd || isCovered(from: move.startDate, to: move.endDate) else { continue }
+            retire(move)
+            retiredMoveCount += 1
+        }
+        if !retiredVisitIDs.isEmpty || retiredMoveCount > 0 {
+            try saveIfNeeded()
+        }
+        return retiredVisitIDs.count + retiredMoveCount
+    }
+
+    private static func mergedIntervals(_ windows: [DateInterval]) -> [DateInterval] {
+        var merged: [DateInterval] = []
+        for window in windows.sorted(by: { $0.start < $1.start }) {
+            if let last = merged.last, window.start <= last.end {
+                merged[merged.count - 1] = DateInterval(start: last.start, end: max(last.end, window.end))
+            } else {
+                merged.append(window)
+            }
+        }
+        return merged
+    }
+
     /// Runs one saved step of a long import. The lookup tables cover only `range`, so
     /// a step costs the same however much history is already stored, and nothing is
     /// held between steps. Every date `body` writes must fall inside `range`.
@@ -2341,6 +2467,11 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             // Resuming a staged import may revisit already committed segments. Never
             // stretch a corrected/reviewed/imported stay back to the source file's times.
             if match.origin != .sensor || match.reviewState == .confirmed || match.reviewState == .dismissed {
+                // A photo-built stop that recorded history agrees with is now backed by it,
+                // so the photo cleanup after the import keeps it.
+                if match.origin == .photoInferred, source == .googleTimelineImport {
+                    match.origin = .imported
+                }
                 return (match, false)
             }
             // Grow the visit toward the stay's bounds, but never across a
@@ -2464,6 +2595,10 @@ final class SwiftDataTimelineRepository: TimelineRepository {
             }
             if existing.transportModeSource == .auto, source == .googleTimelineImport, mode != .unknown {
                 existing.transportModeSource = .imported
+            }
+            // Backed by recorded history now, so the photo cleanup keeps it.
+            if existing.origin == .photoInferred, source == .googleTimelineImport {
+                existing.origin = .imported
             }
             report.mergedMoveCount += 1
             return

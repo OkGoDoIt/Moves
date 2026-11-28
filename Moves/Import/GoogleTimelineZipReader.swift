@@ -30,6 +30,10 @@ enum GoogleTimelineZipReader {
         if name == "settings.json" || name == "archive_browser.html" || name == ".ds_store" {
             return false
         }
+        // macOS leaves `._` resource-fork twins on external drives and in `__MACOSX/` in zips.
+        if name.hasPrefix("._") || path.lowercased().contains("__macosx/") {
+            return false
+        }
         if name == "records.json" || name == "timeline.json" {
             return true
         }

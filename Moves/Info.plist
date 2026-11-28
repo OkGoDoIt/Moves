@@ -37,6 +37,7 @@
 		<string>$(PRODUCT_BUNDLE_IDENTIFIER).placeGeocodeBackfill</string>
 		<string>$(PRODUCT_BUNDLE_IDENTIFIER).photoHistory</string>
 		<string>$(PRODUCT_BUNDLE_IDENTIFIER).photoHistoryNow.*</string>
+		<string>$(PRODUCT_BUNDLE_IDENTIFIER).importNow.*</string>
 	</array>
 	<key>CFBundleIcons</key>
 	<dict>

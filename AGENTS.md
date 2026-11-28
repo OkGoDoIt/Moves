@@ -219,6 +219,20 @@ with private PhotoKit property sets without asking Roger: he chose public API on
   iCloud library or another device on the account can still pass the camera test; the
   plausibility check is the only guard.
 
+## Google Timeline import
+
+Semantic Location History is Google's own reading of `Records.json`, so it wins: a Records
+fix inside any semantic visit or trip is covered wherever it lies, Records fill only the
+gaps between them, each gap is segmented on its own, and in each hour only the device with
+the most fixes is kept (a tablet at home otherwise draws zigzags). A `placeVisit`'s
+`childVisits` are not imported: they cover the parent's hours. After saving, photo-built
+stops and trips the history covers are retired (`retirePhotoInferredItems`), except ones
+the person named, commented on, confirmed, or dismissed; one the history matched becomes
+`.imported` instead. Check a change with the opt-in full run
+(`TEST_RUNNER_MOVES_GOOGLE_FULL=1`, `GoogleTimelineFullImportTests`) against the export in
+`import-staging/GoogleTimeline/full-2024-12/`: on build 81, 4 minutes on the Mac, 408 MB
+peak, re-import adds nothing.
+
 ## Git hygiene
 
 The upstream tree committed `build/`, `.DS_Store`, and `xcuserdata/`. This fork has a `.gitignore` for those; do not add more DerivedData or `*.xcuserstate`. Do not `git rm --cached` the historical `build/` tree unless the user asks for a cleanup commit.
@@ -229,8 +243,11 @@ The upstream tree committed `build/`, `.DS_Store`, and `xcuserdata/`. This fork 
 ## Upstream integration maintenance
 
 Read `UPSTREAM.md` before pulling upstream again. Reviewed tip is not merged ancestry.
-The local `DurableImportQueue` owns route/Google/archive imports; interrupted work resumes
-explicitly and must preserve corrections and removal tombstones. `DetailedExploration`
+The local `DurableImportQueue` owns route/Google/archive imports. A running import holds a
+continued-processing task (`importNow.*`), so it goes on after the person leaves. Work the
+system or a relaunch interrupted starts again by itself the next time Moves is open; only
+the person's own Pause waits for Resume, and a job cut off three times in a row stops as
+failed. Re-running must preserve corrections and removal tombstones. `DetailedExploration`
 uses original ground observations plus separately stored undated Fog coverage. Coverage
 exports obey privacy zones. `Packages/RouteFileKit` and `Packages/FogOfWorldKit` are
 vendored upstream source, with fork adaptations recorded in `UPSTREAM.md`; Quick Look

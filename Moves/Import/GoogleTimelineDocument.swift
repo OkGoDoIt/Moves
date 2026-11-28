@@ -97,73 +97,64 @@ struct GoogleOccupiedWindow: Sendable {
     var isVisit: Bool
 }
 
-/// Day-bucketed lookup so Records streaming can skip points already covered
-/// by semantic visits (time + ~150 m) and trips (time only).
+/// The hours semantic history already accounts for, so `Records.json` only fills the rest.
+///
+/// Semantic visits and trips are Google's own reading of those same Records fixes, so a fix
+/// inside one is covered wherever it lies: one far from the visit is Wi-Fi or cell noise, or
+/// another device signed in to the account. Gaps are numbered so that fixes on either side of
+/// a semantic visit or trip are never joined into one stay across it.
 struct GoogleOccupancyIndex: Sendable {
-    private var visitBuckets: [Int: [GoogleOccupiedWindow]] = [:]
-    private var moveBuckets: [Int: [GoogleOccupiedWindow]] = [:]
+    /// Seconds of slack around each visit and trip.
+    static let slack: TimeInterval = 2 * 60
 
-    /// Metres: a Records fix inside this of a visit at the same time is a duplicate.
-    static let visitMatchDistance: CLLocationDistance = 150
-    /// Seconds of slack around a visit when matching Records points.
-    static let visitMatchSlack: TimeInterval = 2 * 60
-    /// Cheap degree gate equivalent to a bit more than `visitMatchDistance`.
-    fileprivate static let degreeGate = 0.002
+    /// Merged, sorted covered spans.
+    private var spans: [(start: Date, end: Date)] = []
 
     init(windows: [GoogleOccupiedWindow]) {
-        for window in windows {
-            let startDay = Self.dayOrdinal(window.start)
-            let endDay = Self.dayOrdinal(window.end)
-            for day in startDay...max(startDay, endDay) {
-                if window.isVisit {
-                    visitBuckets[day, default: []].append(window)
-                } else {
-                    moveBuckets[day, default: []].append(window)
-                }
+        let sorted = windows
+            .map { (start: $0.start.addingTimeInterval(-Self.slack), end: max($0.end, $0.start).addingTimeInterval(Self.slack)) }
+            .sorted { $0.start < $1.start }
+        for window in sorted {
+            if let last = spans.last, window.start <= last.end {
+                spans[spans.count - 1].end = max(last.end, window.end)
+            } else {
+                spans.append(window)
             }
         }
     }
 
-    /// True when this Records fix already sits on a semantic visit or trip.
+    /// True when semantic history already accounts for the moment of this Records fix.
     func covers(_ point: LocationLogPoint) -> Bool {
-        let day = Self.dayOrdinal(point.timestamp)
-        for candidate in (day - 1)...(day + 1) {
-            if let visits = visitBuckets[candidate] {
-                for visit in visits where visit.coversVisit(point) {
-                    return true
-                }
-            }
-            if let moves = moveBuckets[candidate] {
-                for move in moves where point.timestamp >= move.start && point.timestamp <= move.end {
-                    return true
-                }
-            }
-        }
-        return false
+        let index = spansStarted(by: point.timestamp)
+        return index > 0 && point.timestamp <= spans[index - 1].end
     }
 
-    private static func dayOrdinal(_ date: Date) -> Int {
-        Int(date.timeIntervalSince1970 / 86_400)
+    /// Which uncovered gap a fix falls in: fixes with the same number have no semantic
+    /// visit or trip between them.
+    func gapNumber(for date: Date) -> Int {
+        spansStarted(by: date)
+    }
+
+    /// Number of covered spans starting at or before `date`.
+    private func spansStarted(by date: Date) -> Int {
+        var low = 0
+        var high = spans.count
+        while low < high {
+            let middle = (low + high) / 2
+            if spans[middle].start <= date {
+                low = middle + 1
+            } else {
+                high = middle
+            }
+        }
+        return low
     }
 }
 
-private extension GoogleOccupiedWindow {
-    func coversVisit(_ point: LocationLogPoint) -> Bool {
-        let slack = GoogleOccupancyIndex.visitMatchSlack
-        guard point.timestamp >= start.addingTimeInterval(-slack),
-              point.timestamp <= end.addingTimeInterval(slack) else {
-            return false
-        }
-        if abs(point.latitude - latitude) > GoogleOccupancyIndex.degreeGate
-            || abs(point.longitude - longitude) > GoogleOccupancyIndex.degreeGate {
-            return false
-        }
-        let distance = LocationLogGeometry.distance(
-            from: point.coordinate,
-            to: CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
-        )
-        return distance <= GoogleOccupancyIndex.visitMatchDistance
-    }
+/// One `Records.json` fix and the device that recorded it.
+struct GoogleTimelineRecord: Sendable {
+    var point: LocationLogPoint
+    var deviceTag: Int?
 }
 
 // MARK: - Parser
@@ -221,14 +212,13 @@ enum GoogleTimelineParser {
         for item in objects {
             guard let object = item as? [String: Any] else { continue }
             if let visit = object["placeVisit"] as? [String: Any] {
-                let stays = parsePlaceVisit(visit, includeChildren: true)
-                if stays.isEmpty {
-                    draft.skippedSegmentCount += 1
+                // `childVisits` are places inside this one (a café in a mall) over the same
+                // hours. The timeline shows one stay at a time, so the parent stands for them.
+                if let stay = parseOnePlaceVisit(visit) {
+                    draft.stays.append(stay)
+                    draft.occupancy.append(window(for: stay))
                 } else {
-                    for stay in stays {
-                        draft.stays.append(stay)
-                        draft.occupancy.append(window(for: stay))
-                    }
+                    draft.skippedSegmentCount += 1
                 }
             } else if let segment = object["activitySegment"] as? [String: Any] {
                 if let move = parseActivitySegment(segment) {
@@ -297,8 +287,14 @@ enum GoogleTimelineParser {
 
     /// One `locations[]` object from Records.json. Returns nil for unusable fixes.
     static func parseRecordObject(data: Data) -> LocationLogPoint? {
-        guard let object = (try? jsonObject(data)) as? [String: Any] else { return nil }
-        return parseRecord(object)
+        parseRecordWithDevice(data: data)?.point
+    }
+
+    /// One `locations[]` object with the device that recorded it, when the export says.
+    static func parseRecordWithDevice(data: Data) -> GoogleTimelineRecord? {
+        guard let object = (try? jsonObject(data)) as? [String: Any],
+              let point = parseRecord(object) else { return nil }
+        return GoogleTimelineRecord(point: point, deviceTag: GoogleTimelineJSON.int(object["deviceTag"]))
     }
 
     static func parseRecord(_ object: [String: Any]) -> LocationLogPoint? {
@@ -323,22 +319,6 @@ enum GoogleTimelineParser {
     }
 
     // MARK: Semantic pieces
-
-    private static func parsePlaceVisit(
-        _ visit: [String: Any],
-        includeChildren: Bool
-    ) -> [LocationLogStay] {
-        var stays: [LocationLogStay] = []
-        if let stay = parseOnePlaceVisit(visit) {
-            stays.append(stay)
-        }
-        if includeChildren, let children = visit["childVisits"] as? [[String: Any]] {
-            for child in children {
-                stays.append(contentsOf: parsePlaceVisit(child, includeChildren: true))
-            }
-        }
-        return stays
-    }
 
     private static func parseOnePlaceVisit(_ visit: [String: Any]) -> LocationLogStay? {
         let location = visit["location"] as? [String: Any] ?? [:]
@@ -801,9 +781,18 @@ enum GoogleTimelineCoordinates {
             ]
         }
         let span = max(end.timeIntervalSince(start), 1)
+        // Waypoints carry no times. Spacing them by distance keeps the speed even along
+        // the route; spacing them by count would show a sprint between far-apart points.
+        var travelled: [CLLocationDistance] = [0]
+        travelled.reserveCapacity(coordinates.count)
+        for (previous, next) in zip(coordinates, coordinates.dropFirst()) {
+            travelled.append(travelled[travelled.count - 1] + LocationLogGeometry.distance(from: previous, to: next))
+        }
+        let total = travelled[travelled.count - 1]
         let last = Double(coordinates.count - 1)
         return coordinates.enumerated().map { index, coordinate in
-            let timestamp = start.addingTimeInterval(span * Double(index) / last)
+            let share = total > 0 ? travelled[index] / total : Double(index) / last
+            let timestamp = start.addingTimeInterval(span * share)
             return LocationLogPoint(
                 latitude: coordinate.latitude,
                 longitude: coordinate.longitude,

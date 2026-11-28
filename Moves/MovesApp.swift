@@ -23,6 +23,7 @@ final class MovesAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
         RouteMatchBackgroundTask.register()
         PlaceGeocodeBackfill.register()
         PhotoHistoryBackgroundTask.register()
+        DurableImportQueue.registerBackgroundTask()
         return true
     }
 

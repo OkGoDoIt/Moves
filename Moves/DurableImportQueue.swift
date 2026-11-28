@@ -1,3 +1,4 @@
+import BackgroundTasks
 import Combine
 import Foundation
 import SwiftData
@@ -14,6 +15,11 @@ struct SavedImport: Codable, Identifiable, Equatable {
     var state: State = .queued
     var createdAt = Date()
     var message: String?
+    /// Times a run was cut off by the app closing, a crash, or a restart.
+    var interruptions: Int? = nil
+    /// False when the system paused the job, so it carries on by itself. Older saved
+    /// queues have no value and are treated as the person's own pause.
+    var pausedByPerson: Bool? = nil
 }
 
 /// Atomic queue persistence; unreadable or newer files must never be replaced with an empty queue.
@@ -21,13 +27,32 @@ struct SavedImportStore {
     struct Envelope: Codable { var version = 1; var jobs: [SavedImport] }
     let directory: URL
     var manifest: URL { directory.appendingPathComponent("queue.json") }
+    /// A job that was cut off this many times in a row stops, so one that brings the
+    /// app down cannot do it on every launch.
+    static let interruptionLimit = 3
+
+    /// Interrupted and system-paused jobs come back queued, so they finish by themselves.
     func load() throws -> [SavedImport] {
         guard FileManager.default.fileExists(atPath: manifest.path) else { return [] }
         let value = try JSONDecoder().decode(Envelope.self, from: Data(contentsOf: manifest))
         guard value.version == 1 else { throw CocoaError(.fileReadUnsupportedScheme) }
         return value.jobs.map { job in
             var restored = job
-            if job.state == .running || job.state == .queued { restored.state = .paused }
+            switch job.state {
+            case .running:
+                let interruptions = (job.interruptions ?? 0) + 1
+                restored.interruptions = interruptions
+                if interruptions >= Self.interruptionLimit {
+                    restored.state = .failed
+                    restored.message = String(localized: "Stopped three times before finishing.")
+                } else {
+                    restored.state = .queued
+                }
+            case .paused where job.pausedByPerson == false:
+                restored.state = .queued
+            case .queued, .paused, .completed, .failed:
+                break
+            }
             return restored
         }
     }
@@ -57,6 +82,7 @@ final class DurableImportQueue: ObservableObject {
     @Published private(set) var storageError: String?
     @Published private(set) var isStaging = false
     @Published private(set) var workingJobID: UUID?
+    @Published private(set) var runStartedAt: Date?
     let routes: RouteFileImporter
     let google: GoogleTimelineImporter
     let archive: TimelineArchiveImporter
@@ -72,7 +98,12 @@ final class DurableImportQueue: ObservableObject {
         google = GoogleTimelineImporter(modelContext: context)
         archive = TimelineArchiveImporter(modelContext: context)
         store = SavedImportStore(directory: directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Moves/ImportQueue", isDirectory: true))
-        do { jobs = try store.load() } catch { storageError = error.localizedDescription }
+        do {
+            jobs = try store.load()
+            // Saves what `load` restored, so an interruption is counted only once.
+            if !jobs.isEmpty { try store.save(jobs) }
+        } catch { storageError = error.localizedDescription }
+        if !ProcessInfo.processInfo.isRunningUnitTests { Self.shared = self }
         for publisher in [routes.objectWillChange, google.objectWillChange, archive.objectWillChange] {
             publisher.sink { [weak self] in self?.objectWillChange.send() }.store(in: &observers)
         }
@@ -117,14 +148,21 @@ final class DurableImportQueue: ObservableObject {
 
     func resume(_ id: UUID) {
         guard let state = jobs.first(where: { $0.id == id })?.state, state == .paused || state == .failed else { return }
-        guard update(id, { $0.state = .queued; $0.message = nil }) else { return }
+        guard update(id, { $0.state = .queued; $0.message = nil; $0.interruptions = nil; $0.pausedByPerson = nil }) else { return }
         startIfNeeded()
     }
+    /// The person's own Pause: the job waits until they resume it.
     func pause(_ id: UUID) {
         guard let state = jobs.first(where: { $0.id == id })?.state, state == .queued || state == .running else { return }
         let wasRunning = current?.id == id
-        guard update(id, { $0.state = .paused }) else { return }
+        guard update(id, { $0.state = .paused; $0.pausedByPerson = true }) else { return }
         if wasRunning { runner?.cancel() }
+    }
+    /// The system took the time back: stop now and carry on the next time Moves is open.
+    private func systemInterrupted() {
+        guard let id = current?.id else { return }
+        guard update(id, { $0.state = .queued; $0.pausedByPerson = false }) else { return }
+        runner?.cancel()
     }
     func remove(_ id: UUID) {
         guard workingJobID != id else { return }
@@ -147,18 +185,24 @@ final class DurableImportQueue: ObservableObject {
         catch { storageError = error.localizedDescription; runner?.cancel(); return false }
     }
     private func startIfNeeded() {
-        guard runner == nil, isActive, storageError == nil, jobs.contains(where: { $0.state == .queued }) else { return }
+        guard runner == nil, isActive || continuedTask != nil, storageError == nil,
+              jobs.contains(where: { $0.state == .queued }) else { return }
         runner = Task {
             await TimelineSchemaUpgrader.waitUntilFinished()
-            while !Task.isCancelled, isActive, let job = jobs.first(where: { $0.state == .queued }) {
+            while !Task.isCancelled, isActive || continuedTask != nil, let job = jobs.first(where: { $0.state == .queued }) {
                 guard update(job.id, { $0.state = .running }) else { break }
+                if isActive, continuedTask == nil {
+                    requestContinuing(for: job)
+                }
                 backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "Finish import") { [weak self] in
                     Task { @MainActor in
                         guard let self else { return }
-                        if let id = self.current?.id { self.pause(id) }
+                        // A continued task keeps the import going; without one, the time is up.
+                        if self.continuedTask == nil { self.systemInterrupted() }
                         self.endBackgroundTime()
                     }
                 }
+                runStartedAt = .now
                 workingJobID = job.id
                 let urls = store.sources(for: job)
                 var result: String?
@@ -175,6 +219,7 @@ final class DurableImportQueue: ObservableObject {
                     result = archive.lastReport?.summary; error = archive.lastErrorMessage
                 }
                 workingJobID = nil
+                runStartedAt = nil
                 endBackgroundTime()
                 NotificationCenter.default.post(name: .movesLocationSamplesDidChange, object: nil)
                 if !Task.isCancelled, jobs.first(where: { $0.id == job.id })?.state == .running {
@@ -185,12 +230,115 @@ final class DurableImportQueue: ObservableObject {
             }
             runner = nil
             startIfNeeded()
+            finishContinuedTaskIfIdle()
         }
     }
     private func endBackgroundTime() {
         guard backgroundTask != .invalid else { return }
         UIApplication.shared.endBackgroundTask(backgroundTask)
         backgroundTask = .invalid
+    }
+
+    // MARK: Continuing after the person leaves
+
+    /// Must match `BGTaskSchedulerPermittedIdentifiers` (`importNow.*`) in `Info.plist`.
+    static let continuedIdentifier = "\(MovesAppIdentity.bundleIdentifier).importNow.queue"
+    /// The process's one queue, for the continued task, which starts without a view.
+    private(set) static weak var shared: DurableImportQueue?
+    private var continuedTask: BGContinuedProcessingTask?
+    private var continuedReporting: Task<Void, Never>?
+
+    static func registerBackgroundTask() {
+        guard !ProcessInfo.processInfo.isRunningUnitTests else { return }
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: continuedIdentifier, using: .main) { task in
+            guard let task = task as? BGContinuedProcessingTask else { return }
+            MainActor.assumeIsolated {
+                guard let queue = shared else {
+                    task.setTaskCompleted(success: false)
+                    return
+                }
+                queue.hold(task)
+            }
+        }
+    }
+
+    /// Asks the system to keep this import going after the person leaves, with its
+    /// progress on the Lock Screen. Only possible while Moves is open.
+    private func requestContinuing(for job: SavedImport) {
+        guard !ProcessInfo.processInfo.isRunningUnitTests else { return }
+        let request = BGContinuedProcessingTaskRequest(
+            identifier: Self.continuedIdentifier,
+            title: title(for: job),
+            subtitle: String(localized: "Starting…")
+        )
+        request.strategy = .queue
+        try? BGTaskScheduler.shared.submit(request)
+    }
+
+    private func hold(_ task: BGContinuedProcessingTask) {
+        guard current != nil || jobs.contains(where: { $0.state == .queued }) else {
+            task.setTaskCompleted(success: true)
+            return
+        }
+        continuedTask = task
+        task.progress.totalUnitCount = 1_000
+        task.expirationHandler = { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                self.systemInterrupted()
+                self.releaseContinuedTask(success: false)
+            }
+        }
+        continuedReporting = Task { [weak self] in
+            var subtitle = ""
+            while !Task.isCancelled, let self, let task = self.continuedTask {
+                // The system ends a task whose progress stops moving, so creep a little
+                // while one long step is under way.
+                let done = Int64(((self.progress ?? 0) * 1_000).rounded())
+                let shown = task.progress.completedUnitCount
+                task.progress.completedUnitCount = min(max(done, shown + (shown < 990 ? 1 : 0)), 999)
+                let text = self.progressText
+                if !text.isEmpty, text != subtitle, let job = self.current {
+                    subtitle = text
+                    task.updateTitle(self.title(for: job), subtitle: text)
+                }
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+        startIfNeeded()
+    }
+
+    private func finishContinuedTaskIfIdle() {
+        guard continuedTask != nil, runner == nil else { return }
+        let finished = !jobs.contains { $0.state == .queued || $0.state == .running }
+        releaseContinuedTask(success: finished)
+    }
+
+    private func releaseContinuedTask(success: Bool) {
+        continuedReporting?.cancel()
+        continuedReporting = nil
+        guard let task = continuedTask else { return }
+        continuedTask = nil
+        if success { task.progress.completedUnitCount = task.progress.totalUnitCount }
+        task.setTaskCompleted(success: success)
+    }
+
+    private func title(for job: SavedImport) -> String {
+        switch job.kind {
+        case .google: String(localized: "Importing Google Timeline")
+        case .routes: String(localized: "Importing routes")
+        case .archive: String(localized: "Importing timeline archive")
+        }
+    }
+
+    // MARK: Time left
+
+    /// Measured from this run's pace, once enough of it is done to say.
+    var estimatedTimeLeft: TimeInterval? {
+        guard let started = runStartedAt, let fraction = progress, fraction >= 0.05, fraction < 1 else { return nil }
+        let elapsed = Date.now.timeIntervalSince(started)
+        guard elapsed >= 20 else { return nil }
+        return elapsed * (1 - fraction) / fraction
     }
 }
 
@@ -210,6 +358,9 @@ struct ImportQueueCard: View {
                         if job.state == .running {
                             if let progress = queue.progress { ProgressView(value: progress) } else { ProgressView() }
                             Text(queue.progressText).font(.caption).foregroundStyle(.secondary)
+                            if let left = queue.estimatedTimeLeft {
+                                Text(timeLeftText(left)).font(.caption).foregroundStyle(.secondary)
+                            }
                             Button("Pause") { queue.pause(job.id) }
                         } else {
                             Text(label(for: job)).font(.subheadline).foregroundStyle(.secondary)
@@ -226,6 +377,14 @@ struct ImportQueueCard: View {
             }
         }
     }
+    private func timeLeftText(_ seconds: TimeInterval) -> String {
+        guard seconds >= 60 else { return String(localized: "Less than a minute left") }
+        let minutes = Int((seconds / 60).rounded(.up))
+        let duration = Duration.seconds(minutes * 60)
+            .formatted(.units(allowed: [.hours, .minutes], width: .wide, maximumUnitCount: 2))
+        return String(localized: "About \(duration) left")
+    }
+
     private func label(for job: SavedImport) -> String {
         switch job.state {
         case .running: String(localized: "Importing…")
